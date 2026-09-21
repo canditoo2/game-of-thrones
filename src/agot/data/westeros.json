@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "verified": false,
+  "notes": [
+    "The 15 unique Westeros cards below are certain (they match the physical component list).",
+    "Their split across the three decks as encoded here is a best-effort reconstruction and is NOT verified.",
+    "Fix `composition` after checking the rulebook; the engine reads the decks from this file.",
+    "Card effects are grouped by a machine-readable `effect` id. Cards whose effect is",
+    "'unimplemented' are drawn, logged, and otherwise ignored by the engine for now."
+  ],
+  "cards": {
+    "mustering": { "name": "Mustering", "effect": "mustering" },
+    "supply": { "name": "Supply", "effect": "supply" },
+    "game_of_thrones": { "name": "Game of Thrones", "effect": "gain_power_per_crown" },
+    "clash_of_kings": { "name": "Clash of Kings", "effect": "bid_all_tracks" },
+    "dark_wings_dark_words": { "name": "Dark Wings, Dark Words", "effect": "bid_kings_court" },
+    "wildlings_attack": { "name": "Wildlings Attack", "effect": "wildlings_attack" },
+    "winter_is_coming": { "name": "Winter is Coming", "effect": "unimplemented" },
+    "throne_of_blades": { "name": "Throne of Blades", "effect": "unimplemented" },
+    "web_of_lies": { "name": "Web of Lies", "effect": "order_restriction", "restricted_order": "support" },
+    "put_to_the_sword": { "name": "Put to the Sword", "effect": "order_restriction", "restricted_order": "defense" },
+    "sea_of_storms": { "name": "Sea of Storms", "effect": "order_restriction", "restricted_order": "raid" },
+    "storm_of_swords": { "name": "Storm of Swords", "effect": "order_restriction", "restricted_order": "consolidate_power" },
+    "rains_of_autumn": { "name": "Rains of Autumn", "effect": "order_restriction", "restricted_order": "march" },
+    "feast_for_crows": { "name": "Feast for Crows", "effect": "order_restriction", "restricted_order": "consolidate_power" },
+    "last_days_of_summer": { "name": "Last Days of Summer", "effect": "wildlings_calm" }
+  },
+  "composition": {
+    "deck_i": ["mustering", "mustering", "supply", "supply", "game_of_thrones", "dark_wings_dark_words", "clash_of_kings", "winter_is_coming"],
+    "deck_ii": ["game_of_thrones", "clash_of_kings", "dark_wings_dark_words", "throne_of_blades", "web_of_lies", "put_to_the_sword", "sea_of_storms", "storm_of_swords", "rains_of_autumn", "feast_for_crows"],
+    "deck_iii": ["wildlings_attack", "wildlings_attack", "wildlings_attack", "winter_is_coming", "last_days_of_summer", "sea_of_storms", "storm_of_swords", "rains_of_autumn", "put_to_the_sword", "feast_for_crows"]
+  }
+}

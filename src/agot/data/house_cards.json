@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "notes": [
+    "Each house has seven cards. 'strength' is the printed combat strength.",
+    "'swords' is the number of sword icons (extra casualties inflicted on a win).",
+    "'forts' is the number of fortification icons (cancels incoming casualties).",
+    "'ability' is a machine-readable id for special effects; 'none' means the card",
+    "is modelled by its printed stats alone. Special abilities marked",
+    "'unimplemented' currently fall back to printed stats only.",
+    "Stats are cross-checked against two community references. House Martell is",
+    "marked unverified because one reference omits it entirely."
+  ],
+  "houses": {
+    "baratheon": {
+      "verified": true,
+      "cards": [
+        { "id": "patchface", "name": "Patchface", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "melisandre", "name": "Melisandre", "strength": 1, "swords": 1, "forts": 0, "ability": "unimplemented" },
+        { "id": "salladhor_saan", "name": "Salladhor Saan", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "davos_seaworth", "name": "Davos Seaworth", "strength": 2, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "brienne_of_tarth", "name": "Brienne of Tarth", "strength": 2, "swords": 1, "forts": 1, "ability": "unimplemented" },
+        { "id": "renly_baratheon", "name": "Renly Baratheon", "strength": 3, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "stannis_baratheon", "name": "Stannis Baratheon", "strength": 4, "swords": 0, "forts": 0, "ability": "unimplemented" }
+      ]
+    },
+    "lannister": {
+      "verified": true,
+      "cards": [
+        { "id": "cersei_lannister", "name": "Cersei Lannister", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "tyrion_lannister", "name": "Tyrion Lannister", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "kevan_lannister", "name": "Kevan Lannister", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "the_hound", "name": "The Hound", "strength": 2, "swords": 0, "forts": 2, "ability": "unimplemented" },
+        { "id": "jaime_lannister", "name": "Jaime Lannister", "strength": 2, "swords": 1, "forts": 0, "ability": "unimplemented" },
+        { "id": "gregor_clegane", "name": "Gregor Clegane", "strength": 3, "swords": 3, "forts": 0, "ability": "unimplemented" },
+        { "id": "tywin_lannister", "name": "Tywin Lannister", "strength": 4, "swords": 0, "forts": 0, "ability": "unimplemented" }
+      ]
+    },
+    "stark": {
+      "verified": true,
+      "cards": [
+        { "id": "catelyn_stark", "name": "Catelyn Stark", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "blackfish", "name": "Brynden Tully", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "rodrik_cassel", "name": "Rodrik Cassel", "strength": 1, "swords": 0, "forts": 2, "ability": "unimplemented" },
+        { "id": "roose_bolton", "name": "Roose Bolton", "strength": 2, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "greatjon_umber", "name": "Greatjon Umber", "strength": 2, "swords": 1, "forts": 0, "ability": "unimplemented" },
+        { "id": "robb_stark", "name": "Robb Stark", "strength": 3, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "eddard_stark", "name": "Eddard Stark", "strength": 4, "swords": 2, "forts": 0, "ability": "unimplemented" }
+      ]
+    },
+    "greyjoy": {
+      "verified": true,
+      "cards": [
+        { "id": "aeron_damphair", "name": "Aeron Damphair", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "asha_greyjoy", "name": "Asha Greyjoy", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "dagmer_cleftjaw", "name": "Dagmer Cleftjaw", "strength": 1, "swords": 1, "forts": 1, "ability": "unimplemented" },
+        { "id": "theon_greyjoy", "name": "Theon Greyjoy", "strength": 2, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "balon_greyjoy", "name": "Balon Greyjoy", "strength": 2, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "victarion_greyjoy", "name": "Victarion Greyjoy", "strength": 3, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "euron_crows_eye", "name": "Euron Crow's Eye", "strength": 4, "swords": 1, "forts": 0, "ability": "unimplemented" }
+      ]
+    },
+    "tyrell": {
+      "verified": true,
+      "cards": [
+        { "id": "queen_of_thorns", "name": "Queen of Thorns", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "margaery_tyrell", "name": "Margaery Tyrell", "strength": 1, "swords": 0, "forts": 1, "ability": "unimplemented" },
+        { "id": "alester_florent", "name": "Alester Florent", "strength": 1, "swords": 0, "forts": 1, "ability": "unimplemented" },
+        { "id": "garlan_tyrell", "name": "Garlan Tyrell", "strength": 2, "swords": 2, "forts": 0, "ability": "unimplemented" },
+        { "id": "randyll_tarly", "name": "Randyll Tarly", "strength": 2, "swords": 1, "forts": 0, "ability": "unimplemented" },
+        { "id": "loras_tyrell", "name": "Loras Tyrell", "strength": 3, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "mace_tyrell", "name": "Mace Tyrell", "strength": 4, "swords": 0, "forts": 0, "ability": "unimplemented" }
+      ]
+    },
+    "martell": {
+      "verified": false,
+      "note": "Strength distribution and names inferred; one reference omits Martell. Verify against the physical game before trusting these.",
+      "cards": [
+        { "id": "the_red_viper", "name": "The Red Viper", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "ellaria_sand", "name": "Ellaria Sand", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "nymeria_sand", "name": "Nymeria Sand", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "areo_hotah", "name": "Areo Hotah", "strength": 2, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "obara_sand", "name": "Obara Sand", "strength": 2, "swords": 1, "forts": 0, "ability": "unimplemented" },
+        { "id": "doran_martell", "name": "Doran Martell", "strength": 3, "swords": 0, "forts": 0, "ability": "unimplemented" },
+        { "id": "arianne_martell", "name": "Arianne Martell", "strength": 4, "swords": 0, "forts": 0, "ability": "unimplemented" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "player_count": 6,
+  "notes": [
+    "Starting units and the supply/army limits are cross-verified against two independent community references.",
+    "The 6-player influence track order below is derived from one reference implementation that does not fully model House Martell; Martell is placed last on all three tracks as an inference. Verify against the physical game.",
+    "All houses start at supply 2 and with 5 power tokens (standard base-game setup)."
+  ],
+  "houses": [
+    {
+      "id": "baratheon",
+      "name": "House Baratheon",
+      "words": "Ours is the Fury",
+      "home": "dragonstone",
+      "color": "#d4a017",
+      "initial_supply": 2,
+      "initial_power": 5,
+      "starting_units": {
+        "dragonstone": { "footmen": 1, "knights": 1, "ships": 0, "siege": 0 },
+        "kingswood": { "footmen": 1, "knights": 0, "ships": 0, "siege": 0 },
+        "shipbreaker_bay": { "footmen": 0, "knights": 0, "ships": 2, "siege": 0 }
+      },
+      "verified": true
+    },
+    {
+      "id": "lannister",
+      "name": "House Lannister",
+      "words": "Hear Me Roar",
+      "home": "lannisport",
+      "color": "#c8102e",
+      "initial_supply": 2,
+      "initial_power": 5,
+      "starting_units": {
+        "lannisport": { "footmen": 1, "knights": 1, "ships": 0, "siege": 0 },
+        "stoney_sept": { "footmen": 1, "knights": 0, "ships": 0, "siege": 0 },
+        "the_golden_sound": { "footmen": 0, "knights": 0, "ships": 1, "siege": 0 }
+      },
+      "verified": true
+    },
+    {
+      "id": "stark",
+      "name": "House Stark",
+      "words": "Winter is Coming",
+      "home": "winterfell",
+      "color": "#8a9ba8",
+      "initial_supply": 2,
+      "initial_power": 5,
+      "starting_units": {
+        "winterfell": { "footmen": 1, "knights": 1, "ships": 0, "siege": 0 },
+        "white_harbor": { "footmen": 1, "knights": 0, "ships": 0, "siege": 0 },
+        "the_shivering_sea": { "footmen": 0, "knights": 0, "ships": 1, "siege": 0 }
+      },
+      "verified": true
+    },
+    {
+      "id": "greyjoy",
+      "name": "House Greyjoy",
+      "words": "We Do Not Sow",
+      "home": "pyke",
+      "color": "#2f2f2f",
+      "initial_supply": 2,
+      "initial_power": 5,
+      "starting_units": {
+        "pyke": { "footmen": 1, "knights": 1, "ships": 0, "siege": 0 },
+        "greywater_watch": { "footmen": 1, "knights": 0, "ships": 0, "siege": 0 },
+        "pyke_port": { "footmen": 0, "knights": 0, "ships": 1, "siege": 0 },
+        "ironmans_bay": { "footmen": 0, "knights": 0, "ships": 1, "siege": 0 }
+      },
+      "verified": true
+    },
+    {
+      "id": "tyrell",
+      "name": "House Tyrell",
+      "words": "Growing Strong",
+      "home": "highgarden",
+      "color": "#2e8b57",
+      "initial_supply": 2,
+      "initial_power": 5,
+      "starting_units": {
+        "highgarden": { "footmen": 1, "knights": 1, "ships": 0, "siege": 0 },
+        "dornish_marches": { "footmen": 1, "knights": 0, "ships": 0, "siege": 0 },
+        "redwyne_straits": { "footmen": 0, "knights": 0, "ships": 1, "siege": 0 }
+      },
+      "verified": true
+    },
+    {
+      "id": "martell",
+      "name": "House Martell",
+      "words": "Unbowed, Unbent, Unbroken",
+      "home": "sunspear",
+      "color": "#e08a2e",
+      "initial_supply": 2,
+      "initial_power": 5,
+      "starting_units": {
+        "sunspear": { "footmen": 1, "knights": 1, "ships": 0, "siege": 0 },
+        "salt_shore": { "footmen": 1, "knights": 0, "ships": 0, "siege": 0 },
+        "east_summer_sea": { "footmen": 0, "knights": 0, "ships": 1, "siege": 0 }
+      },
+      "verified": false,
+      "note": "Inferred by pattern; the reference implementation does not model Martell. Verify against the physical game."
+    }
+  ],
+  "initial_tracks": {
+    "iron_throne": ["baratheon", "lannister", "stark", "greyjoy", "tyrell", "martell"],
+    "fiefdoms": ["greyjoy", "tyrell", "stark", "baratheon", "lannister", "martell"],
+    "kings_court": ["lannister", "stark", "baratheon", "tyrell", "greyjoy", "martell"],
+    "verified": false,
+    "note": "Derived from a community reference that omits the 6-player Martell placement."
+  }
+}

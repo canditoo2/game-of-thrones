@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "verified": false,
+  "notes": [
+    "The nine Wildling card names match the physical component list.",
+    "Individual Wildling resolution effects are NOT implemented yet; the engine models the",
+    "Wildling track, the bid and the 'Wildlings Attack' trigger, but resolves the attack as a",
+    "simple threshold check with no per-card consequences."
+  ],
+  "track_max": 12,
+  "start_threat": 0,
+  "cards": {
+    "crow_killers": { "name": "Crow Killers", "effect": "unimplemented" },
+    "the_horde_descends": { "name": "The Horde Descends", "effect": "unimplemented" },
+    "king_beyond_the_wall": { "name": "King Beyond the Wall", "effect": "unimplemented" },
+    "mammoth_riders": { "name": "Mammoth Riders", "effect": "unimplemented" },
+    "massing_milkwater": { "name": "Massing at Milkwater", "effect": "unimplemented" },
+    "preemptive_raid": { "name": "Preemptive Raid", "effect": "unimplemented" },
+    "rattleshirt": { "name": "Rattleshirt's Raiders", "effect": "unimplemented" },
+    "silence": { "name": "Silence at the Wall", "effect": "unimplemented" },
+    "skinchanger": { "name": "The Skinchanger", "effect": "unimplemented" }
+  },
+  "deck": [
+    "crow_killers",
+    "the_horde_descends",
+    "king_beyond_the_wall",
+    "mammoth_riders",
+    "massing_milkwater",
+    "preemptive_raid",
+    "rattleshirt",
+    "silence",
+    "skinchanger"
+  ]
+}
