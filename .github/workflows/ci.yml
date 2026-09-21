@@ -54,4 +54,4 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Test (RL)
-        run: pytest -q -m "" --no-header
+        run: pytest -q --no-header
