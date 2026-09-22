@@ -117,6 +117,12 @@ class GameMap:
         self.port_hosts: dict[str, str] = {
             rid: r.host for rid, r in self.regions.items() if r.is_port and r.host
         }
+        #: Regions that start with a Neutral Force token, keyed by strength.
+        #: Six-player games use King's Landing (5) and The Eyrie (6).
+        self.neutral_forces: dict[str, int] = {
+            rid: int(strength)
+            for rid, strength in (raw.get("neutral_forces") or {}).items()
+        }
 
         self.validate()
 
@@ -191,6 +197,16 @@ class GameMap:
         homes = [r.home for r in self.regions.values() if r.home]
         if len(homes) != len(set(homes)):
             raise MapDataError("two regions share the same home house")
+
+        for rid, strength in self.neutral_forces.items():
+            if rid not in self.regions:
+                raise MapDataError(f"neutral force on unknown region {rid!r}")
+            if not self.regions[rid].is_land:
+                raise MapDataError(f"neutral force on non-land region {rid!r}")
+            if strength <= 0:
+                raise MapDataError(f"neutral force {rid!r} has non-positive strength")
+            if self.regions[rid].home:
+                raise MapDataError(f"neutral force {rid!r} is a home area")
 
         if not self.sea_region_ids:
             raise MapDataError("no sea regions defined")

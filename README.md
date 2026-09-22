@@ -37,6 +37,7 @@ src/agot/
     state.py       mutable game state (unit pools, tracks, supply)
     actions.py     the action record and its kinds
     combat.py      battle resolution and retreat
+    house_cards.py House card ability effects
     game.py        setup, legal actions, phase progression, victory
     observation.py state and per-action feature encoding
   agents/        policies: random baseline, greedy heuristic, PUCT MCTS
@@ -44,7 +45,7 @@ src/agot/
   training/      self-play, replay buffer, trainer, evaluation
   cli.py         command-line entry point
 tests/           map, engine, combat, observation, agents, training, network
-docs/            architecture and roadmap
+docs/            architecture, roadmap and the rulebook fidelity audit
 ```
 
 The **rules engine depends only on `numpy`**. PyTorch is an optional extra
@@ -118,12 +119,24 @@ These are real deviations from the physical game. They are tracked in
   battles; the real game lets any house support either side.
 * **Casualty and retreat choices are automatic** (cheapest unit first, first
   legal destination).
-* **Wildling attacks resolve without bidding** and have no card-specific
-  effects.
-* **House-card special abilities are not implemented.** Only printed strength,
-  swords and forts matter.
-* **Siege Engines have combat strength 0**, so the engine undervalues them.
-* **Neutral forces are not fought.**
+* **Wildling attacks** model the secret Power bid, the Night's Watch strength
+  and all nine cards' win/loss consequences. Sub-choices inside a consequence
+  (which units are destroyed, which track is moved, which House card is
+  discarded) use a deterministic default, and bidder ties are broken by Iron
+  Throne position rather than asking the holder.
+* **House-card special abilities are implemented**, but the sub-choices inside
+  an ability (which Footman to upgrade, which Order to remove, which alternate
+  card to play, which retreat area to pick) are auto-resolved with
+  deterministic defaults; see
+  [`engine/house_cards.py`](src/agot/engine/house_cards.py).
+* **Siege Engines** contribute their printed strength 4 only when attacking (or
+  supporting an attack against) an area containing a Castle or Stronghold.
+* **Neutral forces** (King's Landing 5, The Eyrie 6) defend with their printed
+  strength; ties go to the attacker and they never use a House card or the
+  Valyrian Steel Blade.
+* **Multi-destination marches are not offered.** A March Order moves to a
+  single destination; the real game allows splitting across several areas (at
+  most one of which is a battle).
 
 The board data is also partly unverified; see [`PROVENANCE.md`](PROVENANCE.md)
 for exactly which values are trusted and which need checking against the

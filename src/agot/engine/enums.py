@@ -41,14 +41,28 @@ class UnitStats:
 #: explicitly contrasts a Knight's Combat Strength of 2 with the fact that it
 #: still counts as a single casualty.
 #:
-#: NOTE: Siege Engines are modelled with Combat Strength 0. Their printed
-#: special role is not implemented yet, which means the engine currently
-#: undervalues them. See docs/roadmap.md.
+#: A Siege Engine's printed Combat Strength is 4, but it only applies when the
+#: engine is attacking (or supporting an attack against) an area containing a
+#: Castle or Stronghold; otherwise it contributes 0. Use
+#: :func:`agot.engine.combat.units_strength` with ``siege_active`` to get the
+#: context-dependent value.
 UNIT_STATS: dict[UnitType, UnitStats] = {
     UnitType.FOOTMAN: UnitStats(combat_strength=1, is_land=True),
     UnitType.KNIGHT: UnitStats(combat_strength=2, is_land=True),
-    UnitType.SIEGE: UnitStats(combat_strength=0, is_land=True),
+    UnitType.SIEGE: UnitStats(combat_strength=4, is_land=True),
     UnitType.SHIP: UnitStats(combat_strength=1, is_land=False),
+}
+
+#: Strength printed on every House's Garrison token.
+GARRISON_STRENGTH: int = 2
+
+#: Mustering point cost to recruit one unit. Upgrading a Footman to a Knight or
+#: Siege Engine costs 1 point instead (see :mod:`agot.engine.game`).
+MUSTER_COST: dict[UnitType, int] = {
+    UnitType.FOOTMAN: 1,
+    UnitType.KNIGHT: 2,
+    UnitType.SIEGE: 2,
+    UnitType.SHIP: 1,
 }
 
 LAND_UNITS: tuple[UnitType, ...] = (UnitType.FOOTMAN, UnitType.KNIGHT, UnitType.SIEGE)
@@ -68,9 +82,16 @@ class Phase(str, Enum):
     """High-level round phases, in resolution order."""
 
     WESTEROS = "westeros"
+    #: The holder of an Influence token chooses how a "holders' choice" Westeros
+    #: card (A Throne of Blades, Dark Wings Dark Words, Put to the Sword) resolves.
+    WESTEROS_CHOICE = "westeros_choice"
     BIDDING = "bidding"
+    #: Secretly bidding Power to fight off a Wildling attack (rulebook page 22).
+    WILDLING_ATTACK = "wildling_attack"
     MUSTERING = "mustering"
     PLANNING = "planning"
+    #: The Messenger Raven step, between assigning and revealing orders.
+    RAVEN = "raven"
     ACTION = "action"
     COMBAT = "combat"
     CLEANUP = "cleanup"

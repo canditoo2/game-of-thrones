@@ -1,33 +1,79 @@
 {
   "schema_version": 1,
-  "verified": false,
+  "verified": true,
   "notes": [
-    "The 15 unique Westeros cards below are certain (they match the physical component list).",
-    "Their split across the three decks as encoded here is a best-effort reconstruction and is NOT verified.",
-    "Fix `composition` after checking the rulebook; the engine reads the decks from this file.",
-    "Card effects are grouped by a machine-readable `effect` id. Cards whose effect is",
-    "'unimplemented' are drawn, logged, and otherwise ignored by the engine for now."
+    "Card names, per-deck composition and Wildling-icon flags are confirmed against the",
+    "user-supplied Rulebook/Westeros_card.txt, and agree with chibimagic/got-board-game",
+    "(app/models/westeros_card.rb and app/models/westeros_deck.rb).",
+    "Each deck holds exactly ten cards. Decks I/II/III match file-to-file:",
+    "I = 3 Supply, 3 Mustering, 2 A Throne of Blades [W], 1 Last Days of Summer [W], 1 Winter is Coming.",
+    "II = 3 Clash of Kings, 3 Game of Thrones, 2 Dark Wings, Dark Words [W], 1 Last Days of Summer [W], 1 Winter is Coming.",
+    "III = 3 Wildlings Attack, 1 Sea of Storms [W], 1 Rains of Autumn [W], 1 Feast for Crows [W], 1 Web of Lies [W], 1 Storm of Swords [W], 2 Put to the Sword.",
+    "[W] marks the cards that carry a Wildling icon; those advance the threat track.",
+    "The three holders'-choice cards are modelled as real decisions: the named holder",
+    "picks one of their listed 'options' (another card id to resolve immediately, or",
+    "'none'). 'holder' is one of iron_throne / raven / blade."
   ],
   "cards": {
-    "mustering": { "name": "Mustering", "effect": "mustering" },
-    "supply": { "name": "Supply", "effect": "supply" },
-    "game_of_thrones": { "name": "Game of Thrones", "effect": "gain_power_per_crown" },
-    "clash_of_kings": { "name": "Clash of Kings", "effect": "bid_all_tracks" },
-    "dark_wings_dark_words": { "name": "Dark Wings, Dark Words", "effect": "bid_kings_court" },
-    "wildlings_attack": { "name": "Wildlings Attack", "effect": "wildlings_attack" },
-    "winter_is_coming": { "name": "Winter is Coming", "effect": "unimplemented" },
-    "throne_of_blades": { "name": "Throne of Blades", "effect": "unimplemented" },
-    "web_of_lies": { "name": "Web of Lies", "effect": "order_restriction", "restricted_order": "support" },
-    "put_to_the_sword": { "name": "Put to the Sword", "effect": "order_restriction", "restricted_order": "defense" },
-    "sea_of_storms": { "name": "Sea of Storms", "effect": "order_restriction", "restricted_order": "raid" },
-    "storm_of_swords": { "name": "Storm of Swords", "effect": "order_restriction", "restricted_order": "consolidate_power" },
-    "rains_of_autumn": { "name": "Rains of Autumn", "effect": "order_restriction", "restricted_order": "march" },
-    "feast_for_crows": { "name": "Feast for Crows", "effect": "order_restriction", "restricted_order": "consolidate_power" },
-    "last_days_of_summer": { "name": "Last Days of Summer", "effect": "wildlings_calm" }
+    "mustering": { "name": "Mustering", "effect": "mustering", "advance_wildlings": false },
+    "supply": { "name": "Supply", "effect": "supply", "advance_wildlings": false },
+    "game_of_thrones": { "name": "Game of Thrones", "effect": "gain_power_per_crown", "advance_wildlings": false },
+    "clash_of_kings": { "name": "Clash of Kings", "effect": "bid_all_tracks", "advance_wildlings": false },
+    "wildlings_attack": { "name": "Wildlings Attack", "effect": "wildlings_attack", "advance_wildlings": false },
+    "winter_is_coming": { "name": "Winter is Coming", "effect": "winter_is_coming", "advance_wildlings": false },
+    "last_days_of_summer": { "name": "Last Days of Summer", "effect": "none", "advance_wildlings": true },
+
+    "throne_of_blades": {
+      "name": "A Throne of Blades",
+      "effect": "influence_decision",
+      "holder": "iron_throne",
+      "options": ["mustering", "supply", "none"],
+      "advance_wildlings": true
+    },
+    "dark_wings_dark_words": {
+      "name": "Dark Wings, Dark Words",
+      "effect": "influence_decision",
+      "holder": "raven",
+      "options": ["clash_of_kings", "game_of_thrones", "none"],
+      "advance_wildlings": true
+    },
+    "put_to_the_sword": {
+      "name": "Put to the Sword",
+      "effect": "influence_decision",
+      "holder": "blade",
+      "options": ["rains_of_autumn", "storm_of_swords", "none"],
+      "advance_wildlings": false
+    },
+
+    "web_of_lies": { "name": "Web of Lies", "effect": "order_restriction", "restricted_order": "support", "advance_wildlings": true },
+    "sea_of_storms": { "name": "Sea of Storms", "effect": "order_restriction", "restricted_order": "raid", "advance_wildlings": true },
+    "storm_of_swords": { "name": "Storm of Swords", "effect": "order_restriction", "restricted_order": "defend", "advance_wildlings": true },
+    "feast_for_crows": { "name": "Feast for Crows", "effect": "order_restriction", "restricted_order": "consolidate_power", "advance_wildlings": true },
+    "rains_of_autumn": { "name": "Rains of Autumn", "effect": "order_restriction", "restricted_order": "march_plus", "advance_wildlings": true }
   },
   "composition": {
-    "deck_i": ["mustering", "mustering", "supply", "supply", "game_of_thrones", "dark_wings_dark_words", "clash_of_kings", "winter_is_coming"],
-    "deck_ii": ["game_of_thrones", "clash_of_kings", "dark_wings_dark_words", "throne_of_blades", "web_of_lies", "put_to_the_sword", "sea_of_storms", "storm_of_swords", "rains_of_autumn", "feast_for_crows"],
-    "deck_iii": ["wildlings_attack", "wildlings_attack", "wildlings_attack", "winter_is_coming", "last_days_of_summer", "sea_of_storms", "storm_of_swords", "rains_of_autumn", "put_to_the_sword", "feast_for_crows"]
+    "deck_i": [
+      "supply", "supply", "supply",
+      "mustering", "mustering", "mustering",
+      "throne_of_blades", "throne_of_blades",
+      "last_days_of_summer",
+      "winter_is_coming"
+    ],
+    "deck_ii": [
+      "clash_of_kings", "clash_of_kings", "clash_of_kings",
+      "game_of_thrones", "game_of_thrones", "game_of_thrones",
+      "dark_wings_dark_words", "dark_wings_dark_words",
+      "last_days_of_summer",
+      "winter_is_coming"
+    ],
+    "deck_iii": [
+      "wildlings_attack", "wildlings_attack", "wildlings_attack",
+      "sea_of_storms",
+      "rains_of_autumn",
+      "feast_for_crows",
+      "web_of_lies",
+      "storm_of_swords",
+      "put_to_the_sword", "put_to_the_sword"
+    ]
   }
 }

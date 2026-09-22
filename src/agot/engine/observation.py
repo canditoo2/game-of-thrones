@@ -85,12 +85,15 @@ MAX_THREAT = 12.0
 _HOUSE_BLOCK = 13
 HOUSE_BLOCK = _HOUSE_BLOCK
 _GLOBAL_BLOCK = 1 + N_PHASES + N_STEPS + 4
-# terrain(3) + power/supply/mustering(3) + unit counts + flags(4)
+# terrain(3) + power/supply/mustering(3) + unit counts + flags(6)
 # + controller relation(4) + order one-hot + order flags(4)
-REGION_BLOCK = 3 + 3 + N_UNITS + 4 + 4 + N_ORDERS + 4
+REGION_BLOCK = 3 + 3 + N_UNITS + 6 + 4 + N_ORDERS + 4
 CARD_BLOCK = 6
 ORDER_BLOCK = N_ORDERS + 1
 AMOUNT_BLOCK = 2
+#: March detail: a normalised count per unit type, a "subset given" flag and an
+#: "establish control" flag.
+MOVE_BLOCK = N_UNITS + 2
 
 STATE_DIM: int = N_HOUSES * _HOUSE_BLOCK + _GLOBAL_BLOCK
 ACTION_DIM: int = (
@@ -103,6 +106,7 @@ ACTION_DIM: int = (
     + ORDER_BLOCK
     + AMOUNT_BLOCK
     + N_UNITS
+    + MOVE_BLOCK
 )
 
 
@@ -162,6 +166,8 @@ def _region_block(region, actor: str | None) -> np.ndarray:
                 min(1.0, sum(region.routed.values()) / 8.0),
                 1.0 if region.influence_token is not None else 0.0,
                 1.0 if region.order is not None else 0.0,
+                region.garrison / 4.0,
+                region.neutral_force / 6.0,
             ],
             dtype=np.float32,
         )
@@ -221,7 +227,12 @@ def encode_state(game: Game, actor: str | None = None) -> np.ndarray:
                 min(1.0, state.wildling_threat / MAX_THREAT),
                 len([h for h in state.houses.values() if not h.eliminated]) / N_HOUSES,
                 len(game_map.regions) / 64.0,
-                len(state.mustering_points) / N_HOUSES,
+                sum(
+                    1
+                    for region in state.regions.values()
+                    if region.mustering_points > 0
+                )
+                / N_HOUSES,
             ],
             dtype=np.float32,
         ),
@@ -305,6 +316,13 @@ def encode_action(game: Game, action: Action, actor: str | None = None) -> np.nd
         else np.zeros(REGION_BLOCK, dtype=np.float32)
     )
 
+    move_vector = np.zeros(MOVE_BLOCK, dtype=np.float32)
+    if action.units is not None:
+        for index, count in enumerate(action.units[:N_UNITS]):
+            move_vector[index] = min(1.0, count / 4.0)
+        move_vector[N_UNITS] = 1.0
+    move_vector[N_UNITS + 1] = 1.0 if action.establish else 0.0
+
     vector = np.concatenate(
         [
             _one_hot(action.kind, tuple(ActionKind)),
@@ -316,6 +334,7 @@ def encode_action(game: Game, action: Action, actor: str | None = None) -> np.nd
             order_vector,
             amount_vector,
             _one_hot(action.unit, tuple(unit.value for unit in UNIT_ORDER)),
+            move_vector,
         ]
     ).astype(np.float32)
 

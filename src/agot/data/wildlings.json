@@ -1,24 +1,139 @@
 {
   "schema_version": 1,
-  "verified": false,
+  "verified": true,
   "notes": [
     "The nine Wildling card names match the physical component list.",
-    "Individual Wildling resolution effects are NOT implemented yet; the engine models the",
-    "Wildling track, the bid and the 'Wildlings Attack' trigger, but resolves the attack as a",
-    "simple threshold check with no per-card consequences."
+    "Win/loss effects were transcribed from the bundled scans (Rulebook/wildling-cards1..3.webp).",
+    "Each branch names one effect the engine resolves automatically. Where the printed card",
+    "lets the rewarded player choose (which units to destroy, which track to move to, which",
+    "House card to discard, etc.) the engine picks a deterministic default; see docs/roadmap.md.",
+    "'chosen' is the lowest bidder when the Wildlings win and the highest bidder when the",
+    "Night's Watch wins. 'others' applies to every other participant. A null 'chosen' means",
+    "'all' for replace_knights; 999 power means 'all available power'.",
+    "Ties for highest/lowest bidder are broken by Iron Throne position (the holder would decide)."
   ],
   "track_max": 12,
-  "start_threat": 0,
+  "start_threat": 2,
   "cards": {
-    "crow_killers": { "name": "Crow Killers", "effect": "unimplemented" },
-    "the_horde_descends": { "name": "The Horde Descends", "effect": "unimplemented" },
-    "king_beyond_the_wall": { "name": "King Beyond the Wall", "effect": "unimplemented" },
-    "mammoth_riders": { "name": "Mammoth Riders", "effect": "unimplemented" },
-    "massing_milkwater": { "name": "Massing at Milkwater", "effect": "unimplemented" },
-    "preemptive_raid": { "name": "Preemptive Raid", "effect": "unimplemented" },
-    "rattleshirt": { "name": "Rattleshirt's Raiders", "effect": "unimplemented" },
-    "silence": { "name": "Silence at the Wall", "effect": "unimplemented" },
-    "skinchanger": { "name": "The Skinchanger", "effect": "unimplemented" }
+    "crow_killers": {
+      "name": "Crow Killers",
+      "wildling_victory": {
+        "effect": "replace_knights",
+        "chosen": null,
+        "others": 2,
+        "text": "LOWEST BIDDER: replaces all of his Knights with available Footmen; any Knight unable to be replaced is destroyed. EVERYONE ELSE: replaces 2 of their Knights with available Footmen; any Knight unable to be replaced is destroyed."
+      },
+      "nights_watch_victory": {
+        "effect": "upgrade_footmen",
+        "chosen": 2,
+        "text": "HIGHEST BIDDER: may immediately replace up to 2 of his Footmen, anywhere, with available Knights."
+      }
+    },
+    "the_horde_descends": {
+      "name": "The Horde Descends",
+      "wildling_victory": {
+        "effect": "destroy_units_at_fort",
+        "chosen": 2,
+        "others": 1,
+        "text": "LOWEST BIDDER: destroys 2 of his units at one of his Castles or Strongholds; if unable, he destroys 2 of his units anywhere. EVERYONE ELSE: destroys 1 of their units anywhere."
+      },
+      "nights_watch_victory": {
+        "effect": "muster_at_fort",
+        "text": "HIGHEST BIDDER: may muster forces (following normal mustering rules) in any one Castle or Stronghold area he controls."
+      }
+    },
+    "king_beyond_the_wall": {
+      "name": "King Beyond the Wall",
+      "wildling_victory": {
+        "effect": "influence_to_bottom",
+        "chosen": "all",
+        "others": "kings_court",
+        "text": "LOWEST BIDDER: moves his tokens to the lowest position of every Influence track. EVERYONE ELSE: in turn order, each player chooses either the Fiefdoms or King's Court track and moves his token to the lowest position of that track."
+      },
+      "nights_watch_victory": {
+        "effect": "influence_to_top",
+        "chosen": "iron_throne",
+        "text": "HIGHEST BIDDER: moves his token to the top of one Influence track of his choice, then takes the appropriate Dominance token."
+      }
+    },
+    "mammoth_riders": {
+      "name": "Mammoth Riders",
+      "wildling_victory": {
+        "effect": "destroy_units",
+        "chosen": 3,
+        "others": 2,
+        "text": "LOWEST BIDDER: destroys 3 of his units anywhere. EVERYONE ELSE: destroys 2 of their units anywhere."
+      },
+      "nights_watch_victory": {
+        "effect": "retrieve_house_card",
+        "text": "HIGHEST BIDDER: may retrieve 1 House card of his choice from his House card discard pile."
+      }
+    },
+    "massing_milkwater": {
+      "name": "Massing at Milkwater",
+      "wildling_victory": {
+        "effect": "discard_house_cards",
+        "chosen": "all_max",
+        "others": "one",
+        "text": "LOWEST BIDDER: if he has more than one House card in his hand, he discards all cards with the highest combat strength. EVERYONE ELSE: if they have more than one House card in their hand, they must choose and discard one of these cards."
+      },
+      "nights_watch_victory": {
+        "effect": "return_discard_pile",
+        "text": "HIGHEST BIDDER: returns his entire House card discard pile into his hand."
+      }
+    },
+    "preemptive_raid": {
+      "name": "Preemptive Raid",
+      "wildling_victory": {
+        "effect": "destroy_units",
+        "chosen": 2,
+        "others": 0,
+        "text": "LOWEST BIDDER: chooses one of the following: A) destroys 2 of his units anywhere, or B) is reduced 2 positions on his highest Influence track. EVERYONE ELSE: nothing happens."
+      },
+      "nights_watch_victory": {
+        "effect": "second_attack",
+        "strength": 6,
+        "text": "HIGHEST BIDDER: the wildlings immediately attack again with a strength of 6. You do not participate in the bidding against this attack (nor do you receive any rewards or penalties)."
+      }
+    },
+    "rattleshirt": {
+      "name": "Rattleshirt's Raiders",
+      "wildling_victory": {
+        "effect": "adjust_supply",
+        "chosen": -2,
+        "others": -1,
+        "text": "LOWEST BIDDER: is reduced 2 positions on the Supply track (to no lower than 0). EVERYONE ELSE: is reduced 1 position on the Supply track (to no lower than 0). Then reconcile armies to their new Supply limits."
+      },
+      "nights_watch_victory": {
+        "effect": "adjust_supply",
+        "chosen": 1,
+        "text": "HIGHEST BIDDER: is increased 1 position on the Supply track (to no higher than 6)."
+      }
+    },
+    "silence": {
+      "name": "Silence at the Wall",
+      "wildling_victory": {
+        "effect": "nothing",
+        "text": "LOWEST BIDDER: nothing happens. EVERYONE ELSE: nothing happens."
+      },
+      "nights_watch_victory": {
+        "effect": "nothing",
+        "text": "HIGHEST BIDDER: nothing happens."
+      }
+    },
+    "skinchanger": {
+      "name": "The Skinchanger",
+      "wildling_victory": {
+        "effect": "discard_power",
+        "chosen": 999,
+        "others": 2,
+        "text": "LOWEST BIDDER: discards all available Power tokens. EVERYONE ELSE: discards 2 available Power tokens, or as many as they are able."
+      },
+      "nights_watch_victory": {
+        "effect": "refund_bid",
+        "text": "HIGHEST BIDDER: all Power tokens he bid on this attack are immediately returned to his available Power."
+      }
+    }
   },
   "deck": [
     "crow_killers",

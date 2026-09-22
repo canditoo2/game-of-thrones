@@ -1,87 +1,92 @@
 {
   "schema_version": 1,
+  "verified": true,
   "notes": [
     "Each house has seven cards. 'strength' is the printed combat strength.",
     "'swords' is the number of sword icons (extra casualties inflicted on a win).",
     "'forts' is the number of fortification icons (cancels incoming casualties).",
-    "'ability' is a machine-readable id for special effects; 'none' means the card",
-    "is modelled by its printed stats alone. Special abilities marked",
-    "'unimplemented' currently fall back to printed stats only.",
-    "Stats are cross-checked against two community references. House Martell is",
-    "marked unverified because one reference omits it entirely."
+    "'ability' is a machine-readable id for the card's special effect. 'none' means",
+    "the card is fully modelled by its printed stats alone.",
+    "Names, strengths, icons and ability text are transcribed from the user-supplied",
+    "Rulebook/151060549-House-Cards-Reference-Sheet.txt. Every printed stat was also",
+    "cross-checked against chibimagic/got-board-game (app/models/house*.rb).",
+    "House Martell is included in the reference sheet and is now marked verified;",
+    "the previous file was missing Darkstar and had the Martell strengths wrong.",
+    "Ability ids map to handlers in agot/engine/house_cards.py. Abilities that depend",
+    "on a player sub-choice (which unit, which order, which card) are auto-resolved",
+    "with the deterministic defaults documented in that module."
   ],
   "houses": {
     "baratheon": {
       "verified": true,
       "cards": [
-        { "id": "patchface", "name": "Patchface", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "melisandre", "name": "Melisandre", "strength": 1, "swords": 1, "forts": 0, "ability": "unimplemented" },
-        { "id": "salladhor_saan", "name": "Salladhor Saan", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "davos_seaworth", "name": "Davos Seaworth", "strength": 2, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "brienne_of_tarth", "name": "Brienne of Tarth", "strength": 2, "swords": 1, "forts": 1, "ability": "unimplemented" },
-        { "id": "renly_baratheon", "name": "Renly Baratheon", "strength": 3, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "stannis_baratheon", "name": "Stannis Baratheon", "strength": 4, "swords": 0, "forts": 0, "ability": "unimplemented" }
+        { "id": "patchface", "name": "Patchface", "strength": 0, "swords": 0, "forts": 0, "ability": "patchface", "text": "After combat, you may look at your opponent's hand and discard one card of your choice." },
+        { "id": "melisandre", "name": "Melisandre", "strength": 1, "swords": 1, "forts": 0, "ability": "none" },
+        { "id": "salladhor_saan", "name": "Salladhor Saan", "strength": 1, "swords": 0, "forts": 0, "ability": "salladhor_saan", "text": "If you are being supported in this combat, the combat strength of all non-Baratheon Ships is reduced to 0." },
+        { "id": "davos_seaworth", "name": "Ser Davos Seaworth", "strength": 2, "swords": 0, "forts": 0, "ability": "davos_seaworth", "text": "If \"Stannis Baratheon\" is in your discard pile, this card gains +1 combat strength and a sword icon." },
+        { "id": "brienne_of_tarth", "name": "Brienne of Tarth", "strength": 2, "swords": 1, "forts": 1, "ability": "none" },
+        { "id": "renly_baratheon", "name": "Renly Baratheon", "strength": 3, "swords": 0, "forts": 0, "ability": "renly_baratheon", "text": "If you win this combat, you may upgrade one of your participating Footmen (or one supporting Baratheon Footman) to a Knight." },
+        { "id": "stannis_baratheon", "name": "Stannis Baratheon", "strength": 4, "swords": 0, "forts": 0, "ability": "stannis_baratheon", "text": "If your opponent has a higher position on the Iron Throne Influence track than you, this card gains +1 combat strength." }
       ]
     },
     "lannister": {
       "verified": true,
       "cards": [
-        { "id": "cersei_lannister", "name": "Cersei Lannister", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "tyrion_lannister", "name": "Tyrion Lannister", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "kevan_lannister", "name": "Kevan Lannister", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "the_hound", "name": "The Hound", "strength": 2, "swords": 0, "forts": 2, "ability": "unimplemented" },
-        { "id": "jaime_lannister", "name": "Jaime Lannister", "strength": 2, "swords": 1, "forts": 0, "ability": "unimplemented" },
-        { "id": "gregor_clegane", "name": "Gregor Clegane", "strength": 3, "swords": 3, "forts": 0, "ability": "unimplemented" },
-        { "id": "tywin_lannister", "name": "Tywin Lannister", "strength": 4, "swords": 0, "forts": 0, "ability": "unimplemented" }
+        { "id": "cersei_lannister", "name": "Cersei Lannister", "strength": 0, "swords": 0, "forts": 0, "ability": "cersei_lannister", "text": "If you win this combat, you may remove one of your opponent's Order tokens from anywhere on the board." },
+        { "id": "tyrion_lannister", "name": "Tyrion Lannister", "strength": 1, "swords": 0, "forts": 0, "ability": "tyrion_lannister", "text": "You may immediately return your opponent's House card to his hand. He must then choose a different House card. If he has no other House cards in hand, he cannot use a House card this combat." },
+        { "id": "kevan_lannister", "name": "Ser Kevan Lannister", "strength": 1, "swords": 0, "forts": 0, "ability": "kevan_lannister", "text": "If you are attacking, all of your participating Footmen (including supporting Lannister Footmen) add +2 combat strength instead of +1." },
+        { "id": "the_hound", "name": "The Hound", "strength": 2, "swords": 0, "forts": 2, "ability": "none" },
+        { "id": "jaime_lannister", "name": "Ser Jaime Lannister", "strength": 2, "swords": 1, "forts": 0, "ability": "none" },
+        { "id": "gregor_clegane", "name": "Ser Gregor Clegane", "strength": 3, "swords": 3, "forts": 0, "ability": "none" },
+        { "id": "tywin_lannister", "name": "Tywin Lannister", "strength": 4, "swords": 0, "forts": 0, "ability": "tywin_lannister", "text": "If you win this combat, gain two Power tokens." }
       ]
     },
     "stark": {
       "verified": true,
       "cards": [
-        { "id": "catelyn_stark", "name": "Catelyn Stark", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "blackfish", "name": "Brynden Tully", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "rodrik_cassel", "name": "Rodrik Cassel", "strength": 1, "swords": 0, "forts": 2, "ability": "unimplemented" },
-        { "id": "roose_bolton", "name": "Roose Bolton", "strength": 2, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "greatjon_umber", "name": "Greatjon Umber", "strength": 2, "swords": 1, "forts": 0, "ability": "unimplemented" },
-        { "id": "robb_stark", "name": "Robb Stark", "strength": 3, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "eddard_stark", "name": "Eddard Stark", "strength": 4, "swords": 2, "forts": 0, "ability": "unimplemented" }
+        { "id": "catelyn_stark", "name": "Catelyn Stark", "strength": 0, "swords": 0, "forts": 0, "ability": "catelyn_stark", "text": "If you have a Defence Order token in the embattled area, its value is doubled." },
+        { "id": "blackfish", "name": "The Blackfish", "strength": 1, "swords": 0, "forts": 0, "ability": "blackfish", "text": "You do not take casualties in this combat from House card abilities, Combat icons, or Tides of Battle cards." },
+        { "id": "rodrik_cassel", "name": "Ser Rodrik Cassel", "strength": 1, "swords": 0, "forts": 2, "ability": "none" },
+        { "id": "roose_bolton", "name": "Roose Bolton", "strength": 2, "swords": 0, "forts": 0, "ability": "roose_bolton", "text": "If you lose this combat, return your entire House card discard pile into your hand (including this card)." },
+        { "id": "greatjon_umber", "name": "Greatjon Umber", "strength": 2, "swords": 1, "forts": 0, "ability": "none" },
+        { "id": "robb_stark", "name": "Robb Stark", "strength": 3, "swords": 0, "forts": 0, "ability": "robb_stark", "text": "If you win this combat, you may choose the area to which your opponent retreats. You must choose a legal area where your opponent loses the fewest units." },
+        { "id": "eddard_stark", "name": "Eddard Stark", "strength": 4, "swords": 2, "forts": 0, "ability": "none" }
       ]
     },
     "greyjoy": {
       "verified": true,
       "cards": [
-        { "id": "aeron_damphair", "name": "Aeron Damphair", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "asha_greyjoy", "name": "Asha Greyjoy", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "dagmer_cleftjaw", "name": "Dagmer Cleftjaw", "strength": 1, "swords": 1, "forts": 1, "ability": "unimplemented" },
-        { "id": "theon_greyjoy", "name": "Theon Greyjoy", "strength": 2, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "balon_greyjoy", "name": "Balon Greyjoy", "strength": 2, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "victarion_greyjoy", "name": "Victarion Greyjoy", "strength": 3, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "euron_crows_eye", "name": "Euron Crow's Eye", "strength": 4, "swords": 1, "forts": 0, "ability": "unimplemented" }
+        { "id": "aeron_damphair", "name": "Aeron Damphair", "strength": 0, "swords": 0, "forts": 0, "ability": "aeron_damphair", "text": "You may immediately discard two Power tokens to discard Aeron Damphair and choose a different House card from your hand (if able)." },
+        { "id": "asha_greyjoy", "name": "Asha Greyjoy", "strength": 1, "swords": 0, "forts": 0, "ability": "asha_greyjoy", "text": "If you are not being supported in this combat, this card gains two sword icons and one fortification icon." },
+        { "id": "dagmer_cleftjaw", "name": "Dagmer Cleftjaw", "strength": 1, "swords": 1, "forts": 1, "ability": "none" },
+        { "id": "theon_greyjoy", "name": "Theon Greyjoy", "strength": 2, "swords": 0, "forts": 0, "ability": "theon_greyjoy", "text": "If you are defending an area that contains either a Stronghold or a Castle, this card gains +1 combat strength and a sword icon." },
+        { "id": "balon_greyjoy", "name": "Balon Greyjoy", "strength": 2, "swords": 0, "forts": 0, "ability": "balon_greyjoy", "text": "The printed combat strength of your opponent's House card is reduced to 0." },
+        { "id": "victarion_greyjoy", "name": "Victarion Greyjoy", "strength": 3, "swords": 0, "forts": 0, "ability": "victarion_greyjoy", "text": "If you are attacking, all of your participating Ships (including supporting Greyjoy Ships) add +2 combat strength instead of +1." },
+        { "id": "euron_crows_eye", "name": "Euron Crow's Eye", "strength": 4, "swords": 1, "forts": 0, "ability": "none" }
       ]
     },
     "tyrell": {
       "verified": true,
       "cards": [
-        { "id": "queen_of_thorns", "name": "Queen of Thorns", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "margaery_tyrell", "name": "Margaery Tyrell", "strength": 1, "swords": 0, "forts": 1, "ability": "unimplemented" },
-        { "id": "alester_florent", "name": "Alester Florent", "strength": 1, "swords": 0, "forts": 1, "ability": "unimplemented" },
-        { "id": "garlan_tyrell", "name": "Garlan Tyrell", "strength": 2, "swords": 2, "forts": 0, "ability": "unimplemented" },
-        { "id": "randyll_tarly", "name": "Randyll Tarly", "strength": 2, "swords": 1, "forts": 0, "ability": "unimplemented" },
-        { "id": "loras_tyrell", "name": "Loras Tyrell", "strength": 3, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "mace_tyrell", "name": "Mace Tyrell", "strength": 4, "swords": 0, "forts": 0, "ability": "unimplemented" }
+        { "id": "queen_of_thorns", "name": "Queen of Thorns", "strength": 0, "swords": 0, "forts": 0, "ability": "queen_of_thorns", "text": "Immediately remove one of your opponent's Order tokens in any area adjacent to the embattled area other than the March Order token used to start this combat." },
+        { "id": "margaery_tyrell", "name": "Margaery Tyrell", "strength": 1, "swords": 0, "forts": 1, "ability": "none" },
+        { "id": "alester_florent", "name": "Alester Florent", "strength": 1, "swords": 0, "forts": 1, "ability": "none" },
+        { "id": "garlan_tyrell", "name": "Ser Garlan Tyrell", "strength": 2, "swords": 2, "forts": 0, "ability": "none" },
+        { "id": "randyll_tarly", "name": "Randyll Tarly", "strength": 2, "swords": 1, "forts": 0, "ability": "none" },
+        { "id": "loras_tyrell", "name": "Ser Loras Tyrell", "strength": 3, "swords": 0, "forts": 0, "ability": "loras_tyrell", "text": "If you are attacking and win this combat, move the March Order token used into the conquered area to resolve again later this round." },
+        { "id": "mace_tyrell", "name": "Mace Tyrell", "strength": 4, "swords": 0, "forts": 0, "ability": "mace_tyrell", "text": "Immediately destroy one of your opponent's attacking or defending Footmen units." }
       ]
     },
     "martell": {
-      "verified": false,
-      "note": "Strength distribution and names inferred; one reference omits Martell. Verify against the physical game before trusting these.",
+      "verified": true,
       "cards": [
-        { "id": "the_red_viper", "name": "The Red Viper", "strength": 0, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "ellaria_sand", "name": "Ellaria Sand", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "nymeria_sand", "name": "Nymeria Sand", "strength": 1, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "areo_hotah", "name": "Areo Hotah", "strength": 2, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "obara_sand", "name": "Obara Sand", "strength": 2, "swords": 1, "forts": 0, "ability": "unimplemented" },
-        { "id": "doran_martell", "name": "Doran Martell", "strength": 3, "swords": 0, "forts": 0, "ability": "unimplemented" },
-        { "id": "arianne_martell", "name": "Arianne Martell", "strength": 4, "swords": 0, "forts": 0, "ability": "unimplemented" }
+        { "id": "the_red_viper", "name": "The Red Viper", "strength": 4, "swords": 2, "forts": 1, "ability": "none" },
+        { "id": "areo_hotah", "name": "Areo Hotah", "strength": 3, "swords": 0, "forts": 1, "ability": "none" },
+        { "id": "obara_sand", "name": "Obara Sand", "strength": 2, "swords": 1, "forts": 0, "ability": "none" },
+        { "id": "darkstar", "name": "Darkstar", "strength": 2, "swords": 1, "forts": 0, "ability": "none" },
+        { "id": "nymeria_sand", "name": "Nymeria Sand", "strength": 1, "swords": 0, "forts": 0, "ability": "nymeria_sand", "text": "If you are defending, this card gains a fortification icon. If you are attacking, this card gains a sword icon." },
+        { "id": "arianne_martell", "name": "Arianne Martell", "strength": 1, "swords": 0, "forts": 0, "ability": "arianne_martell", "text": "If you are defending and lose this combat, your opponent may not move his units into the embattled area. They return to the area from which they marched. Your own units must still retreat." },
+        { "id": "doran_martell", "name": "Doran Martell", "strength": 0, "swords": 0, "forts": 0, "ability": "doran_martell", "text": "Immediately move your opponent to the bottom of one Influence track of your choice." }
       ]
     }
   }

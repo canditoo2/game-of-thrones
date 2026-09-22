@@ -4,8 +4,13 @@
   "max_rounds": 10,
   "victory_castles": 7,
   "adjacency_confidence": "high",
-  "attributes_confidence": "medium",
-  "provenance": "See PROVENANCE.md. Adjacency is cross-verified against two independent community implementations. Per-region power/supply/mustering icons come from one reference and MUST be checked against the physical board before drawing balance conclusions.",
+  "attributes_confidence": "high",
+  "provenance": "See PROVENANCE.md. Adjacency and per-region power/supply/mustering icons were audited against the bundled board.jpg and match the chibimagic/got-board-game reference (app/models/area.rb). The audit corrected one icon: The Mountains of the Moon is a Supply area (0 power), not a Power area.",
+  "neutral_forces": {
+    "kings_landing": 5,
+    "the_eyrie": 6
+  },
+  "neutral_forces_note": "Six-player setup (rulebook page 4): a Neutral Force token is placed in King's Landing (strength 5) and The Eyrie (strength 6). Neutral Forces never move, never support, and cannot use House cards or the Valyrian Steel Blade.",
   "regions": [
     { "id": "winterfell",              "name": "Winterfell",                    "terrain": "land", "power": 1, "supply": 1, "mustering": 2, "home": "stark" },
     { "id": "castle_black",            "name": "Castle Black",                  "terrain": "land", "power": 1, "supply": 0, "mustering": 0 },
@@ -20,7 +25,7 @@
     { "id": "riverrun",                "name": "Riverrun",                      "terrain": "land", "power": 1, "supply": 1, "mustering": 2 },
     { "id": "the_twins",               "name": "The Twins",                     "terrain": "land", "power": 1, "supply": 0, "mustering": 0 },
     { "id": "the_fingers",             "name": "The Fingers",                   "terrain": "land", "power": 0, "supply": 1, "mustering": 0 },
-    { "id": "the_mountains_of_the_moon","name": "The Mountains of the Moon",     "terrain": "land", "power": 1, "supply": 0, "mustering": 0 },
+    { "id": "the_mountains_of_the_moon","name": "The Mountains of the Moon",     "terrain": "land", "power": 0, "supply": 1, "mustering": 0 },
     { "id": "the_eyrie",               "name": "The Eyrie",                     "terrain": "land", "power": 1, "supply": 1, "mustering": 1 },
     { "id": "harrenhal",               "name": "Harrenhal",                     "terrain": "land", "power": 1, "supply": 0, "mustering": 1 },
     { "id": "stoney_sept",             "name": "Stoney Sept",                   "terrain": "land", "power": 1, "supply": 0, "mustering": 0 },

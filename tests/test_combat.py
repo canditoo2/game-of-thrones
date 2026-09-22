@@ -16,6 +16,8 @@ def _clean_game() -> Game:
         region.controller = None
         region.order = None
         region.order_house = None
+        region.garrison = 0
+        region.influence_token = None
     return game
 
 

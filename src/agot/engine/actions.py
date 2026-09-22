@@ -21,11 +21,20 @@ class ActionKind(str, Enum):
     RESOLVE_RAID = "resolve_raid"
     MARCH = "march"
     RESOLVE_CONSOLIDATE = "resolve_consolidate"
+    CONSOLIDATE_MUSTER = "consolidate_muster"
     PLAY_HOUSE_CARD = "play_house_card"
+    USE_BLADE = "use_blade"
+    RAVEN_SWAP = "raven_swap"
+    RAVEN_DECK_TOP = "raven_deck_top"
+    RAVEN_DECK_BOTTOM = "raven_deck_bottom"
     RETREAT = "retreat"
     DISBAND = "disband"
     MUSTER = "muster"
+    UPGRADE = "upgrade"
     BID = "bid"
+    #: An Influence-token holder picks how a holders'-choice Westeros card
+    #: resolves (``card`` is the chosen card id, or ``"none"``).
+    WESTEROS_CHOICE = "westeros_choice"
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,20 +54,39 @@ class Action:
     card: str | None = None
     unit: str | None = None
     amount: int | None = None
+    #: Units that move, as a count per entry of
+    #: :data:`agot.engine.observation.UNIT_ORDER` (Footman, Knight, Siege,
+    #: Ship). Only meaningful for :attr:`ActionKind.MARCH`; ``None`` means
+    #: "every eligible unit" for backwards compatibility.
+    units: tuple[int, ...] | None = None
+    #: Whether a March action uses a Power token to keep control of the area
+    #: it vacates.
+    establish: bool = False
 
     def __str__(self) -> str:  # pragma: no cover - debugging aid
         parts = [self.kind.value]
-        for name in ("house", "region", "target", "order", "card", "unit", "amount"):
+        for name in (
+            "house",
+            "region",
+            "target",
+            "order",
+            "card",
+            "unit",
+            "amount",
+            "units",
+        ):
             value = getattr(self, name)
             if value is not None:
                 parts.append(f"{name}={value}")
+        if self.establish:
+            parts.append("establish=True")
         return "(" + " ".join(parts) + ")"
 
     # -- constructors ----------------------------------------------------
 
     @staticmethod
-    def pass_(house: str) -> Action:
-        return Action(ActionKind.PASS, house=house)
+    def pass_(house: str, region: str | None = None) -> Action:
+        return Action(ActionKind.PASS, house=house, region=region)
 
     @staticmethod
     def place_order(house: str, region: str, order: str) -> Action:
@@ -69,16 +97,48 @@ class Action:
         return Action(ActionKind.RESOLVE_RAID, house=house, region=region, target=target)
 
     @staticmethod
-    def march(house: str, region: str, target: str) -> Action:
-        return Action(ActionKind.MARCH, house=house, region=region, target=target)
+    def march(
+        house: str,
+        region: str,
+        target: str,
+        units: tuple[int, ...] | None = None,
+        establish: bool = False,
+    ) -> Action:
+        return Action(
+            ActionKind.MARCH,
+            house=house,
+            region=region,
+            target=target,
+            units=units,
+            establish=establish,
+        )
 
     @staticmethod
     def resolve_consolidate(house: str, region: str) -> Action:
         return Action(ActionKind.RESOLVE_CONSOLIDATE, house=house, region=region)
 
     @staticmethod
+    def consolidate_muster(house: str, region: str) -> Action:
+        return Action(ActionKind.CONSOLIDATE_MUSTER, house=house, region=region)
+
+    @staticmethod
     def play_house_card(house: str, card: str | None) -> Action:
         return Action(ActionKind.PLAY_HOUSE_CARD, house=house, card=card)
+
+    @staticmethod
+    def use_blade(house: str) -> Action:
+        return Action(ActionKind.USE_BLADE, house=house)
+
+    @staticmethod
+    def raven_swap(house: str, region: str, order: str) -> Action:
+        return Action(
+            ActionKind.RAVEN_SWAP, house=house, region=region, order=order
+        )
+
+    @staticmethod
+    def raven_deck(house: str, to_bottom: bool) -> Action:
+        kind = ActionKind.RAVEN_DECK_BOTTOM if to_bottom else ActionKind.RAVEN_DECK_TOP
+        return Action(kind, house=house)
 
     @staticmethod
     def retreat(house: str, region: str, target: str) -> Action:
@@ -89,9 +149,25 @@ class Action:
         return Action(ActionKind.DISBAND, house=house, region=region, unit=unit)
 
     @staticmethod
-    def muster(house: str, region: str, unit: str) -> Action:
-        return Action(ActionKind.MUSTER, house=house, region=region, unit=unit)
+    def muster(
+        house: str, region: str, unit: str, target: str | None = None
+    ) -> Action:
+        return Action(
+            ActionKind.MUSTER, house=house, region=region, unit=unit, target=target
+        )
+
+    @staticmethod
+    def upgrade(house: str, region: str, unit: str) -> Action:
+        return Action(ActionKind.UPGRADE, house=house, region=region, unit=unit)
 
     @staticmethod
     def bid(house: str, amount: int) -> Action:
         return Action(ActionKind.BID, house=house, amount=amount)
+
+    @staticmethod
+    def westeros_choice(house: str, card: str) -> Action:
+        """The holder's pick for a holders'-choice Westeros card.
+
+        ``card`` is the chosen card id to resolve, or ``"none"`` for no effect.
+        """
+        return Action(ActionKind.WESTEROS_CHOICE, house=house, card=card)

@@ -10,8 +10,8 @@ from agot.engine.game import Game, GameConfig
 
 
 def test_dimensions_are_documented_constants() -> None:
-    assert obs.STATE_DIM == 94
-    assert obs.ACTION_DIM == 119
+    assert obs.STATE_DIM == 97
+    assert obs.ACTION_DIM == 136
     assert obs.N_HOUSES == 6
 
 

@@ -4,7 +4,8 @@
   "notes": [
     "Starting units and the supply/army limits are cross-verified against two independent community references.",
     "The 6-player influence track order below is derived from one reference implementation that does not fully model House Martell; Martell is placed last on all three tracks as an inference. Verify against the physical game.",
-    "All houses start at supply 2 and with 5 power tokens (standard base-game setup)."
+    "House Stark starts at Supply 1 (confirmed against the physical player screen); every other house starts at Supply 2. Stark is also the only house to open with both a Stronghold (Winterfell) and a Castle (White Harbor).",
+    "All houses start with 5 power tokens (standard base-game setup)."
   ],
   "houses": [
     {
@@ -32,10 +33,12 @@
       "initial_power": 5,
       "starting_units": {
         "lannisport": { "footmen": 1, "knights": 1, "ships": 0, "siege": 0 },
+        "lannisport_port": { "footmen": 0, "knights": 0, "ships": 1, "siege": 0 },
         "stoney_sept": { "footmen": 1, "knights": 0, "ships": 0, "siege": 0 },
         "the_golden_sound": { "footmen": 0, "knights": 0, "ships": 1, "siege": 0 }
       },
-      "verified": true
+      "verified": true,
+      "note": "Official FAQ v2.0 errata setup: 1 Ship in The Golden Sound, 1 Ship in the port at Lannisport, 1 Knight and 1 Footman in Lannisport, 1 Footman in Stoney Sept."
     },
     {
       "id": "stark",
@@ -43,7 +46,7 @@
       "words": "Winter is Coming",
       "home": "winterfell",
       "color": "#8a9ba8",
-      "initial_supply": 2,
+      "initial_supply": 1,
       "initial_power": 5,
       "starting_units": {
         "winterfell": { "footmen": 1, "knights": 1, "ships": 0, "siege": 0 },

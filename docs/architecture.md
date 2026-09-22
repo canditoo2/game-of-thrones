@@ -15,7 +15,7 @@ into the layer below it, which keeps the rules code testable and torch-free.
                             │ drives
             ┌───────────────▼──────────────────────────────────────┐
             │  engine/   map · state · actions · combat · game       │
-            │            observation (features)                      │
+            │            house_cards · observation (features)        │
             └────────────────────────────────────────────────────────┘
                             numpy only
 ```
@@ -36,20 +36,27 @@ into the layer below it, which keeps the rules code testable and torch-free.
 * `combat.py` resolves battles from two *explicit* unit pools. Keeping the
   attacker's and defender's units separate is essential: casualty removal has to
   know whose units are whose.
+* `house_cards.py` applies each House card's special ability around a battle.
+  `resolve_battle` is kept free of board mutation: it *records* deferred effects
+  (Order removals, Influence moves, card swaps) on a `BattleContext`, and
+  `resolve_and_apply` commits them and runs the post-combat abilities.
 
 `Game.clone()` is the backbone of search. It deep-copies the state and gives the
-clone a fresh RNG seeded from the parent, so a cloned game is independent.
+clone a fresh RNG seeded from the parent, so a cloned game is independent. A
+clone does not re-run the phase machine: the source position is already settled
+and advancing would move the Action Phase turn-order cursor.
 
 ## Observation encoding
 
 `engine/observation.py` is the bridge to the network. It defines:
 
-* `encode_state(game) -> (94,)` — per-house blocks (castles, power, supply,
+* `encode_state(game) -> (97,)` — per-house blocks (castles, power, supply,
   track positions, unit counts, cards in hand) plus a global block (round,
   phase one-hot, action-step one-hot, wildling threat).
-* `encode_action(game, action) -> (119,)` — a *relational* description of one
+* `encode_action(game, action) -> (136,)` — a *relational* description of one
   candidate action: kind one-hot, actor, and, for the region and target,
-  terrain, controller relation, unit counts and order state. It deliberately
+  terrain, controller relation, unit counts and order state. March actions also
+  carry which units move and whether control is established. It deliberately
   does **not** one-hot region ids, so the encoding transfers to any board.
 
 Houses always appear in a fixed canonical order (`HOUSE_ORDER`), with unused
@@ -111,6 +118,13 @@ where the value mask restricts the loss to houses actually in the game.
 * `test_combat.py` — strength arithmetic, the tie-break, `swords − forts`
   casualties, and a regression test that the defender's units are never
   credited to the attacker.
+* `test_rules_fixes.py` — one regression test per audited rule fix: Action-Phase
+  turn order, per-order decline, consolidate on open water, port capacity and
+  capture, supply on marches, establishing control, Special Consolidate Power
+  mustering, the Messenger Raven, the Valyrian Steel Blade, neutral forces,
+  Wildling icon ordering, Wildling bidding and card effects, the end-of-game
+  tiebreakers, House Stark's starting Supply, the three holders'-choice Westeros
+  cards, and a representative ability for every House-card mechanic.
 * `test_observation.py` — fixed dimensions, determinism, one-hot blocks.
 * `test_agents.py` — every policy returns actions aligned with its targets.
 * `test_training.py` — examples are labelled, replay round-trips, matches run.

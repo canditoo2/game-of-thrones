@@ -40,6 +40,13 @@ class RegionState:
     units: dict[UnitType, int] = field(default_factory=dict)
     routed: dict[UnitType, int] = field(default_factory=dict)
     neutral_force: int = 0
+    #: Printed strength of a Garrison token still present here (0 = none).
+    #: Garrisons are not units: they add to a defender's Combat Strength only,
+    #: never count towards Supply, and can never be assigned an order.
+    garrison: int = 0
+    #: Mustering points still available to spend *in this area* after a
+    #: "Mustering" card. Unspent points are lost (they never pool).
+    mustering_points: int = 0
     influence_token: str | None = None
     order: str | None = None
     order_house: str | None = None
@@ -103,27 +110,52 @@ class GameState:
     action_step: ActionStep = ActionStep.RAID
     active_house: str | None = None
     winner: str | None = None
+    #: House that resolved the previous order in the current Action Phase step.
+    #: The next house is the following one on the Iron Throne track, so each
+    #: house resolves one order at a time instead of resolving every order
+    #: before passing the turn (rulebook pages 13-16).
+    action_house_last: str | None = None
+    #: Set once the Messenger Raven has been used (or declined) in a round.
+    raven_used: bool = False
+    #: Phase to return to once the current Mustering sub-phase finishes. Set
+    #: only by a Special Consolidate Power Order that musters in its own area.
+    return_phase: Phase | None = None
 
     tracks: dict[Track, list[str]] = field(default_factory=dict)
     regions: dict[str, RegionState] = field(default_factory=dict)
     houses: dict[str, HouseState] = field(default_factory=dict)
 
     wildling_threat: int = 0
+    #: Wildling attack in progress (only while ``Phase.WILDLING_ATTACK``).
+    #: Holds the attack strength, the secret bids so far, the excluded houses
+    #: (from a "Preemptive Raid" second attack) and the Wildling card drawn.
+    wildling_attack: dict | None = None
     westeros_decks: dict[str, list[str]] = field(default_factory=dict)
     westeros_deck_pos: dict[str, int] = field(default_factory=dict)
     westeros_drawn: dict[str, str | None] = field(default_factory=dict)
+    #: Westeros card effects still to resolve this round. Non-``None`` while a
+    #: round's Westeros phase is mid-flight (it can be interrupted by a bidding
+    #: step or a Wildling attack), because all three cards must still resolve.
+    pending_westeros: list[str] | None = None
+    #: Set while a holders'-choice Westeros card waits for its holder to pick.
+    #: ``{"card": card_id, "holder": house_id, "options": [card_id, ...]}``.
+    westeros_choice: dict | None = None
     wildling_deck: list[str] = field(default_factory=list)
     wildling_deck_pos: int = 0
+    #: Wildling cards already resolved; recycled when the deck runs out.
+    wildling_discard: list[str] = field(default_factory=list)
 
-    #: Pending mustering points per house, consumed by mustering actions.
-    mustering_points: dict[str, int] = field(default_factory=dict)
+    #: Order keys or order types that may not be placed this Planning Phase
+    #: (from Rains of Autumn, Sea of Storms, Storm of Swords, Web of Lies and
+    #: Feast for Crows). Reset at the start of every round.
+    order_restrictions: list[str] = field(default_factory=list)
     #: Houses that still have to place order tokens this planning phase.
     pending_planning: list[str] = field(default_factory=list)
     #: Pending bids for the current bidding round, keyed by house.
     pending_bids: dict[str, int] = field(default_factory=dict)
     #: Set while a battle is awaiting House card choices.
     pending_battle: dict | None = None
-    #: Which influence tracks the current bid will reorder.
+    #: Which influence tracks have still to be bid on, in resolution order.
     bid_tracks: list[str] = field(default_factory=list)
 
     log: list[str] = field(default_factory=list)
@@ -187,15 +219,45 @@ class GameState:
         }
 
     def army_sizes(self, house_id: str) -> list[int]:
-        """Sizes of a house's land armies, largest first."""
-        sizes = [
-            region.total(include_routed=False)
-            for region in self.regions_of(house_id)
-            if region.units and any(
-                unit is not _SHIP for unit in region.units
-            )
-        ]
-        return sorted((size for size in sizes if size > 0), reverse=True)
+        """Sizes of a house's armies, largest first.
+
+        Per the rulebook a lone unit is not an army and is exempt from Supply,
+        while routed units still count towards Supply. Armies can be land
+        groups or fleets (two or more Ships in the same sea/port).
+        """
+        sizes: list[int] = []
+        for region in self.regions_of(house_id):
+            size = region.total(include_routed=True)
+            if size >= 2:
+                sizes.append(size)
+        return sorted(sizes, reverse=True)
+
+    def has_mustering_points(self, house_id: str) -> bool:
+        return any(
+            region.mustering_points > 0 for region in self.regions_of(house_id)
+        )
+
+    def land_area_count(self, house_id: str) -> int:
+        """Controlled land areas (kept for reporting; not a tiebreaker)."""
+        from agot.engine.map import load_map
+
+        game_map = load_map()
+        return sum(
+            1
+            for rid in self.controlled_regions(house_id)
+            if game_map.regions[rid].is_land
+        )
+
+    def stronghold_count(self, house_id: str) -> int:
+        """Controlled Strongholds - the second end-of-game tiebreaker."""
+        from agot.engine.map import load_map
+
+        game_map = load_map()
+        return sum(
+            1
+            for rid in self.controlled_regions(house_id)
+            if game_map.regions[rid].is_stronghold
+        )
 
     def within_supply(self, house_id: str) -> bool:
         limits = self.houses[house_id].supply_limit()
@@ -225,9 +287,6 @@ class GameState:
             and _order_type(region.order) is order_type
             for region in self.regions.values()
         )
-
-
-_SHIP = UnitType.SHIP
 
 
 def _order_type(key: str) -> OrderType:
