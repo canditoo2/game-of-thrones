@@ -87,7 +87,8 @@ class GreedyPolicy(Policy):
             return self._score_westeros_choice(game, action)
         if kind is ActionKind.RETREAT:
             return self._score_retreat(game, action)
-        if kind is ActionKind.DISBAND:
+        if kind in (ActionKind.DISBAND, ActionKind.CHOOSE_CASUALTY):
+            # Destroying a unit is a pure loss, so prefer the cheapest one.
             return -_UNIT_VALUE.get(UnitType(action.unit), 1.0)
         return 0.0
 

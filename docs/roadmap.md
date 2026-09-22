@@ -20,6 +20,8 @@ how much it matters for learning a strong agent. It doubles as the project plan.
   order, choosing which units march, establishing control with a Power token,
   Special Consolidate Power mustering, the Messenger Raven and the Valyrian
   Steel Blade are all modelled as explicit player decisions.
+* The defeated player chooses their own casualties and (when defending) the
+  retreat destination; Robb Stark lets the winner pick the retreat instead.
 * Westeros holders' choice cards (A Throne of Blades, Dark Wings Dark Words,
   Put to the Sword) are modelled as real decisions for the named Influence
   token's holder, and *Winter is Coming* reshuffles its deck and redraws.
@@ -48,9 +50,14 @@ they should be fixed before expecting a strong agent.
    automatic and only ever helps its owner. This is where most of the game's
    diplomacy lives.
 
-3. **Player-chosen casualties and retreats.** Currently automatic
-   (cheapest-first, first legal region). The full game makes losing a battle an
-   active decision (which unit to lose, where to retreat) and can be decisive.
+3. **Player-chosen casualties and retreats.** *(done)* After the strength
+   comparison the Combat phase pauses: the defeated player destroys one unit at a
+   time of their own choosing, then (if defending) picks the legal adjacent area
+   to retreat to. A defeated attacker always returns to where it marched from.
+   Robb Stark's controller picks the defender's retreat instead, restricted to
+   areas that keep the loser within Supply. The non-interactive
+   `combat.resolve_and_apply` path still removes cheapest-first for callers that
+   do not run the phase machine.
 
 4. **House-card abilities.** *(done)* All 42 cards' text effects are modelled
    in `engine/house_cards.py`: passive strength/icon modifiers, immediate
@@ -108,9 +115,9 @@ they should be fixed before expecting a strong agent.
 
 ## Data verification
 
-17. **Check the flagged board data.** *(mostly done)* The six-player influence
-    tracks and the starred-order allowance are confirmed; only House Martell's
-    starting land units remain inferred. See [`../PROVENANCE.md`](../PROVENANCE.md).
+17. **Check the flagged board data.** *(done)* The six-player influence tracks,
+    the starred-order allowance and House Martell's starting units are all
+    confirmed. See [`../PROVENANCE.md`](../PROVENANCE.md).
 18. **Westeros deck composition.** *(done)* Confirmed against
     `Rulebook/Westeros_card.txt`; each of the three decks holds exactly ten
     cards.

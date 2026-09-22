@@ -29,6 +29,9 @@ class ActionKind(str, Enum):
     RAVEN_DECK_BOTTOM = "raven_deck_bottom"
     RETREAT = "retreat"
     DISBAND = "disband"
+    #: The defeated player chooses which unit is destroyed for one casualty
+    #: (``region`` is the embattled area, ``unit`` the unit type to remove).
+    CHOOSE_CASUALTY = "choose_casualty"
     MUSTER = "muster"
     UPGRADE = "upgrade"
     BID = "bid"
@@ -147,6 +150,13 @@ class Action:
     @staticmethod
     def disband(house: str, region: str, unit: str) -> Action:
         return Action(ActionKind.DISBAND, house=house, region=region, unit=unit)
+
+    @staticmethod
+    def choose_casualty(house: str, region: str, unit: str) -> Action:
+        """Destroy one named unit for a battle casualty."""
+        return Action(
+            ActionKind.CHOOSE_CASUALTY, house=house, region=region, unit=unit
+        )
 
     @staticmethod
     def muster(

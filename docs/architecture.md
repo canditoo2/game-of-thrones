@@ -118,6 +118,9 @@ where the value mask restricts the loss to houses actually in the game.
 * `test_combat.py` — strength arithmetic, the tie-break, `swords − forts`
   casualties, and a regression test that the defender's units are never
   credited to the attacker.
+* `test_player_choice_combat.py` — the defeated player chooses which units die
+  and (when defending) where to retreat; Blackfish, Robb Stark and the forced
+  attacker retreat.
 * `test_rules_fixes.py` — one regression test per audited rule fix: Action-Phase
   turn order, per-order decline, consolidate on open water, port capacity and
   capture, supply on marches, establishing control, Special Consolidate Power

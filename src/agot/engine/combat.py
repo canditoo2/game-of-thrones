@@ -12,22 +12,29 @@ The model follows the Second Edition rulebook:
 * The higher total wins; ties go to the house higher on the Fiefdoms track.
 * Only the loser takes casualties: one unit per Sword icon on the *winner's*
   House card, minus one per Fortification icon on the *loser's* card, floored
-  at zero.
-* The loser then retreats (or its remaining units are destroyed). Routed units
-  may never be chosen as casualties, and are destroyed if forced to retreat.
+  at zero. The defeated player chooses which of their units die.
+* The loser then retreats (or its remaining units are destroyed). A defeated
+  attacker goes back where it marched from; a defeated defender picks a legal
+  adjacent area. Routed units may never be chosen as casualties, and are
+  destroyed if forced to retreat.
 
 A battle is stored with the two forces kept *separate* (``attacker_units`` and
 ``defender_units``). They briefly share a region on the board, but merging them
 into one pool would make it impossible to tell whose units are whose, which is
 what casualty removal needs.
 
-Two deliberate simplifications are still made here and called out in
+:func:`resolve_battle` is pure: it decides the winner, the number of casualties
+and any deferred card effects. :func:`apply_battle_result` moves the board
+afterwards, so the :class:`~agot.engine.game.Game` phase machine can pause in
+between for the defeated player's choices. :func:`resolve_and_apply` is the
+convenience path that makes those choices automatically (cheapest unit first,
+then the first legal retreat) for callers that do not run the phase machine.
+
+One deliberate simplification is still made here and called out in
 docs/roadmap.md:
 
 * Support is resolved automatically in favour of each side's own Support
   orders. The real game lets any house support either side.
-* Casualty and retreat selection is automatic (cheapest unit first, then the
-  first legal retreat destination) rather than driven by a player decision.
 """
 
 from __future__ import annotations
@@ -46,8 +53,9 @@ from agot.engine.enums import (
 from agot.engine.map import load_map
 from agot.engine.state import GameState
 
-#: Removal order when a player takes casualties automatically. Cheapest combat
-#: value first, because a casualty destroys a unit regardless of its strength.
+#: Removal order for the *automatic* casualty path (:func:`resolve_and_apply`)
+#: and for Supply enforcement: cheapest combat value first, because a casualty
+#: destroys a unit regardless of its strength.
 _CASUALTY_ORDER: tuple[UnitType, ...] = (
     UnitType.FOOTMAN,
     UnitType.SIEGE,
@@ -434,7 +442,14 @@ def resolve_and_apply(
     attacker_blade: bool = False,
     defender_blade: bool = False,
 ) -> BattleResult:
-    """Resolve a battle and mutate ``state`` accordingly."""
+    """Resolve a battle and mutate ``state`` accordingly.
+
+    This is the non-interactive convenience path: casualties are removed
+    cheapest-first and the defender's retreat is picked by the engine. The
+    :class:`~agot.engine.game.Game` phase machine instead calls
+    :func:`resolve_battle` and then :func:`apply_battle_result` so that the
+    defeated player makes those choices.
+    """
     result = resolve_battle(
         state,
         region_id,
@@ -456,6 +471,31 @@ def resolve_and_apply(
     # Card swaps, Order removals and Doran's influence move are deferred until
     # now so that resolve_battle stays free of state mutation.
     house_cards.commit_deferred(ctx)
+    apply_battle_result(state, result, remaining_casualties=result.casualties)
+    return result
+
+
+def apply_battle_result(
+    state: GameState,
+    result: BattleResult,
+    *,
+    remaining_casualties: int = 0,
+    retreat_destination: str | None = None,
+) -> None:
+    """Move the board to the post-battle position.
+
+    ``resolve_battle`` decides the winner, the number of casualties and any
+    deferred card effects; this function applies the consequences. The
+    defeated player's choices arrive here: ``remaining_casualties`` counts the
+    units still to be destroyed (0 once the player has chosen them) and
+    ``retreat_destination`` is the area the defender (or Robb Stark's
+    controller) picked.
+    """
+    ctx = result.context
+    assert ctx is not None
+    attacker = ctx.attacker
+    defender = ctx.defender
+    region_id = result.region
     attacker_units = ctx.attacker_units
     defender_units = ctx.defender_units
 
@@ -466,18 +506,18 @@ def resolve_and_apply(
     arianne = house_cards.arianne_holds(ctx, result.loser)
 
     if result.loser == attacker:
-        _remove_units(attacker_units, result.casualties)
+        _remove_units(attacker_units, remaining_casualties)
         surviving = _prune(attacker_units)
         region.units = _prune(defender_units)
         region.controller = defender
         # The defender keeps its own routed units, order token and Power token.
         region.routed = pre_routed
         if surviving:
-            _retreat_attacker(state, region_id, attacker, surviving, attacker_origin)
+            _retreat_attacker(state, region_id, attacker, surviving, ctx.attacker_origin)
         elif result.casualties:
             result.notes.append(f"{attacker} was destroyed")
     else:
-        _remove_units(defender_units, result.casualties)
+        _remove_units(defender_units, remaining_casualties)
         surviving_defender = _prune(defender_units)
         region.garrison = 0
         region.order = None
@@ -486,7 +526,7 @@ def resolve_and_apply(
             # Arianne Martell: the attacker may not move in; it returns to the
             # area it marched from. The defender still retreats.
             _return_attacker(
-                state, attacker, _prune(attacker_units), attacker_origin
+                state, attacker, _prune(attacker_units), ctx.attacker_origin
             )
             region.units = {}
             region.routed = {}
@@ -504,8 +544,9 @@ def resolve_and_apply(
                 region_id,
                 defender,
                 surviving_defender,
-                attacker_origin,
+                ctx.attacker_origin,
                 prefer_min_loss=robb,
+                destination=retreat_destination,
             )
         elif result.casualties:
             result.notes.append(f"{defender} was destroyed")
@@ -516,7 +557,37 @@ def resolve_and_apply(
     house_cards.apply_post_battle(ctx, result)
     _try_loras(ctx, result)
     state.log.extend(result.notes)
-    return result
+
+
+def retreat_options(
+    state: GameState,
+    region_id: str,
+    house: str,
+    units: dict[UnitType, int],
+    *,
+    exclude_origin: str | None = None,
+) -> list[str]:
+    """Legal retreat destinations for a defeated defender with ``units`` left.
+
+    Returns an empty list when the units cannot retreat at all (for example a
+    lone Siege Engine), which means they are destroyed instead.
+    """
+    if not units:
+        return []
+    naval = all(unit is UnitType.SHIP for unit in units)
+    retreaters, _ = _split_non_retreaters(units, naval=naval)
+    if not retreaters:
+        return []
+    return legal_retreats(
+        state, region_id, house, naval=naval, exclude_origin=exclude_origin
+    )
+
+
+def retreat_keeps_supply(
+    state: GameState, destination: str, house: str, units: dict[UnitType, int]
+) -> bool:
+    """Public alias of :func:`_retreat_keeps_supply` for the phase machine."""
+    return _retreat_keeps_supply(state, destination, house, units)
 
 
 def _return_attacker(
@@ -582,8 +653,14 @@ def _retreat_defender(
     attacker_origin: str | None,
     *,
     prefer_min_loss: bool = False,
+    destination: str | None = None,
 ) -> None:
-    """A losing defender retreats to a legal adjacent area, or is destroyed."""
+    """A losing defender retreats to a legal adjacent area, or is destroyed.
+
+    ``destination`` is the area the defender (or, under Robb Stark, the winner)
+    chose. When it is ``None`` the first legal area is used, which keeps the
+    non-interactive :func:`resolve_and_apply` path behaving as before.
+    """
     naval = all(unit is UnitType.SHIP for unit in units)
     retreaters, destroyed = _split_non_retreaters(units, naval=naval)
     if destroyed:
@@ -596,19 +673,22 @@ def _retreat_defender(
     if not options:
         state.note(f"{house} has no retreat from {region_id}; army destroyed")
         return
-    destination = options[0]
-    if prefer_min_loss:
-        # Robb Stark chooses the retreat where the loser loses the fewest units:
-        # prefer a destination that keeps the house within Supply.
-        destination = next(
-            (
-                option
-                for option in options
-                if _retreat_keeps_supply(state, option, house, retreaters)
-            ),
-            options[0],
-        )
-    _move_routed(state, destination, house, retreaters)
+    if destination in options:
+        chosen = destination
+    else:
+        chosen = options[0]
+        if prefer_min_loss:
+            # Robb Stark chooses the retreat where the loser loses the fewest
+            # units: prefer a destination that keeps the house within Supply.
+            chosen = next(
+                (
+                    option
+                    for option in options
+                    if _retreat_keeps_supply(state, option, house, retreaters)
+                ),
+                options[0],
+            )
+    _move_routed(state, chosen, house, retreaters)
 
 
 def _retreat_keeps_supply(

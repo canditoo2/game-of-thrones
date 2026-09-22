@@ -15,7 +15,6 @@ can become:
 
 * Order tokens are face up. The real game hides them until the reveal.
 * Support is automatic and only self-directed.
-* Casualty removal and retreat destinations are chosen automatically.
 * Wildling attacks model the secret Power bid, the Night's Watch strength and
   the per-card consequences, but sub-choices *inside* a consequence (exactly
   which units are destroyed, which Influence track is moved to, which House
@@ -23,16 +22,17 @@ can become:
 * Neutral Force tokens (King's Landing 5, The Eyrie 6) defend their area with
   their printed strength; the attacker wins ties, and neither House cards nor
   the Valyrian Steel Blade may be used against them (rulebook page 26).
-* House cards are chosen by the players (that decision *is* modelled), but
-  special card abilities are not implemented, so only printed strengths and
-  icons matter.
+* House cards are chosen by the players (that decision *is* modelled) and their
+  special abilities are implemented; a few abilities that depend on a further
+  sub-choice are resolved by a deterministic default (see house_cards.py).
 
 The rule mechanics that *are* modelled as explicit player decisions include
 order resolution one house at a time (not one house at a time exhausting its
 orders), declining an individual order, choosing which units march, establishing
 control with a Power token, handling a Special Consolidate Power Order's
-mustering, the Messenger Raven, the Valyrian Steel Blade, and the secret bid at
-the heart of a Wildling attack.
+mustering, the Messenger Raven, the Valyrian Steel Blade, choosing which units
+die for battle casualties, choosing a defeated defender's retreat, and the
+secret bid at the heart of a Wildling attack.
 """
 
 from __future__ import annotations
@@ -41,10 +41,14 @@ import random
 from dataclasses import dataclass
 from itertools import product
 
+from agot.engine import house_cards
 from agot.engine.actions import Action, ActionKind
 from agot.engine.combat import (
+    apply_battle_result,
     order_modifier,
-    resolve_and_apply,
+    resolve_battle,
+    retreat_keeps_supply,
+    retreat_options,
     support_strength,
     units_strength,
 )
@@ -297,6 +301,10 @@ class Game:
             self._apply_consolidate_muster(action)
         elif kind is ActionKind.USE_BLADE:
             self._apply_use_blade(action)
+        elif kind is ActionKind.CHOOSE_CASUALTY:
+            self._apply_choose_casualty(action)
+        elif kind is ActionKind.RETREAT:
+            self._apply_retreat_action(action)
         elif kind is ActionKind.RAVEN_SWAP:
             self._apply_raven_swap(action)
         elif kind is ActionKind.RAVEN_DECK_TOP:
@@ -1752,6 +1760,10 @@ class Game:
                 "blade_done": False,
                 "attacker_blade": False,
                 "defender_blade": False,
+                # Battle stages: "cards" -> "blade" -> "casualties" ->
+                # "retreat" -> "finalize". Casualties and the retreat are the
+                # defeated player's decisions (rulebook pages 20-21).
+                "stage": "cards",
             }
             self.state.phase = Phase.COMBAT
             self.state.note(f"{house} marches into {target_id} and attacks {defender}")
@@ -2038,27 +2050,40 @@ class Game:
         battle = self.state.pending_battle
         if battle is None:
             return None
-        if not battle.get("attacker_card_chosen", False):
-            return battle["attacker"]
-        if not battle.get("defender_card_chosen", False):
-            return battle["defender"]
-        if not battle.get("blade_done", False):
-            holder = self.state.blade_holder()
-            if (
-                holder in (battle["attacker"], battle["defender"])
-                and not self.state.houses[holder].blade_used
-            ):
-                return holder
-            battle["blade_done"] = True
+        stage = battle.get("stage", "cards")
+        if stage == "cards":
+            if not battle.get("attacker_card_chosen", False):
+                return battle["attacker"]
+            if not battle.get("defender_card_chosen", False):
+                return battle["defender"]
+            battle["stage"] = "blade"
+            stage = "blade"
+        if stage == "blade":
+            if not battle.get("blade_done", False):
+                holder = self.state.blade_holder()
+                if (
+                    holder in (battle["attacker"], battle["defender"])
+                    and not self.state.houses[holder].blade_used
+                ):
+                    return holder
+                battle["blade_done"] = True
+            return None
+        if stage == "casualties":
+            if battle.get("casualties_remaining", 0) > 0:
+                return battle["result"].loser
+            return None
+        if stage == "retreat":
+            if battle.get("retreat_house") is not None:
+                return battle["retreat_house"]
+            return None
         return None
 
     def _combat_actions(self, house: str) -> list[Action]:
         battle = self.state.pending_battle
         if battle is None:  # pragma: no cover - defensive
             return []
-        if not battle.get("attacker_card_chosen", False) or not battle.get(
-            "defender_card_chosen", False
-        ):
+        stage = battle.get("stage", "cards")
+        if stage == "cards":
             house_state = self.state.houses[house]
             if not house_state.house_cards_available:
                 # Every card has been played; the house fights with no card.
@@ -2067,8 +2092,29 @@ class Game:
                 Action.play_house_card(house, card)
                 for card in house_state.house_cards_available
             ]
-        # The Valyrian Steel Blade holder decides whether to spend it.
-        return [Action.use_blade(house), Action.pass_(house)]
+        if stage == "blade":
+            # The Valyrian Steel Blade holder decides whether to spend it.
+            return [Action.use_blade(house), Action.pass_(house)]
+        if stage == "casualties":
+            result = battle["result"]
+            pool = result.context.units_of(result.loser)
+            return [
+                Action.choose_casualty(house, result.region, unit.value)
+                for unit in (
+                    UnitType.FOOTMAN,
+                    UnitType.KNIGHT,
+                    UnitType.SIEGE,
+                    UnitType.SHIP,
+                )
+                if pool.get(unit, 0) > 0
+            ]
+        if stage == "retreat":
+            result = battle["result"]
+            return [
+                Action.retreat(house, result.region, destination)
+                for destination in battle.get("retreat_options", [])
+            ]
+        return []
 
     def _apply_use_blade(self, action: Action) -> None:
         battle = self.state.pending_battle
@@ -2099,31 +2145,50 @@ class Game:
             battle["defender_card"] = card
             battle["defender_card_chosen"] = True
 
-    def _resolve_pending_battle(self) -> None:
+    def _apply_choose_casualty(self, action: Action) -> None:
+        """The defeated player destroys one unit of their choice."""
+        battle = self.state.pending_battle
+        if battle is None or action.unit is None:  # pragma: no cover - defensive
+            return
+        result = battle["result"]
+        pool = result.context.units_of(result.loser)
+        unit = UnitType(action.unit)
+        if pool.get(unit, 0) <= 0:  # pragma: no cover - not a legal action
+            return
+        pool[unit] -= 1
+        if pool[unit] <= 0:
+            del pool[unit]
+        battle["casualties_remaining"] -= 1
+        self.state.note(
+            f"{result.loser} destroys a {unit.value} in {result.region}"
+        )
+
+    def _apply_retreat_action(self, action: Action) -> None:
+        """The retreating player (or Robb Stark's controller) picks an area."""
         battle = self.state.pending_battle
         if battle is None:  # pragma: no cover - defensive
-            self.state.phase = Phase.ACTION
             return
-        self.state.pending_battle = None
-        self.state.phase = Phase.ACTION
+        destination = action.target
+        if destination in battle.get("retreat_options", []):
+            battle["retreat_destination"] = destination
+        # The choice is made: hand control back to the engine so it can apply
+        # the outcome rather than re-asking the same question.
+        battle["retreat_house"] = None
 
-        attacker = battle["attacker"]
-        defender = battle["defender"]
+    def _begin_battle_resolution(self, battle: dict) -> None:
+        """Decide the battle, then pause for the defeated player's choices.
+
+        ``resolve_battle`` is pure and ``commit_deferred`` only touches
+        state that is independent of casualties and retreats, so both run here,
+        before the board moves. The result is parked on the battle until the
+        player has chosen which units die and where the survivors retreat.
+        """
         region_id = battle["region"]
-
-        # A defeated defender's order token is discarded by the battle; return
-        # it to its owner's pool so it can be placed again next round.
-        defender_order = self.state.regions[region_id].order
-        defender_order_house = self.state.regions[region_id].order_house
-
-        attacker_blade = bool(battle.get("attacker_blade", False))
-        defender_blade = bool(battle.get("defender_blade", False))
-
-        result = resolve_and_apply(
+        result = resolve_battle(
             self.state,
             region_id,
-            attacker,
-            defender,
+            battle["attacker"],
+            battle["defender"],
             battle["attacker_units"],
             battle["defender_units"],
             battle["attacker_card"],
@@ -2132,8 +2197,87 @@ class Game:
             attacker_order=battle.get("attacker_order"),
             attacker_order_strength=battle["attacker_order_strength"],
             defender_order_strength=battle["defender_order_strength"],
-            attacker_blade=attacker_blade,
-            defender_blade=defender_blade,
+            attacker_blade=bool(battle.get("attacker_blade", False)),
+            defender_blade=bool(battle.get("defender_blade", False)),
+        )
+        battle["result"] = result
+        house_cards.commit_deferred(result.context)
+        # Remember the defender's Order token: if the attacker wins, the battle
+        # clears it from the board and it returns to its owner's pool.
+        region = self.state.regions[region_id]
+        battle["defender_order"] = region.order
+        battle["defender_order_house"] = region.order_house
+        loser_units = result.context.units_of(result.loser)
+        remaining = min(result.casualties, sum(loser_units.values()))
+        battle["casualties_remaining"] = remaining
+        battle["retreat_options"] = []
+        battle["retreat_house"] = None
+        battle["retreat_destination"] = None
+        if remaining > 0:
+            battle["stage"] = "casualties"
+        else:
+            self._prepare_retreat(battle)
+
+    def _prepare_retreat(self, battle: dict) -> None:
+        """Work out whether anyone chooses the retreat, then set the stage."""
+        result = battle["result"]
+        ctx = result.context
+        surviving = {
+            unit: count
+            for unit, count in ctx.units_of(result.loser).items()
+            if count > 0
+        }
+        if not surviving:
+            battle["stage"] = "finalize"
+            return
+        if result.loser == ctx.attacker:
+            # A defeated attacker always retreats to where it marched from.
+            battle["stage"] = "finalize"
+            return
+        options = retreat_options(
+            self.state,
+            result.region,
+            result.loser,
+            surviving,
+            exclude_origin=ctx.attacker_origin,
+        )
+        # Robb Stark lets the winner choose the retreat, but only among the
+        # legal areas where the loser loses the fewest units.
+        robb = house_cards.robb_chose_retreat(ctx, result.winner)
+        if robb and options:
+            minimal = [
+                option
+                for option in options
+                if retreat_keeps_supply(self.state, option, result.loser, surviving)
+            ]
+            if minimal:
+                options = minimal
+        if not options:
+            battle["stage"] = "finalize"
+            return
+        battle["retreat_options"] = options
+        battle["retreat_house"] = result.winner if robb else result.loser
+        battle["stage"] = "retreat"
+
+    def _finalize_battle(self, battle: dict) -> None:
+        """Apply the battle to the board and leave the Combat phase."""
+        result = battle["result"]
+        attacker = battle["attacker"]
+        defender = battle["defender"]
+        region_id = battle["region"]
+        self.state.pending_battle = None
+        self.state.phase = Phase.ACTION
+
+        defender_order = battle.get("defender_order")
+        defender_order_house = battle.get("defender_order_house")
+        attacker_blade = bool(battle.get("attacker_blade", False))
+        defender_blade = bool(battle.get("defender_blade", False))
+
+        apply_battle_result(
+            self.state,
+            result,
+            remaining_casualties=0,
+            retreat_destination=battle.get("retreat_destination"),
         )
         # If the attacker won, the defender's Order token was removed by the
         # battle; return it to its owner's pool. If the defender won, its Order
@@ -2160,6 +2304,21 @@ class Game:
         )
         self._recycle_house_cards_for(attacker)
         self._recycle_house_cards_for(defender)
+
+    def _resolve_pending_battle(self) -> None:
+        battle = self.state.pending_battle
+        if battle is None:  # pragma: no cover - defensive
+            self.state.phase = Phase.ACTION
+            return
+        stage = battle.get("stage", "cards")
+        if stage in ("cards", "blade"):
+            self._begin_battle_resolution(battle)
+            return
+        if stage == "casualties":
+            # All casualties have been chosen; move on to the retreat.
+            self._prepare_retreat(battle)
+            return
+        self._finalize_battle(battle)
 
     def _recycle_house_cards_for(self, house: str) -> None:
         """Return six House cards after a house plays its last (seventh).

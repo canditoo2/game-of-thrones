@@ -87,7 +87,9 @@ Everything in the table above is verified at **High** confidence.
 The physical game asks a player to choose inside several effects (which unit
 dies, which area is retreated to, which card is played). The engine keeps the
 game *decidable* by auto-resolving those sub-choices with deterministic
-defaults. The chosen defaults are:
+defaults, **except** for battle casualties and a defeated defender's retreat,
+which are now genuine player decisions (the Combat phase pauses for them; see
+`docs/roadmap.md`). The chosen defaults are:
 
 ### House cards
 
@@ -96,7 +98,7 @@ defaults. The chosen defaults are:
 | Renly Baratheon | Upgrade a participating Footman if present, otherwise a supporting Baratheon Footman in a neighbouring Support area. |
 | Tyrion Lannister | The opponent plays their strongest remaining card; the ability is used only when that card's value is lower than the one being replaced. With no other card, the opponent fights with none. |
 | Cersei Lannister | Removes the first opponent Order found scanning regions in id order. |
-| Robb Stark | Picks the retreat destination that keeps the loser within Supply, otherwise the first legal area. |
+| Robb Stark | The winner chooses the defender's retreat among the legal areas that keep the loser within Supply (the opponent's fewest-loss options). |
 | Aeron Damphair | Pays 2 Power and swaps in the strongest card when it is worth more than Aeron (0). |
 | Mace Tyrell | Destroys one opposing participating Footman. |
 | Queen of Thorns | Removes the first opposing Order in a neighbouring area (id order), never the attacker's origin March. |
@@ -113,7 +115,7 @@ bidder is broken by **Iron Throne position** rather than asking the holder.
 
 ## How to re-verify
 
-The three flagged values above are the only things that need the physical
-components. Everything else can be re-checked by running `pytest -q` (the map
-validator and the `test_rules_fixes.py` regression suite) and by comparing
+The data is fully verified against the physical components. Everything can be
+re-checked by running `pytest -q` (the map validator and the
+`test_rules_fixes.py` regression suite) and by comparing
 `src/agot/data/*.json` against the sources listed at the top of this file.
