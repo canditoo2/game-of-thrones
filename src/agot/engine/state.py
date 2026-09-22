@@ -172,6 +172,17 @@ class GameState:
     def note(self, message: str) -> None:
         self.log.append(f"R{self.round} {self.phase.value}: {message}")
 
+    @property
+    def orders_revealed(self) -> bool:
+        """Whether the Order tokens on the board are face up.
+
+        Orders are assigned face down during Planning and the Messenger Raven
+        step, then revealed simultaneously when the Action Phase begins
+        (rulebook pages 11-12). A house may always see its own orders, so this
+        only tells you that *other* houses' orders have become public.
+        """
+        return self.phase not in (Phase.PLANNING, Phase.RAVEN)
+
     def track_position(self, house_id: str, track: Track) -> int:
         """1-based position of a house on a track (1 is best)."""
         return self.tracks[track].index(house_id) + 1

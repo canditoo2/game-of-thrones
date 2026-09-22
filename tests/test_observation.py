@@ -6,6 +6,7 @@ import numpy as np
 
 from agot.engine import observation as obs
 from agot.engine.actions import Action, ActionKind
+from agot.engine.enums import Phase
 from agot.engine.game import Game, GameConfig
 
 
@@ -66,3 +67,51 @@ def test_absent_houses_encode_to_zeros() -> None:
             continue
         chunk = state[index * block : (index + 1) * block]
         assert not chunk.any(), house
+
+
+def test_orders_revealed_tracks_the_phase() -> None:
+    game = Game.new(GameConfig(seed=6))
+    state = game.state
+    state.phase = Phase.PLANNING
+    assert not state.orders_revealed
+    state.phase = Phase.RAVEN
+    assert not state.orders_revealed
+    state.phase = Phase.ACTION
+    assert state.orders_revealed
+
+
+def test_opponent_orders_are_hidden_until_the_action_phase() -> None:
+    game = Game.new(GameConfig(seed=5))
+    state = game.state
+    state.regions["kings_landing"].controller = "baratheon"
+    state.regions["kings_landing"].order = "march"
+    state.regions["kings_landing"].order_house = "baratheon"
+    state.regions["winterfell"].controller = "stark"
+    state.regions["winterfell"].order = "defend_2"
+    state.regions["winterfell"].order_house = "stark"
+    action = Action.march(
+        "baratheon", "kings_landing", "winterfell", units=(1, 0, 0, 0)
+    )
+    state.phase = Phase.PLANNING
+
+    # The *identity* of a hidden enemy order is invisible: two different orders
+    # encode identically while the Action Phase has not begun.
+    hidden_defend = obs.encode_action(game, action, "baratheon")
+    state.regions["winterfell"].order = "march_plus"
+    hidden_march = obs.encode_action(game, action, "baratheon")
+    np.testing.assert_array_equal(hidden_defend, hidden_march)
+
+    # A house always sees the order it placed itself.
+    own_changed = obs.encode_action(game, action, "baratheon")
+    state.regions["kings_landing"].order = "defend_2"
+    assert not np.array_equal(
+        own_changed, obs.encode_action(game, action, "baratheon")
+    )
+
+    # Once the Action Phase begins, the enemy order's identity is public.
+    state.regions["winterfell"].order = "defend_2"
+    state.phase = Phase.ACTION
+    revealed_defend = obs.encode_action(game, action, "baratheon")
+    state.regions["winterfell"].order = "march_plus"
+    revealed_march = obs.encode_action(game, action, "baratheon")
+    assert not np.array_equal(revealed_defend, revealed_march)

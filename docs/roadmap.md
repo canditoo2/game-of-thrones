@@ -44,10 +44,15 @@ how much it matters for learning a strong agent. It doubles as the project plan.
 These are simplifications that materially change what good play looks like, so
 they should be fixed before expecting a strong agent.
 
-1. **Face-down orders.** Order tokens are placed secretly and revealed
-   simultaneously. The engine stores them face up. Options: give the network a
-   belief over hidden orders, or (simpler) search with a determinised sample of
-   the hidden orders. Until then, search is optimistic.
+1. **Face-down orders.** *(partly done)* Order tokens are placed secretly and
+   revealed simultaneously. The engine now tracks reveal timing via
+   `GameState.orders_revealed`: orders are secret during Planning and the
+   Messenger Raven step and public once the Action Phase begins, and the
+   observation masks the *identity* of another house's hidden order while still
+   showing that a face-down token is present. What remains is the *search*:
+   MCTS clones the true state and so still sees hidden orders. The fix is a
+   determinised sample of the hidden orders (perfect-information Monte Carlo,
+   PIMC) at the search root, which is a separate follow-up.
 
 2. **Cross-house support.** *(done)* A Support order may help *either* side in
    an adjacent battle, and the supporting player chooses. Combat opens with a

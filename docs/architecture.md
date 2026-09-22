@@ -33,6 +33,11 @@ into the layer below it, which keeps the rules code testable and torch-free.
   decision and then **auto-advances** through every phase that needs no input,
   stopping only when a player must decide (or the game ends). That keeps the
   agent loop simple: ask for legal actions, pick one, repeat.
+* `GameState.orders_revealed` tracks hidden information: Order tokens are face
+  down during Planning and the Raven step and revealed when the Action Phase
+  begins. `observation.py` masks the identity of another house's hidden order
+  (its presence stays visible). MCTS still searches the true state; a PIMC root
+  determinisation is the follow-up.
 * `combat.py` resolves battles from two *explicit* unit pools. Keeping the
   attacker's and defender's units separate is essential: casualty removal has to
   know whose units are whose. Support is fed in as explicit per-area

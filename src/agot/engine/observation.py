@@ -143,7 +143,20 @@ def _controller_relation(controller: str | None, actor: str | None) -> np.ndarra
     return vector
 
 
-def _region_block(region, actor: str | None) -> np.ndarray:
+def _order_is_visible(
+    state: GameState, region, actor: str | None
+) -> bool:
+    """Whether ``actor`` may see the Order token in ``region``.
+
+    Orders stay face down until the Action Phase, but a house always sees the
+    orders it placed itself (rulebook pages 11-12).
+    """
+    if actor is None or state.orders_revealed:
+        return True
+    return region.order_house == actor
+
+
+def _region_block(region, actor: str | None, state: GameState) -> np.ndarray:
     """Static plus dynamic description of one region, from ``actor``'s view."""
     game_map = load_map()
     static = game_map.regions[region.region_id]
@@ -179,10 +192,14 @@ def _region_block(region, actor: str | None) -> np.ndarray:
         )
     )
     parts.append(_controller_relation(region.controller, actor))
-    parts.append(_one_hot(region.order, ORDER_KEYS))
+    visible = _order_is_visible(state, region, actor)
+    if visible:
+        parts.append(_one_hot(region.order, ORDER_KEYS))
+    else:
+        parts.append(np.zeros(N_ORDERS, dtype=np.float32))
 
     order_strength = 0.0
-    if region.order is not None:
+    if region.order is not None and visible:
         order_strength = ORDERS_BY_KEY[region.order].strength / 2.0
     parts.append(
         np.array(
@@ -312,12 +329,12 @@ def encode_action(game: Game, action: Action, actor: str | None = None) -> np.nd
         amount_vector[1] = 1.0
 
     region_vector = (
-        _region_block(state.regions[action.region], actor)
+        _region_block(state.regions[action.region], actor, state)
         if action.region is not None and action.region in state.regions
         else np.zeros(REGION_BLOCK, dtype=np.float32)
     )
     target_vector = (
-        _region_block(state.regions[action.target], actor)
+        _region_block(state.regions[action.target], actor, state)
         if action.target is not None and action.target in state.regions
         else np.zeros(REGION_BLOCK, dtype=np.float32)
     )
