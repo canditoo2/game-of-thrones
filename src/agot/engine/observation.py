@@ -95,6 +95,11 @@ AMOUNT_BLOCK = 2
 #: "establish control" flag.
 MOVE_BLOCK = N_UNITS + 2
 
+#: Sides a Support order can be declared for, plus the option to refuse
+#: (rulebook pages 17-18).
+SUPPORT_SIDES: tuple[str, ...] = ("attacker", "defender", "refuse")
+N_SIDES: int = len(SUPPORT_SIDES)
+
 STATE_DIM: int = N_HOUSES * _HOUSE_BLOCK + _GLOBAL_BLOCK
 ACTION_DIM: int = (
     N_ACTION_KINDS
@@ -107,6 +112,7 @@ ACTION_DIM: int = (
     + AMOUNT_BLOCK
     + N_UNITS
     + MOVE_BLOCK
+    + N_SIDES
 )
 
 
@@ -335,6 +341,7 @@ def encode_action(game: Game, action: Action, actor: str | None = None) -> np.nd
             amount_vector,
             _one_hot(action.unit, tuple(unit.value for unit in UNIT_ORDER)),
             move_vector,
+            _one_hot(action.side, SUPPORT_SIDES),
         ]
     ).astype(np.float32)
 

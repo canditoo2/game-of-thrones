@@ -87,6 +87,8 @@ class GreedyPolicy(Policy):
             return self._score_westeros_choice(game, action)
         if kind is ActionKind.RETREAT:
             return self._score_retreat(game, action)
+        if kind is ActionKind.DECLARE_SUPPORT:
+            return self._score_support(game, action)
         if kind in (ActionKind.DISBAND, ActionKind.CHOOSE_CASUALTY):
             # Destroying a unit is a pure loss, so prefer the cheapest one.
             return -_UNIT_VALUE.get(UnitType(action.unit), 1.0)
@@ -298,7 +300,42 @@ class GreedyPolicy(Policy):
         score -= self._threat(game, target_id, action.house or "")
         return score
 
+    def _score_support(self, game: Game, action: Action) -> float:
+        """Back our own side, otherwise the side that is further behind.
+
+        The greedy agent has no diplomacy model, so refusing costs nothing; the
+        underdog rule exists just to break ties and keep games from snowballing.
+        """
+        side = action.side or "refuse"
+        if side == "refuse":
+            return 0.0
+        battle = game.state.pending_battle
+        if battle is None:  # pragma: no cover - defensive
+            return 0.0
+        house = action.house or ""
+        attacker = battle["attacker"]
+        defender = battle.get("defender")
+        ally, opponent = (
+            (attacker, defender) if side == "attacker" else (defender, attacker)
+        )
+        if ally == house:
+            return 2.0
+        if opponent is None:
+            # Supporting an attack on a Neutral Force: mildly worthwhile.
+            return 0.5
+        return 0.5 + 0.5 * (
+            self._victory_points(game, opponent) - self._victory_points(game, ally or "")
+        )
+
     # -- helpers ---------------------------------------------------------
+
+    def _victory_points(self, game: Game, house: str) -> int:
+        """Number of castles and strongholds controlled by ``house``."""
+        return sum(
+            1
+            for region_id in game.state.controlled_regions(house)
+            if game.map.regions[region_id].is_fortification
+        )
 
     def _threat(self, game: Game, region_id: str, house: str | None) -> float:
         """Rough enemy combat strength adjacent to a region."""

@@ -142,7 +142,11 @@ def unit_strength(
 
 
 def _contributing_units(
-    state: GameState, region_id: str, battle_is_sea: bool, supporter_is_attacker: bool
+    state: GameState,
+    region_id: str,
+    battle_is_sea: bool,
+    supporter_is_attacker: bool,
+    target_is_fortification: bool,
 ) -> dict[UnitType, int]:
     """Which units in a supporting region can actually add strength."""
     game_map = load_map()
@@ -168,8 +172,9 @@ def _contributing_units(
     if not contributing:
         return {}
     # A supporting Siege Engine only contributes when supporting the attacker
-    # against a Castle or Stronghold.
-    if not (supporter_is_attacker and game_map.regions[region_id].is_fortification):
+    # against a Castle or Stronghold, and it is the *embattled* area that must
+    # be fortified - not the area the Siege Engine is supporting from.
+    if not (supporter_is_attacker and target_is_fortification):
         contributing.pop(UnitType.SIEGE, None)
     return contributing
 
@@ -183,8 +188,9 @@ def support_strength(
 ) -> int:
     """Support a house receives from its own adjacent Support orders.
 
-    ``region_id`` is the embattled area. Support is only ever granted to a
-    house by its own orders here (cross-house support is out of scope).
+    This is the legacy self-directed helper used when
+    :func:`resolve_battle` is called without explicit ``support_choices``.
+    Cross-house support is resolved by :func:`support_from_choices`.
     """
     total, _ = support_detail(
         state, region_id, house, supporting_attacker=supporting_attacker
@@ -217,7 +223,11 @@ def support_detail(
         if spec.order_type is not OrderType.SUPPORT:
             continue
         contributing = _contributing_units(
-            state, neighbour, battle_is_sea, supporting_attacker
+            state,
+            neighbour,
+            battle_is_sea,
+            supporting_attacker,
+            game_map.regions[region_id].is_fortification,
         )
         for unit, count in contributing.items():
             units[unit] = units.get(unit, 0) + count
@@ -228,6 +238,99 @@ def support_detail(
         )
         total += spec.strength
     return total, units
+
+
+def support_orders(state: GameState, region_id: str) -> list[tuple[str, str]]:
+    """Adjacent Support orders as ``(region_id, owner)`` in declaration order.
+
+    Support is declared in Iron Throne order (rulebook page 18). The embattled
+    area itself is never included: a Support order gives no defensive benefit to
+    an attack against its own area.
+    """
+    game_map = load_map()
+    throne = state.tracks[Track.IRON_THRONE]
+    found: list[tuple[str, str]] = []
+    for neighbour in game_map.neighbours_of(region_id):
+        region = state.regions[neighbour]
+        if region.order is None or region.order_house is None:
+            continue
+        spec = ORDERS_BY_KEY.get(region.order)
+        if spec is None or spec.order_type is not OrderType.SUPPORT:
+            continue
+        found.append((neighbour, region.order_house))
+    found.sort(
+        key=lambda item: throne.index(item[1]) if item[1] in throne else len(throne)
+    )
+    return found
+
+
+def potential_support_strength(
+    state: GameState, region_id: str, *, supporting_attacker: bool = True
+) -> int:
+    """Upper bound on support: every adjacent Support order contributes fully.
+
+    Used to test whether a march against a Neutral Force *could* succeed once
+    support has been declared, since that is unknown when legal marches are
+    generated (rulebook page 26).
+    """
+    game_map = load_map()
+    battle_is_sea = game_map.regions[region_id].is_sea
+    is_fort = game_map.regions[region_id].is_fortification
+    total = 0
+    for neighbour, _owner in support_orders(state, region_id):
+        contributing = _contributing_units(
+            state, neighbour, battle_is_sea, supporting_attacker, is_fort
+        )
+        spec = ORDERS_BY_KEY[state.regions[neighbour].order]
+        total += (
+            units_strength(contributing, siege_active=supporting_attacker and is_fort)
+            + spec.strength
+        )
+    return total
+
+
+def support_from_choices(
+    state: GameState, region_id: str, choices: dict[str, str]
+) -> tuple[int, dict[UnitType, int], int, dict[UnitType, int]]:
+    """Build each side's support from explicit ``area -> side`` declarations.
+
+    Returns ``(attacker_strength, attacker_units, defender_strength,
+    defender_units)``. A declaration of ``"refuse"`` (or an area whose order has
+    since gone) contributes nothing.
+    """
+    game_map = load_map()
+    battle_is_sea = game_map.regions[region_id].is_sea
+    is_fort = game_map.regions[region_id].is_fortification
+    attacker_units: dict[UnitType, int] = {}
+    defender_units: dict[UnitType, int] = {}
+    attacker_total = 0
+    defender_total = 0
+    for support_region, side in choices.items():
+        if side not in ("attacker", "defender"):
+            continue
+        region = state.regions.get(support_region)
+        if region is None or region.order is None:
+            continue
+        spec = ORDERS_BY_KEY.get(region.order)
+        if spec is None or spec.order_type is not OrderType.SUPPORT:
+            continue
+        supporting_attacker = side == "attacker"
+        contributing = _contributing_units(
+            state, support_region, battle_is_sea, supporting_attacker, is_fort
+        )
+        strength = (
+            units_strength(contributing, siege_active=supporting_attacker and is_fort)
+            + spec.strength
+        )
+        if supporting_attacker:
+            attacker_total += strength
+            for unit, count in contributing.items():
+                attacker_units[unit] = attacker_units.get(unit, 0) + count
+        else:
+            defender_total += strength
+            for unit, count in contributing.items():
+                defender_units[unit] = defender_units.get(unit, 0) + count
+    return attacker_total, attacker_units, defender_total, defender_units
 
 
 def order_modifier(state: GameState, region_id: str, house: str, side: str) -> int:
@@ -302,6 +405,7 @@ def resolve_battle(
     defender_blade: bool = False,
     attacker_order: str | None = None,
     attacker_origin: str | None = None,
+    support_choices: dict[str, str] | None = None,
 ) -> BattleResult:
     """Compute the outcome of a battle without mutating ``state``.
 
@@ -309,6 +413,10 @@ def resolve_battle(
     ability that moves an Order token, an Influence track or a card between hand
     and discard is *recorded* on the returned :class:`~agot.engine.house_cards.BattleContext`
     and committed by :func:`resolve_and_apply`.
+
+    ``support_choices`` maps an adjacent supporting area to ``"attacker"`` or
+    ``"defender"``. When it is ``None`` the engine falls back to the old
+    self-directed support, which keeps hand-written calls working.
     """
     attacker_units = dict(attacker_units)
     defender_units = dict(defender_units)
@@ -317,12 +425,20 @@ def resolve_battle(
     is_fortification = game_map.regions[region_id].is_fortification
     region = state.regions[region_id]
 
-    attacker_support, attacker_support_units = support_detail(
-        state, region_id, attacker, supporting_attacker=True
-    )
-    defender_support, defender_support_units = support_detail(
-        state, region_id, defender, supporting_attacker=False
-    )
+    if support_choices is None:
+        attacker_support, attacker_support_units = support_detail(
+            state, region_id, attacker, supporting_attacker=True
+        )
+        defender_support, defender_support_units = support_detail(
+            state, region_id, defender, supporting_attacker=False
+        )
+    else:
+        (
+            attacker_support,
+            attacker_support_units,
+            defender_support,
+            defender_support_units,
+        ) = support_from_choices(state, region_id, support_choices)
 
     attacker_side = build_side(
         attacker,

@@ -46,10 +46,12 @@ from agot.engine.actions import Action, ActionKind
 from agot.engine.combat import (
     apply_battle_result,
     order_modifier,
+    potential_support_strength,
     resolve_battle,
     retreat_keeps_supply,
     retreat_options,
-    support_strength,
+    support_from_choices,
+    support_orders,
     units_strength,
 )
 from agot.engine.enums import (
@@ -301,6 +303,8 @@ class Game:
             self._apply_consolidate_muster(action)
         elif kind is ActionKind.USE_BLADE:
             self._apply_use_blade(action)
+        elif kind is ActionKind.DECLARE_SUPPORT:
+            self._apply_declare_support(action)
         elif kind is ActionKind.CHOOSE_CASUALTY:
             self._apply_choose_casualty(action)
         elif kind is ActionKind.RETREAT:
@@ -1533,10 +1537,12 @@ class Game:
     def _neutral_attack_strength(
         self, house: str, origin: str, target: str, units: tuple[int, ...]
     ) -> int:
-        """Combat Strength of a march against a Neutral Force (rulebook page 26).
+        """Upper bound of a march's Combat Strength against a Neutral Force.
 
-        A Neutral Force may not use a House card or the Valyrian Steel Blade, but
-        the attacker may still receive support, and the attacker wins ties.
+        The attacker may receive support from any adjacent Support order, but
+        only once it is declared, so legal-march generation uses the maximum
+        possible support (rulebook page 26). A Neutral Force may not use a House
+        card or the Valyrian Steel Blade, and ties go to the attacker.
         """
         static = self.map.regions[target]
         moving = {
@@ -1551,7 +1557,9 @@ class Game:
         return (
             units_strength(moving, siege_active=static.is_fortification)
             + order_modifier(self.state, origin, house, "attacker")
-            + support_strength(self.state, target, house, supporting_attacker=True)
+            + potential_support_strength(
+                self.state, target, supporting_attacker=True
+            )
         )
 
     def _beats_neutral(
@@ -1734,9 +1742,35 @@ class Game:
             not target.is_empty() or target.garrison > 0
         )
         if target.neutral_force > 0:
-            self._apply_neutral_attack(
-                house, origin, target_id, moving, attacker_order_strength
+            # Attacking a Neutral Force is still a battle for *support*: the
+            # attacker may receive support from adjacent areas, but the token
+            # itself never does (rulebook page 26).
+            self.state.pending_battle = {
+                "region": target_id,
+                "attacker": house,
+                "defender": None,
+                "neutral": True,
+                "origin": origin,
+                "attacker_order": attacker_order_key,
+                "attacker_units": moving,
+                "defender_units": {},
+                "attacker_order_strength": attacker_order_strength,
+                "defender_order_strength": 0,
+                "stage": "support",
+                "support_queue": [
+                    region for region, _owner in support_orders(self.state, target_id)
+                ],
+                "support_index": 0,
+                "support_choices": {},
+            }
+            self.state.phase = Phase.COMBAT
+            self.state.note(
+                f"{house} marches into {target_id} and attacks the Neutral Force"
             )
+            if not self.state.pending_battle["support_queue"]:
+                # No Support order can help, so there is nothing to ask: resolve
+                # the attack straight away (the common case).
+                self._finalize_neutral_battle(self.state.pending_battle)
         elif enemy_here:
             defender = target.controller or ""
             # The two forces stay separate until the battle is resolved; see
@@ -1745,6 +1779,7 @@ class Game:
                 "region": target_id,
                 "attacker": house,
                 "defender": defender,
+                "neutral": False,
                 "origin": origin,
                 "attacker_order": attacker_order_key,
                 "attacker_card": None,
@@ -1760,10 +1795,16 @@ class Game:
                 "blade_done": False,
                 "attacker_blade": False,
                 "defender_blade": False,
-                # Battle stages: "cards" -> "blade" -> "casualties" ->
-                # "retreat" -> "finalize". Casualties and the retreat are the
-                # defeated player's decisions (rulebook pages 20-21).
-                "stage": "cards",
+                # Battle stages: "support" -> "cards" -> "blade" ->
+                # "casualties" -> "retreat" -> "finalize". Support, casualties
+                # and the retreat are the players' decisions (rulebook pages
+                # 17-21).
+                "stage": "support",
+                "support_queue": [
+                    region for region, _owner in support_orders(self.state, target_id)
+                ],
+                "support_index": 0,
+                "support_choices": {},
             }
             self.state.phase = Phase.COMBAT
             self.state.note(f"{house} marches into {target_id} and attacks {defender}")
@@ -1786,14 +1827,7 @@ class Game:
                 else (source.owner if source.owner else None)
             )
 
-    def _apply_neutral_attack(
-        self,
-        house: str,
-        origin: str,
-        target_id: str,
-        moving: dict[UnitType, int],
-        attacker_order_strength: int,
-    ) -> None:
+    def _finalize_neutral_battle(self, battle: dict) -> None:
         """Resolve a march against a Neutral Force token (rulebook page 26).
 
         The attacker must equal or exceed the token's printed strength; there is
@@ -1801,20 +1835,31 @@ class Game:
         the token is removed and the area (with its fortification) is taken.
         """
         state = self.state
+        house = battle["attacker"]
+        origin = battle["origin"]
+        target_id = battle["region"]
+        moving = battle["attacker_units"]
         target = state.regions[target_id]
         static = self.map.regions[target_id]
+        support, _a_units, _d_total, _d_units = support_from_choices(
+            state, target_id, battle.get("support_choices", {})
+        )
         strength = (
             units_strength(moving, siege_active=static.is_fortification)
-            + attacker_order_strength
-            + support_strength(state, target_id, house, supporting_attacker=True)
+            + battle["attacker_order_strength"]
+            + support
         )
+        self.state.pending_battle = None
+        self.state.phase = Phase.ACTION
         if strength < target.neutral_force:
-            # Legal actions are filtered before this point; if an illegal march
-            # does get here, leave the army where it was rather than let the
-            # attack through.
+            # Support may have been refused; the attack then fails and the army
+            # returns to where it marched from (rulebook page 26 says such a
+            # march "may not be attempted").
             source = state.regions[origin]
             for unit, count in moving.items():
                 source.units[unit] = source.units.get(unit, 0) + count
+            if source.controller != house:
+                source.controller = house
             state.note(
                 f"{house} cannot destroy the Neutral Force in {target_id} "
                 f"({strength} < {target.neutral_force}); march cancelled"
@@ -2051,6 +2096,16 @@ class Game:
         if battle is None:
             return None
         stage = battle.get("stage", "cards")
+        if stage == "support":
+            queue = battle.get("support_queue", [])
+            index = battle.get("support_index", 0)
+            if index < len(queue):
+                region = self.state.regions[queue[index]]
+                return region.order_house
+            # All support has been declared; move on. A Neutral Force has no
+            # defending House card, so it goes straight to resolution.
+            battle["stage"] = "neutral_resolve" if battle.get("neutral") else "cards"
+            stage = battle["stage"]
         if stage == "cards":
             if not battle.get("attacker_card_chosen", False):
                 return battle["attacker"]
@@ -2083,6 +2138,27 @@ class Game:
         if battle is None:  # pragma: no cover - defensive
             return []
         stage = battle.get("stage", "cards")
+        if stage == "support":
+            queue = battle.get("support_queue", [])
+            index = battle.get("support_index", 0)
+            if index >= len(queue):  # pragma: no cover - defensive
+                return []
+            region = queue[index]
+            if self.state.regions[region].order_house != house:
+                return []  # pragma: no cover - defensive
+            if battle.get("neutral"):
+                # A Neutral Force can never receive support (page 26).
+                sides = ("attacker", "refuse")
+            elif house == battle["attacker"]:
+                # A player may never support an opponent against their own units.
+                sides = ("attacker", "refuse")
+            elif house == battle["defender"]:
+                sides = ("defender", "refuse")
+            else:
+                sides = ("attacker", "defender", "refuse")
+            return [
+                Action.declare_support(house, region, side) for side in sides
+            ]
         if stage == "cards":
             house_state = self.state.houses[house]
             if not house_state.house_cards_available:
@@ -2115,6 +2191,28 @@ class Game:
                 for destination in battle.get("retreat_options", [])
             ]
         return []
+
+    def _apply_declare_support(self, action: Action) -> None:
+        """Record one Support order's side and move to the next declaration."""
+        battle = self.state.pending_battle
+        if battle is None:  # pragma: no cover - defensive
+            return
+        queue = battle.get("support_queue", [])
+        index = battle.get("support_index", 0)
+        region = action.region or ""
+        house = action.house or ""
+        if index >= len(queue) or queue[index] != region:
+            return  # pragma: no cover - not the area currently being asked
+        if self.state.regions[region].order_house != house:
+            return  # pragma: no cover - defensive
+        side = action.side or "refuse"
+        if side in ("attacker", "defender"):
+            battle.setdefault("support_choices", {})[region] = side
+        battle["support_index"] = index + 1
+        verb = "supports the attacker" if side == "attacker" else (
+            "supports the defender" if side == "defender" else "refuses to support"
+        )
+        self.state.note(f"{house} {verb} from {region}")
 
     def _apply_use_blade(self, action: Action) -> None:
         battle = self.state.pending_battle
@@ -2199,6 +2297,7 @@ class Game:
             defender_order_strength=battle["defender_order_strength"],
             attacker_blade=bool(battle.get("attacker_blade", False)),
             defender_blade=bool(battle.get("defender_blade", False)),
+            support_choices=battle.get("support_choices"),
         )
         battle["result"] = result
         house_cards.commit_deferred(result.context)
@@ -2313,6 +2412,9 @@ class Game:
         stage = battle.get("stage", "cards")
         if stage in ("cards", "blade"):
             self._begin_battle_resolution(battle)
+            return
+        if stage == "neutral_resolve":
+            self._finalize_neutral_battle(battle)
             return
         if stage == "casualties":
             # All casualties have been chosen; move on to the retreat.

@@ -5,13 +5,13 @@ from __future__ import annotations
 import numpy as np
 
 from agot.engine import observation as obs
-from agot.engine.actions import ActionKind
+from agot.engine.actions import Action, ActionKind
 from agot.engine.game import Game, GameConfig
 
 
 def test_dimensions_are_documented_constants() -> None:
     assert obs.STATE_DIM == 97
-    assert obs.ACTION_DIM == 137
+    assert obs.ACTION_DIM == 141
     assert obs.N_HOUSES == 6
 
 
@@ -42,6 +42,19 @@ def test_action_kind_block_is_one_hot() -> None:
     kind_block = vector[: obs.N_ACTION_KINDS]
     assert kind_block.sum() == 1.0
     assert kind_block[list(ActionKind).index(ActionKind.PLACE_ORDER)] == 1.0
+
+
+def test_support_side_is_encoded() -> None:
+    game = Game.new(GameConfig(seed=4))
+    vector = obs.encode_action(
+        game, Action.declare_support("stark", "winterfell", "attacker")
+    )
+    assert vector.shape == (obs.ACTION_DIM,)
+    assert list(vector[-obs.N_SIDES :]) == [1.0, 0.0, 0.0]
+    refusing = obs.encode_action(
+        game, Action.declare_support("stark", "winterfell", "refuse")
+    )
+    assert list(refusing[-obs.N_SIDES :]) == [0.0, 0.0, 1.0]
 
 
 def test_absent_houses_encode_to_zeros() -> None:

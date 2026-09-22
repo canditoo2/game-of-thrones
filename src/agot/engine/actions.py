@@ -32,6 +32,10 @@ class ActionKind(str, Enum):
     #: The defeated player chooses which unit is destroyed for one casualty
     #: (``region`` is the embattled area, ``unit`` the unit type to remove).
     CHOOSE_CASUALTY = "choose_casualty"
+    #: A player declares which side an adjacent Support order helps. ``region``
+    #: is the supporting area and ``side`` is ``"attacker"``, ``"defender"`` or
+    #: ``"refuse"`` (rulebook pages 17-18).
+    DECLARE_SUPPORT = "declare_support"
     MUSTER = "muster"
     UPGRADE = "upgrade"
     BID = "bid"
@@ -56,6 +60,9 @@ class Action:
     order: str | None = None
     card: str | None = None
     unit: str | None = None
+    #: Which side a Support order helps: ``"attacker"``, ``"defender"`` or
+    #: ``"refuse"``. Only meaningful for :attr:`ActionKind.DECLARE_SUPPORT`.
+    side: str | None = None
     amount: int | None = None
     #: Units that move, as a count per entry of
     #: :data:`agot.engine.observation.UNIT_ORDER` (Footman, Knight, Siege,
@@ -75,6 +82,7 @@ class Action:
             "order",
             "card",
             "unit",
+            "side",
             "amount",
             "units",
         ):
@@ -156,6 +164,13 @@ class Action:
         """Destroy one named unit for a battle casualty."""
         return Action(
             ActionKind.CHOOSE_CASUALTY, house=house, region=region, unit=unit
+        )
+
+    @staticmethod
+    def declare_support(house: str, region: str, side: str) -> Action:
+        """Declare which side a Support order in ``region`` helps."""
+        return Action(
+            ActionKind.DECLARE_SUPPORT, house=house, region=region, side=side
         )
 
     @staticmethod

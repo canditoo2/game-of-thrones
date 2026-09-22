@@ -40,6 +40,8 @@ facts extracted from them are stored.
 | 8 | House Martell's starting units | 1 Footman + 1 Knight in Sunspear, 1 Footman in Salt Shore, 1 Ship in East Summer Sea (inferred) | Sunspear 1 Footman + 1 Knight, Salt Shore 1 Footman, **1 Ship in the Sea of Dorne** | User, against the physical board |
 | 9 | Six-player Influence tracks | Martell last on all three tracks (inferred) | Iron Throne: Baratheon, Lannister, Stark, Martell, Greyjoy, Tyrell; Fiefdoms: Greyjoy, Tyrell, Martell, Stark, Baratheon, Lannister; King's Court: Lannister, Stark, Martell, Baratheon, Tyrell, Greyjoy | User, against the physical board |
 | 10 | Starred-order allowance | Flagged unverified | Confirmed `(3, 3, 2, 1, 0, 0)` | `chibimagic` `KingsCourtTrack::FIVE_SIX_PLAYER_SPECIAL_ORDERS`; printed on the board |
+| 11 | Cross-house support | Support was automatic and only ever helped its owner | Combat opens with a Support step: each adjacent Support order's owner, in Iron Throne order, declares `attacker`, `defender` or `refuse`. A player may never support an opponent against their own units; Neutral Forces can never be supported | Rulebook pp. 17-18 and p. 26 |
+| 12 | Siege Engine support | Counted only when the *supporting* area was a Castle/Stronghold | Counts only when the *embattled* area is a Castle/Stronghold, which is what the rulebook means | Rulebook p. 18 |
 
 Correction 2 also carries a (non-mechanical) fact: House Stark is the only house
 to open with **both** a Stronghold (Winterfell) and a Castle (White Harbor).
@@ -62,6 +64,10 @@ are right:
 * Home-area shields and printed ownership.
 * Siege Engines contribute 4 only when attacking (or supporting an attack
   against) an area containing a Castle or Stronghold.
+* Support is declared in Iron Throne order; a player may never support an
+  opponent against their own units; a Support order is **not** consumed by
+  declaring support and may help several battles in the same round. A Neutral
+  Force can never receive support, but the attacker against one can.
 * The 15 Westeros card names and the per-deck deal (each deck = 10 cards); the
   cards carrying a Wildling icon; *Winter is Coming* reshuffles and redraws.
 * The nine Wildling card names and their effects.
@@ -87,9 +93,9 @@ Everything in the table above is verified at **High** confidence.
 The physical game asks a player to choose inside several effects (which unit
 dies, which area is retreated to, which card is played). The engine keeps the
 game *decidable* by auto-resolving those sub-choices with deterministic
-defaults, **except** for battle casualties and a defeated defender's retreat,
-which are now genuine player decisions (the Combat phase pauses for them; see
-`docs/roadmap.md`). The chosen defaults are:
+defaults, **except** for battle casualties, battle support declarations and a
+defeated defender's retreat, which are now genuine player decisions (the Combat
+phase pauses for them; see `docs/roadmap.md`). The chosen defaults are:
 
 ### House cards
 

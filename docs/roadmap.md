@@ -12,6 +12,10 @@ how much it matters for learning a strong agent. It doubles as the project plan.
   action steps (raid, march, consolidate power), combat, cleanup, victory.
 * Combat resolution with March/Defend modifiers, support, House cards, the
   Valyrian Steel Blade, `swords − forts` casualties and Fiefdom tie-breaks.
+* Cross-house support: combat opens with a Support step, each adjacent Support
+  order is offered to its owner in Iron Throne order, and owners may back either
+  side or refuse. A player may never support an opponent against their own
+  units, and Support orders are not consumed by a battle.
 * All 42 House cards' special abilities (see `engine/house_cards.py`); the
   player sub-choices inside an ability are auto-resolved with documented
   deterministic defaults.
@@ -45,10 +49,18 @@ they should be fixed before expecting a strong agent.
    belief over hidden orders, or (simpler) search with a determinised sample of
    the hidden orders. Until then, search is optimistic.
 
-2. **Cross-house support.** A Support order may help *either* side in an
-   adjacent battle, and the supporting player chooses. Currently support is
-   automatic and only ever helps its owner. This is where most of the game's
-   diplomacy lives.
+2. **Cross-house support.** *(done)* A Support order may help *either* side in
+   an adjacent battle, and the supporting player chooses. Combat opens with a
+   Support step: each adjacent Support order is offered to its owner in Iron
+   Throne order, and the owner declares `attacker`, `defender` or `refuse`.
+   A player may never support an opponent against their own units; a third
+   house may back either side. The Support order is not consumed and may help
+   several battles in a round. Attacking a Neutral Force opens the same step,
+   but the token itself can never be supported (rulebook page 26). The
+   pre-march legality check for a Neutral Force uses the maximum possible
+   support, so an attack that only becomes legal once allies declare is still
+   offered and is cancelled if the support is refused. This is where most of
+   the game's diplomacy lives.
 
 3. **Player-chosen casualties and retreats.** *(done)* After the strength
    comparison the Combat phase pauses: the defeated player destroys one unit at a

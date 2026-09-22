@@ -35,7 +35,9 @@ into the layer below it, which keeps the rules code testable and torch-free.
   agent loop simple: ask for legal actions, pick one, repeat.
 * `combat.py` resolves battles from two *explicit* unit pools. Keeping the
   attacker's and defender's units separate is essential: casualty removal has to
-  know whose units are whose.
+  know whose units are whose. Support is fed in as explicit per-area
+  declarations (`support_from_choices`); `resolve_battle` also accepts the old
+  self-directed derivation when no declarations are supplied.
 * `house_cards.py` applies each House card's special ability around a battle.
   `resolve_battle` is kept free of board mutation: it *records* deferred effects
   (Order removals, Influence moves, card swaps) on a `BattleContext`, and
@@ -53,10 +55,11 @@ and advancing would move the Action Phase turn-order cursor.
 * `encode_state(game) -> (97,)` — per-house blocks (castles, power, supply,
   track positions, unit counts, cards in hand) plus a global block (round,
   phase one-hot, action-step one-hot, wildling threat).
-* `encode_action(game, action) -> (136,)` — a *relational* description of one
+* `encode_action(game, action) -> (141,)` — a *relational* description of one
   candidate action: kind one-hot, actor, and, for the region and target,
   terrain, controller relation, unit counts and order state. March actions also
-  carry which units move and whether control is established. It deliberately
+  carry which units move and whether control is established, and Support
+  declarations carry which side they help. It deliberately
   does **not** one-hot region ids, so the encoding transfers to any board.
 
 Houses always appear in a fixed canonical order (`HOUSE_ORDER`), with unused
@@ -121,6 +124,9 @@ where the value mask restricts the loss to houses actually in the game.
 * `test_player_choice_combat.py` — the defeated player chooses which units die
   and (when defending) where to retreat; Blackfish, Robb Stark and the forced
   attacker retreat.
+* `test_cross_house_support.py` — third houses back either side or refuse,
+  Iron Throne declaration order, own-side restriction, unconsumed Support
+  orders, siege support and support against a Neutral Force.
 * `test_rules_fixes.py` — one regression test per audited rule fix: Action-Phase
   turn order, per-order decline, consolidate on open water, port capacity and
   capture, supply on marches, establishing control, Special Consolidate Power
