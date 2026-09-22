@@ -108,8 +108,9 @@ they should be fixed before expecting a strong agent.
 
 ## Data verification
 
-17. **Check the flagged board data.** The six-player influence tracks are the
-    highest-impact unverified value; see [`../PROVENANCE.md`](../PROVENANCE.md).
+17. **Check the flagged board data.** *(mostly done)* The six-player influence
+    tracks and the starred-order allowance are confirmed; only House Martell's
+    starting land units remain inferred. See [`../PROVENANCE.md`](../PROVENANCE.md).
 18. **Westeros deck composition.** *(done)* Confirmed against
     `Rulebook/Westeros_card.txt`; each of the three decks holds exactly ten
     cards.

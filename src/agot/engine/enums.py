@@ -155,7 +155,8 @@ ORDER_SPECS: tuple[OrderSpec, ...] = (
 ORDERS_BY_KEY: dict[str, OrderSpec] = {spec.key: spec for spec in ORDER_SPECS}
 
 #: How many starred orders a house may place, by its position (1-based) on the
-#: King's Court track. UNVERIFIED - see PROVENANCE.md.
+#: King's Court track. Verified against chibimagic's ``KingsCourtTrack``
+#: ``FIVE_SIX_PLAYER_SPECIAL_ORDERS = [3, 3, 2, 1, 0, 0]``.
 STAR_ALLOWANCE_BY_COURT_POSITION: tuple[int, ...] = (3, 3, 2, 1, 0, 0)
 
 #: Maximum army sizes a house may support, indexed by supply level. Each row

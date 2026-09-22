@@ -31,9 +31,9 @@ open, and the deterministic defaults used for multi-choice effects — see
 | The 42 House card names and printed stats | **High** | Transcribed from the user-supplied `Rulebook/151060549-House-Cards-Reference-Sheet.txt` and cross-checked against community data sets |
 | House card ability texts | **High** | Transcribed from the same reference sheet; player sub-choices use a documented deterministic default |
 | House Martell's House cards | **High** | Included in the reference sheet; the earlier file was missing Darkstar and had wrong strengths |
-| House Martell's starting units | **Low / unverified** | Inferred by pattern |
-| Six-player influence track order | **Low / unverified** | Reference does not fully model Martell; Martell placed last by inference |
-| Starred-order allowance by King's Court position `(3, 3, 2, 1, 0, 0)` | **Medium** | Encodes the known "top two get three/four stars" behaviour; exact table unverified |
+| House Martell's starting units | **High** | Confirmed by the user against the physical board (Sunspear 1 Footman + 1 Knight, Salt Shore 1 Footman, 1 Ship in the Sea of Dorne) |
+| Six-player influence track order | **High** | Corrected by the user against the physical board |
+| Starred-order allowance by King's Court position `(3, 3, 2, 1, 0, 0)` | **High** | Matches chibimagic's `KingsCourtTrack::FIVE_SIX_PLAYER_SPECIAL_ORDERS`; also printed on the board |
 | Wildling card names (9) | **High** | Match the physical component list |
 | Wildling card effects | **High** | Transcribed from the bundled scans (`Rulebook/wildling-cards1..3.webp`); player sub-choices use a documented deterministic default |
 | Wildling attack procedure (bid, pooled strength, track reset) | **High** | Official 2E rulebook pages 22-23 |
@@ -45,19 +45,12 @@ truth for tooling; the table above is a human summary.
 
 ## What to verify first
 
-If you have the physical board and rulebook to hand, checking these in order
-would do the most to improve the fidelity of the engine:
+Nothing is currently flagged. The starting positions, the six-player Influence
+tracks, the King's Court starred-order allowance, House Stark's starting Supply,
+the House card data and the Westeros deck deal have all been confirmed.
 
-1. **The six-player influence tracks** in `houses.json`
-   (`initial_tracks.iron_throne`, `.fiefdoms`, `.kings_court`). Turn order,
-   tie-breaks and starred orders all depend on them.
-2. **The starred-order allowance** by King's Court position
-   (`STAR_ALLOWANCE_BY_COURT_POSITION`, `(3, 3, 2, 1, 0, 0)`), which is printed
-   on the physical board only.
-3. **House Martell's starting units** in `houses.json`.
-
-House Stark's starting Supply, the House card data and the Westeros deck deal
-were verified in the latest audit and no longer need checking.
+If you spot a discrepancy in play, re-check the relevant file under
+`src/agot/data/` and update its `verified` flag and `notes` as described below.
 
 ## Sources
 

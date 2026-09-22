@@ -33,10 +33,13 @@ facts extracted from them are stored.
 | 1 | The Mountains of the Moon icon | Power 1, Supply 0 | Power 0, Supply 1 | `board.jpg`; matches `chibimagic` `area.rb` |
 | 2 | House Stark starting Supply | 2 | **1** (every other house stays 2) | Physical player screen, confirmed by the user |
 | 3 | House Martell House cards | Missing Darkstar; Red Viper 0, Areo Hotah 2, Obara 2, Nymeria 1, Arianne 4, Doran 3; included "Ellaria Sand" | Red Viper 4 (2 sword + 1 fort), Areo Hotah 3 (fort), Obara Sand 2 (sword), Darkstar 2 (sword), Nymeria Sand 1, Arianne Martell 1, Doran Martell 0 | `151060549-House-Cards-Reference-Sheet.txt` |
-| 4 | Lannister setup | 1 Ship in The Golden Sound only | 1 Ship in The Golden Sound **and 1 Ship in the Lannisport port** | Official FAQ v2.0 errata setup |
+| 4 | Lannister setup (reverted) | 1 Ship in The Golden Sound only | Briefly added a port Ship from the FAQ v2.0 errata; removed again at the user's request, so the base setup stands | Physical setup, per the user |
 | 5 | Holders'-choice Westeros cards | Resolved as "no effect" | Real decisions for the named Influence token's holder | `Westeros_card.txt` |
 | 6 | House-card special abilities | Ignored (printed stats only) | All 42 implemented in `engine/house_cards.py` | `151060549-House-Cards-Reference-Sheet.txt` |
 | 7 | Neutral Forces | Not modelled | King's Landing (5) and The Eyrie (6) placed at 6-player setup | Rulebook p. 4 and p. 26 |
+| 8 | House Martell's starting units | 1 Footman + 1 Knight in Sunspear, 1 Footman in Salt Shore, 1 Ship in East Summer Sea (inferred) | Sunspear 1 Footman + 1 Knight, Salt Shore 1 Footman, **1 Ship in the Sea of Dorne** | User, against the physical board |
+| 9 | Six-player Influence tracks | Martell last on all three tracks (inferred) | Iron Throne: Baratheon, Lannister, Stark, Martell, Greyjoy, Tyrell; Fiefdoms: Greyjoy, Tyrell, Martell, Stark, Baratheon, Lannister; King's Court: Lannister, Stark, Martell, Baratheon, Tyrell, Greyjoy | User, against the physical board |
+| 10 | Starred-order allowance | Flagged unverified | Confirmed `(3, 3, 2, 1, 0, 0)` | `chibimagic` `KingsCourtTrack::FIVE_SIX_PLAYER_SPECIAL_ORDERS`; printed on the board |
 
 Correction 2 also carries a (non-mechanical) fact: House Stark is the only house
 to open with **both** a Stronghold (Winterfell) and a Castle (White Harbor).
@@ -72,18 +75,12 @@ rulebook has no elimination rule, so the `eliminated` field stays unused.
 
 ## Remaining uncertainty
 
-In priority order (also listed in `PROVENANCE.md`):
+No data is currently flagged as unverified. The starting positions, the
+six-player Influence tracks, the King's Court starred-order allowance, House
+Stark's starting Supply, the House card data and the Westeros deck deal have all
+been confirmed.
 
-1. **The six-player Influence track order** (`houses.json` → `initial_tracks`).
-   Turn order, tie-breaks and starred orders all depend on it. The reference
-   used does not fully model House Martell, so Martell is placed last on all
-   three tracks by inference.
-2. **The starred-order allowance by King's Court position** —
-   `STAR_ALLOWANCE_BY_COURT_POSITION = (3, 3, 2, 1, 0, 0)`. This is printed on
-   the physical board only.
-3. **House Martell's starting units** in `houses.json`, inferred by pattern.
-
-Everything else in the table above is verified at **High** confidence.
+Everything in the table above is verified at **High** confidence.
 
 ## Fidelity of the multi-choice effects
 
