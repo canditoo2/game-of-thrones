@@ -182,3 +182,12 @@ def test_parallel_self_play_against_scripted_opponents() -> None:
     )
     records = parallel_self_play(model, plan)
     assert len(records) == 2
+
+
+def test_worker_count_respects_the_plan_and_the_machine() -> None:
+    from agot.training.parallel import SelfPlayPlan, worker_count
+
+    assert worker_count(SelfPlayPlan(workers=3), games=10) == 3
+    # Never more workers than games, and never zero.
+    assert worker_count(SelfPlayPlan(workers=0), games=1) == 1
+    assert worker_count(SelfPlayPlan(workers=8), games=5) == 5

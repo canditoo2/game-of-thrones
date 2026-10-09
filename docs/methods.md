@@ -139,7 +139,9 @@ Kept short; each entry is *what it is → pro → con → verdict*.
 ## Runbook: the first credible run (run3)
 
 Heavy runs happen on the training machine; the build machine only prepares and
-verifies. The commands below are the whole procedure.
+verifies. The commands below are the whole procedure. On Google Colab,
+`colab/agot-colab.ipynb` automates them (private-repo token in Colab secrets,
+checkpoints on Drive, resume across disconnects).
 
 0. **Smoke first.** Five iterations on a small budget:
 

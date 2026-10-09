@@ -40,8 +40,9 @@ class SelfPlayPlan:
     determinizations: int = 1
     temperature: float = 1.0
     seed: int = 0
-    #: 0 picks ``cpus - 1`` worker processes. Each is single-threaded on purpose:
-    #: many small nets are faster as N processes than as one multi-threaded run.
+    #: 0 picks one process per usable CPU, minus one. Each is single-threaded
+    #: on purpose: many small nets are faster as N processes than as one
+    #: multi-threaded run.
     workers: int = 0
     #: Games advanced in lockstep inside a worker (amortises the forward pass).
     batch_games: int = 4
@@ -157,10 +158,23 @@ def _play_with_state(
     return _play_chunk(configs, options)
 
 
+def _usable_cpus() -> int:
+    """How many CPUs this process may actually use.
+
+    ``os.cpu_count`` reports the host's cores, which inside a container (Colab,
+    CI, cgroups) can be far more than the process is allowed to use; the
+    affinity mask is the honest number wherever the platform has one.
+    """
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:  # Windows has no affinity mask
+        return max(1, os.cpu_count() or 1)
+
+
 def worker_count(plan: SelfPlayPlan, games: int | None = None) -> int:
     """How many processes :func:`parallel_self_play` would use."""
     total = plan.games if games is None else games
-    workers = plan.workers or max(1, (os.cpu_count() or 1) - 1)
+    workers = plan.workers or max(1, _usable_cpus() - 1)
     return max(1, min(workers, max(1, total)))
 
 
