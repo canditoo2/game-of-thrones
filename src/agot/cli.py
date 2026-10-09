@@ -4,10 +4,14 @@ Examples::
 
     agot demo --policy greedy --seed 1
     agot evaluate --a random --b greedy --games 20
-    agot train --games 50 --simulations 32 --epochs 2
+    agot gauntlet --candidate net:checkpoints/run3/agot-best.pt --opponents random
+    agot round-robin --checkpoints checkpoints/run3/agot.pt checkpoints/run3/agot-best.pt
+    agot train --iterations 100 --games 48 --workers 12 --checkpoint checkpoints/agot.pt
     agot report --checkpoint checkpoints/agot.pt --open
 
-The ``train`` subcommand is the only one that needs PyTorch.
+Every policy argument also accepts ``net:<checkpoint path>``, which searches
+with MCTS over that saved network. The ``train`` subcommand and ``net:``
+policies are the only parts that need PyTorch.
 """
 
 from __future__ import annotations
@@ -22,9 +26,35 @@ from agot.agents import MCTS, GreedyPolicy, RandomPolicy
 from agot.engine.game import Game, GameConfig
 from agot.training.selfplay import play_game
 
+#: Loaded networks, keyed by checkpoint path. A gauntlet builds a fresh policy
+#: per seat per game, so the checkpoint is loaded once and the model shared.
+_NET_CACHE: dict[str, object] = {}
+
+
+def _load_net(path: str):
+    """Load (and cache) the network behind a ``net:<path>`` policy."""
+    try:
+        from agot.nn.model import PolicyValueNet
+    except ImportError:
+        raise SystemExit(
+            "net policies need PyTorch: pip install -e \".[rl]\""
+        ) from None
+    model = _NET_CACHE.get(path)
+    if model is None:
+        try:
+            model = PolicyValueNet.load(path)
+        except (OSError, ValueError) as error:
+            raise SystemExit(str(error)) from None
+        _NET_CACHE[path] = model
+    return model
+
 
 def _policy_factory(name: str, **options):
-    """Build a ``factory(house, seed) -> Policy`` for a named agent."""
+    """Build a ``factory(house, seed) -> Policy`` for a named agent.
+
+    Besides ``random``, ``greedy`` and ``mcts``, a name of the form
+    ``net:<checkpoint path>`` searches with MCTS over that saved network.
+    """
 
     if name == "random":
         return lambda house, seed: RandomPolicy(seed)
@@ -38,6 +68,27 @@ def _policy_factory(name: str, **options):
         return lambda house, seed: MCTS(
             simulations=simulations,
             determinizations=determinizations,
+            seed=seed,
+        )
+    if name == "net" or name.startswith("net:"):
+        path = name.partition(":")[2] or options.get("checkpoint")
+        if not path:
+            raise SystemExit(
+                "the net policy needs a checkpoint: use net:<path> "
+                "(e.g. --candidate net:checkpoints/run3/agot-best.pt)"
+            )
+        model = _load_net(path)
+        from agot.nn.model import NeuralEvaluator
+
+        evaluator = NeuralEvaluator(model)
+        simulations = options.get("simulations", 24)
+        determinizations = options.get("determinizations", 1)
+        temperature = options.get("temperature", 0.0)
+        return lambda house, seed: MCTS(
+            evaluator,
+            simulations=simulations,
+            determinizations=determinizations,
+            temperature=temperature,
             seed=seed,
         )
     raise SystemExit(f"unknown policy: {name!r}")
@@ -111,6 +162,64 @@ def cmd_gauntlet(args: argparse.Namespace) -> int:
         seed=args.seed,
     )
     print(json.dumps({"candidate": args.candidate, **result.as_dict()}, indent=2))
+    return 0
+
+
+def cmd_round_robin(args: argparse.Namespace) -> int:
+    """League table: every checkpoint plays one seat against the others.
+
+    Each checkpoint is evaluated in turn as a single rotating seat; the other
+    five seats are filled round-robin from the remaining checkpoints and any
+    anchors, and the win rate comes with a Wilson interval. This is the
+    robustness check (G2): a checkpoint that only beats one particular past
+    version is not a strong agent.
+    """
+    from agot.training.evaluate import evaluate_vs_field
+
+    checkpoints = list(args.checkpoints)
+    if len(checkpoints) < 2:
+        raise SystemExit("round-robin needs at least two checkpoints")
+    anchors = [name for name in args.anchors.split(",") if name]
+    results = {}
+    for index, candidate in enumerate(checkpoints):
+        opponents = {
+            other: _policy_factory(
+                f"net:{other}",
+                simulations=args.simulations,
+                determinizations=args.determinizations,
+            )
+            for other_index, other in enumerate(checkpoints)
+            if other_index != index
+        }
+        for anchor in anchors:
+            opponents[anchor] = _policy_factory(
+                anchor,
+                simulations=args.simulations,
+                determinizations=args.determinizations,
+            )
+        result = evaluate_vs_field(
+            _policy_factory(
+                f"net:{candidate}",
+                simulations=args.simulations,
+                determinizations=args.determinizations,
+            ),
+            opponents,
+            games=args.games,
+            config=GameConfig(seed=args.seed, max_rounds=args.max_rounds),
+            seed=args.seed,
+        )
+        results[candidate] = result.as_dict()
+    print(
+        json.dumps(
+            {
+                "checkpoints": checkpoints,
+                "games_per_candidate": args.games,
+                "anchors": anchors,
+                "results": results,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -381,6 +490,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gauntlet.add_argument("--games", type=int, default=60)
     gauntlet.set_defaults(func=cmd_gauntlet)
+
+    round_robin = sub.add_parser(
+        "round-robin",
+        help="league table: each checkpoint plays one seat against the others",
+    )
+    add_common(round_robin)
+    round_robin.add_argument(
+        "--checkpoints",
+        nargs="+",
+        required=True,
+        help="two or more checkpoints; every one is evaluated against the rest",
+    )
+    round_robin.add_argument(
+        "--games",
+        type=int,
+        default=30,
+        help="games per checkpoint (the league costs games x checkpoints)",
+    )
+    round_robin.add_argument(
+        "--anchors",
+        default="random,greedy",
+        help="comma-separated extra field policies (empty to disable)",
+    )
+    round_robin.set_defaults(func=cmd_round_robin)
 
     legal = sub.add_parser("legal", help="show the legal actions of a fresh game")
     add_common(legal)

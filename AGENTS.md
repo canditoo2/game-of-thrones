@@ -14,9 +14,10 @@ machine — this PC is the build-and-verify machine.
   summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`
 - Lint: `.venv\Scripts\ruff check src tests` (line-length 100, py310 target).
-- CLI: `.venv\Scripts\agot <demo|legal|evaluate|gauntlet|train|report>`. One full game is ~0.1 s:
-  `agot demo --policy greedy --seed 1`. Gauntlet = single-seat win rate vs a field:
-  `agot gauntlet --candidate greedy --opponents random --games 60`.
+- CLI: `.venv\Scripts\agot <demo|legal|evaluate|gauntlet|round-robin|train|report>`. One full
+  game is ~0.1 s: `agot demo --policy greedy --seed 1`. Gauntlet = single-seat win rate vs a
+  field; any policy argument accepts `net:<checkpoint>` (MCTS over that saved network), and
+  `round-robin` builds a league table across checkpoints.
 - Most of the suite runs without torch: only `test_nn` and `test_checkpoint` skip entirely
   (module-level `importorskip`), plus a few individual cases in `test_batched_selfplay` and
   `test_report`. CI (`.github/workflows/ci.yml`) runs the numpy-only suite on Python 3.10/3.12

@@ -327,8 +327,9 @@ they should be fixed before expecting a strong agent.
     Wilson 95% interval and a rotating seat (`evaluate_vs_field`). Baseline:
     greedy wins 38.3% against five random opponents. The train loop now runs that
     same gauntlet periodically (`--eval-games`, `--eval-every`) and saves the
-    best-evaluated net (`--best-checkpoint`). Still to do: round-robin across
-    checkpoints and a curated seed suite.
+    best-evaluated net (`--best-checkpoint`). Saved checkpoints are first-class
+    candidates (`net:<path>` in `gauntlet` and `evaluate`) and `agot round-robin`
+    builds a league table across checkpoints. Still to do: a curated seed suite.
 
 ## Data verification
 
@@ -355,4 +356,4 @@ they should be fixed before expecting a strong agent.
     snapshot of the log, so `--watch N` re-renders it every `N` seconds and an open
     browser tab (which reloads itself) then follows a live run; the module is pure
     standard library, so it works on a torch-free machine. Still to do: a registry
-    of named runs and round-robin evaluation across their checkpoints.
+    of named runs (round-robin evaluation now takes explicit checkpoint paths).

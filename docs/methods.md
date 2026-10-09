@@ -129,7 +129,72 @@ Kept short; each entry is *what it is → pro → con → verdict*.
    self-play run is stable over many iterations. Runs are now resumable: each
    checkpoint gets a companion `*.state.pt` (next iteration, best eval, optimizer
    state) and a `*.log.jsonl` history, and `--resume` restores them, so a long run
-   survives a crash or restart. What remains is scale (games, width) plus the
-   history/belief encoder, reward shaping and a checkpoint registry.
+   survives a crash or restart. Saved checkpoints are now first-class policies
+   (`net:<path>` candidates) and `agot round-robin` compares them in a league.
+   What remains is scale (games, width) plus the history/belief encoder, reward
+   shaping and a checkpoint registry.
 5. **Table play (G3).** Meta/kingmaking rules and, for live negotiation, an LLM
    diplomacy layer over a strong engine, plus an interface to play one seat.
+
+## Runbook: the first credible run (run3)
+
+Heavy runs happen on the training machine; the build machine only prepares and
+verifies. The commands below are the whole procedure.
+
+0. **Smoke first.** Five iterations on a small budget:
+
+   ```bash
+   agot train --iterations 5 --games 12 --workers 4 --batch-games 3 \
+     --eval-games 12 --eval-every 2 --checkpoint checkpoints/smoke/agot.pt
+   ```
+
+   Gate: policy loss must fall **below ~2.0** (the log of the candidate count)
+   and keep falling. A flat ~2.0 for every iteration is the old broken-head
+   signature, not convergence. Kill the run once and restart it with `--resume`
+   to prove recovery, and render
+   `agot report --checkpoint checkpoints/smoke/agot.pt`.
+
+1. **Calibrate the field.** The periodic gauntlet fills five seats round-robin
+   from random and greedy, so measure that mixed field for the trend line:
+
+   ```bash
+   agot gauntlet --candidate greedy --opponents random,greedy --games 60
+   agot gauntlet --candidate random --opponents random,greedy --games 60
+   ```
+
+2. **Launch run3.**
+
+   ```bash
+   agot train --iterations 120 --games 48 --workers 12 --batch-games 4 \
+     --opponent-rate 0.2 --train-threads 4 \
+     --temperature-rounds 3 --final-temperature 0.25 \
+     --eval-games 30 --eval-every 10 \
+     --checkpoint checkpoints/run3/agot.pt
+   ```
+
+   Watch it in another terminal:
+
+   ```bash
+   agot report --checkpoint checkpoints/run3/agot.pt --iterations 120 --watch 15 --open
+   ```
+
+   Interrupt it at any time; continue with the same command plus
+   `--resume checkpoints/run3/agot.pt`.
+
+3. **Decision gates.** By iteration ~20 the policy loss must be trending down,
+   not flat. By iteration ~50-70 the gauntlet win rate must sit above the greedy
+   mixed-field baseline with a CI that excludes it. If both hold, extend the
+   run; if not, stop and diagnose before spending more hours.
+
+4. **Verify the result.** Measure the best checkpoint directly:
+
+   ```bash
+   agot gauntlet --candidate net:checkpoints/run3/agot-best.pt --opponents random --games 200
+   ```
+
+   G1 is met when this clears the greedy baseline (38.3% against five random
+   opponents) with a CI that excludes it. For the league view:
+
+   ```bash
+   agot round-robin --checkpoints checkpoints/run3/agot.pt checkpoints/run3/agot-best.pt --games 30
+   ```

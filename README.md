@@ -9,10 +9,11 @@ foundation for that: a fast, test-covered rules engine, a Monte-Carlo tree
 search, a policy/value network, and the self-play training loop that ties them
 together.
 
-> **Status: pre-alpha.** The engine plays complete six-player games; the network
-> and training loop run, but no meaningful playing strength has been trained yet.
-> Known rule simplifications are listed below and tracked in
-> [`docs/roadmap.md`](docs/roadmap.md).
+> **Status: pre-alpha.** The engine plays complete six-player games. The network
+> and training loop run, but no meaningful playing strength has been trained yet:
+> the first two runs were void — the policy head could not learn — and the fixed
+> pipeline has not had its first long run. Known rule simplifications are listed
+> below and tracked in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Why does this need a custom engine?
 
@@ -74,6 +75,14 @@ agot evaluate --a random --b greedy --games 20
 
 # Strength check: candidate's single-seat win rate vs a field (1/6 = parity).
 agot gauntlet --candidate greedy --opponents random --games 60
+
+# Evaluate a saved checkpoint: any policy argument accepts net:<path>, which
+# searches with MCTS over that network at the given --simulations budget.
+agot gauntlet --candidate net:checkpoints/run3/agot-best.pt --opponents random --games 200
+
+# League table: each checkpoint plays one rotating seat against the other
+# checkpoints (plus random/greedy anchors), with a Wilson 95% interval.
+agot round-robin --checkpoints checkpoints/run3/agot.pt checkpoints/run3/agot-best.pt --games 30
 
 # See the legal actions at the start of a game.
 agot legal
