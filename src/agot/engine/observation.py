@@ -24,6 +24,7 @@ the network input size never changes with the player count.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -33,6 +34,7 @@ from agot.engine.enums import (
     PHASES,
     SUPPLY_LIMITS,
     ActionStep,
+    Phase,
     Terrain,
     Track,
     UnitType,
@@ -100,6 +102,34 @@ MOVE_BLOCK = N_UNITS + 2
 SUPPORT_SIDES: tuple[str, ...] = ("attacker", "defender", "refuse")
 N_SIDES: int = len(SUPPORT_SIDES)
 
+#: Lookup tables built once, so the encoders index instead of scanning tuples.
+_ORDER_INDEX: dict[str, int] = {key: index for index, key in enumerate(ORDER_KEYS)}
+_TERRAIN_INDEX: dict[Terrain, int] = {
+    Terrain.LAND: 0,
+    Terrain.SEA: 1,
+    Terrain.PORT: 2,
+}
+_ACTION_KIND_CHOICES: tuple[ActionKind, ...] = tuple(ActionKind)
+_UNIT_VALUE_CHOICES: tuple[str, ...] = tuple(unit.value for unit in UNIT_ORDER)
+_ACTION_KIND_INDEX: dict[ActionKind, int] = {
+    kind: index for index, kind in enumerate(_ACTION_KIND_CHOICES)
+}
+_HOUSE_INDEX: dict[str, int] = {
+    house: index for index, house in enumerate(HOUSE_ORDER)
+}
+_UNIT_VALUE_INDEX: dict[str, int] = {
+    value: index for index, value in enumerate(_UNIT_VALUE_CHOICES)
+}
+_SIDE_INDEX: dict[str, int] = {
+    side: index for index, side in enumerate(SUPPORT_SIDES)
+}
+_PHASE_INDEX: dict[Phase, int] = {
+    phase: index for index, phase in enumerate(PHASES)
+}
+_STEP_INDEX: dict[ActionStep, int] = {
+    step: index for index, step in enumerate(STEPS)
+}
+
 STATE_DIM: int = N_HOUSES * _HOUSE_BLOCK + _GLOBAL_BLOCK
 ACTION_DIM: int = (
     N_ACTION_KINDS
@@ -121,98 +151,95 @@ ACTION_DIM: int = (
 # ---------------------------------------------------------------------------
 
 
-def _one_hot(value: object, choices: tuple) -> np.ndarray:
-    vector = np.zeros(len(choices), dtype=np.float32)
-    try:
-        index = choices.index(value)
-    except ValueError:
-        return vector
-    vector[index] = 1.0
-    return vector
+def _set_one_hot(
+    value: object, index_map: dict, out: np.ndarray, offset: int
+) -> None:
+    """Set the slot matching ``value`` to 1.0 (``out`` is assumed zeroed)."""
+    index = index_map.get(value)
+    if index is not None:
+        out[offset + index] = 1.0
 
 
-def _controller_relation(controller: str | None, actor: str | None) -> np.ndarray:
-    """Four-way relation between a region's controller and the acting house."""
-    vector = np.zeros(4, dtype=np.float32)
-    if controller is None:
-        vector[0] = 1.0  # unowned
-    elif controller == actor:
-        vector[2] = 1.0
-    else:
-        vector[3] = 1.0
-    return vector
+@lru_cache(maxsize=1)
+def _static_region_tables():
+    """Per-region constants, computed once: ``(heads, homes, linked)``.
 
-
-def _order_is_visible(
-    state: GameState, region, actor: str | None
-) -> bool:
-    """Whether ``actor`` may see the Order token in ``region``.
-
-    Orders stay face down until the Action Phase, but a house always sees the
-    orders it placed itself (rulebook pages 11-12).
+    ``heads`` holds the six static leading features (terrain one-hot plus the
+    power/supply/mustering fractions). Reusing them avoids rebuilding tiny
+    numpy arrays for every region of every candidate action.
     """
-    if actor is None or state.orders_revealed:
-        return True
-    return region.order_house == actor
+    game_map = load_map()
+    heads: dict[str, np.ndarray] = {}
+    homes: dict[str, str | None] = {}
+    linked: dict[str, bool] = {}
+    for rid, static in game_map.regions.items():
+        head = np.zeros(6, dtype=np.float32)
+        head[_TERRAIN_INDEX[static.terrain]] = 1.0
+        head[3] = static.power / 3.0
+        head[4] = static.supply / 3.0
+        head[5] = static.mustering / 2.0
+        heads[rid] = head
+        homes[rid] = static.home
+        linked[rid] = static.host is not None or static.sea is not None
+    return heads, homes, linked
 
 
 def _region_block(region, actor: str | None, state: GameState) -> np.ndarray:
-    """Static plus dynamic description of one region, from ``actor``'s view."""
-    game_map = load_map()
-    static = game_map.regions[region.region_id]
+    """Static plus dynamic description of one region, from ``actor``'s view.
 
-    parts: list[np.ndarray] = [
-        _one_hot(static.terrain, (Terrain.LAND, Terrain.SEA, Terrain.PORT)),
-        np.array(
-            [
-                static.power / 3.0,
-                static.supply / 3.0,
-                static.mustering / 2.0,
-            ],
-            dtype=np.float32,
-        ),
-    ]
+    Written as an in-place fill of a single array: this runs twice per candidate
+    action, so it deliberately avoids the many small temporary arrays the
+    previous version allocated.
+    """
+    heads, homes, linked = _static_region_tables()
+    rid = region.region_id
+    out = np.empty(REGION_BLOCK, dtype=np.float32)
+    out[:6] = heads[rid]
 
-    # Navy first (4 dims): counts of each unit type, normalised.
-    unit_counts = np.array(
-        [region.units.get(unit, 0) for unit in UNIT_ORDER], dtype=np.float32
-    )
-    parts.append(np.clip(unit_counts / 4.0, 0.0, 1.5))
-    parts.append(
-        np.array(
-            [
-                min(1.0, region.total(include_routed=False) / 8.0),
-                min(1.0, sum(region.routed.values()) / 8.0),
-                1.0 if region.influence_token is not None else 0.0,
-                1.0 if region.order is not None else 0.0,
-                region.garrison / 4.0,
-                region.neutral_force / 6.0,
-            ],
-            dtype=np.float32,
-        )
-    )
-    parts.append(_controller_relation(region.controller, actor))
-    visible = _order_is_visible(state, region, actor)
-    if visible:
-        parts.append(_one_hot(region.order, ORDER_KEYS))
+    index = 6
+    units = region.units
+    for offset, unit in enumerate(UNIT_ORDER):
+        count = units.get(unit, 0) / 4.0
+        out[index + offset] = 1.5 if count > 1.5 else count
+    index += N_UNITS
+
+    out[index] = min(1.0, region.total(include_routed=False) / 8.0)
+    out[index + 1] = min(1.0, sum(region.routed.values()) / 8.0)
+    out[index + 2] = 1.0 if region.influence_token is not None else 0.0
+    out[index + 3] = 1.0 if region.order is not None else 0.0
+    out[index + 4] = region.garrison / 4.0
+    out[index + 5] = region.neutral_force / 6.0
+    index += 6
+
+    controller = region.controller
+    # ``out`` comes from ``np.empty``: zero the whole controller block first so
+    # no slot can leak uninitialised memory, then set the one flag that applies.
+    out[index : index + 4] = 0.0
+    if controller is None:
+        out[index] = 1.0  # unowned
+    elif controller == actor:
+        out[index + 2] = 1.0
     else:
-        parts.append(np.zeros(N_ORDERS, dtype=np.float32))
+        out[index + 3] = 1.0
+    index += 4
 
-    order_strength = 0.0
-    if region.order is not None and visible:
-        order_strength = ORDERS_BY_KEY[region.order].strength / 2.0
-    parts.append(
-        np.array(
-            [
-                order_strength,
-                1.0 if region.order_house == actor else 0.0,
-                static.home == actor if static.home else False,
-                1.0 if static.host is not None or static.sea is not None else 0.0,
-            ],
-            dtype=np.float32,
-        )
-    )
-    return np.concatenate(parts).astype(np.float32)
+    visible = actor is None or state.orders_revealed or region.order_house == actor
+    order_key = region.order if visible else None
+    out[index : index + N_ORDERS] = 0.0
+    if order_key is not None:
+        slot = _ORDER_INDEX.get(order_key)
+        if slot is not None:
+            out[index + slot] = 1.0
+    index += N_ORDERS
+
+    if order_key is not None:
+        out[index] = ORDERS_BY_KEY[order_key].strength / 2.0
+    else:
+        out[index] = 0.0  # hidden or absent order: no strength to show
+    out[index + 1] = 1.0 if region.order_house == actor else 0.0
+    out[index + 2] = 1.0 if homes[rid] is not None and homes[rid] == actor else 0.0
+    out[index + 3] = 1.0 if linked[rid] else 0.0
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -225,83 +252,100 @@ def encode_state(game: Game, actor: str | None = None) -> np.ndarray:
 
     ``actor`` defaults to the house the engine is currently asking to act; it
     only affects a couple of "*is this mine*" style flags.
+
+    The vector is filled in place into one ``np.zeros`` rather than by allocating
+    and concatenating a dozen small arrays: this runs once per search leaf.
     """
     state = game.state
     actor = actor if actor is not None else state.active_house
-    game_map = load_map()
 
-    features: list[np.ndarray] = []
+    # One pass over the board instead of one pass per house: accumulate each
+    # house's army sizes, fleet size and castle count together.
+    land = {house_id: 0 for house_id in state.houses}
+    ships = {house_id: 0 for house_id in state.houses}
+    castles = {house_id: 0 for house_id in state.houses}
+    mustering_areas = 0
+    for rid, region in state.regions.items():
+        if region.mustering_points > 0:
+            mustering_areas += 1
+        controller = region.controller
+        if controller is None or controller not in land:
+            continue
+        if rid in state.fortifications:
+            castles[controller] += 1
+        for unit, count in region.units.items():
+            if unit is UnitType.SHIP:
+                ships[controller] += count
+            else:
+                land[controller] += count
+
+    vector = np.zeros(STATE_DIM, dtype=np.float32)
+    offset = 0
     for house_id in HOUSE_ORDER:
         if house_id in state.houses:
-            features.append(_house_features(state, house_id, actor))
-        else:
-            features.append(np.zeros(_HOUSE_BLOCK, dtype=np.float32))
+            _write_house_block(
+                state,
+                house_id,
+                actor,
+                land[house_id],
+                ships[house_id],
+                castles[house_id],
+                vector,
+                offset,
+            )
+        # Houses absent from the game keep their zeroed block.
+        offset += _HOUSE_BLOCK
 
     # Global block.
-    global_parts: list[np.ndarray] = [
-        np.array(
-            [state.round / max(1, state.max_rounds)],
-            dtype=np.float32,
-        ),
-        _one_hot(state.phase, PHASES),
-        _one_hot(state.action_step, STEPS),
-        np.array(
-            [
-                min(1.0, state.wildling_threat / MAX_THREAT),
-                len([h for h in state.houses.values() if not h.eliminated]) / N_HOUSES,
-                len(game_map.regions) / 64.0,
-                sum(
-                    1
-                    for region in state.regions.values()
-                    if region.mustering_points > 0
-                )
-                / N_HOUSES,
-            ],
-            dtype=np.float32,
-        ),
-    ]
-    features.append(np.concatenate(global_parts).astype(np.float32))
+    vector[offset] = state.round / max(1, state.max_rounds)
+    offset += 1
+    _set_one_hot(state.phase, _PHASE_INDEX, vector, offset)
+    offset += N_PHASES
+    _set_one_hot(state.action_step, _STEP_INDEX, vector, offset)
+    offset += N_STEPS
+    vector[offset] = min(1.0, state.wildling_threat / MAX_THREAT)
+    vector[offset + 1] = (
+        sum(1 for h in state.houses.values() if not h.eliminated) / N_HOUSES
+    )
+    vector[offset + 2] = len(state.regions) / 64.0
+    vector[offset + 3] = mustering_areas / N_HOUSES
 
-    vector = np.concatenate(features).astype(np.float32)
     if vector.shape != (STATE_DIM,):  # pragma: no cover - shape guard
         raise AssertionError(f"state feature size {vector.shape} != {STATE_DIM}")
     return vector
 
 
-def _house_features(state: GameState, house_id: str, actor: str | None) -> np.ndarray:
+def _write_house_block(
+    state: GameState,
+    house_id: str,
+    actor: str | None,
+    land: int,
+    ships: int,
+    castles: int,
+    out: np.ndarray,
+    offset: int,
+) -> None:
+    """Write one house's 13-slot block from stats gathered in a board pass."""
     house = state.houses[house_id]
-    castle_share = state.castle_count(house_id) / max(1, state.victory_castles)
-    tracks = [
-        state.track_position(house_id, Track.IRON_THRONE),
-        state.track_position(house_id, Track.FIEFDOMS),
-        state.track_position(house_id, Track.KINGS_COURT),
-    ]
-    land = 0
-    ships = 0
-    for region in state.regions.values():
-        if region.controller != house_id:
-            continue
-        for unit, count in region.units.items():
-            if unit is UnitType.SHIP:
-                ships += count
-            else:
-                land += count
-    return np.array(
-        [
-            1.0,
-            1.0 if house.eliminated else 0.0,
-            castle_share,
-            min(1.0, house.power / MAX_POWER),
-            house.supply_level / max(1, len(SUPPLY_LIMITS) - 1),
-            *[1.0 - (position - 1) / (N_HOUSES - 1) for position in tracks],
-            min(1.0, land / 16.0),
-            min(1.0, ships / 12.0),
-            min(1.0, len(house.orders_placed) / 12.0),
-            len(house.house_cards_available) / CARD_SLOTS,
-            1.0 if house_id == actor else 0.0,
-        ],
-        dtype=np.float32,
-    )
+    out[offset] = 1.0
+    out[offset + 1] = 1.0 if house.eliminated else 0.0
+    out[offset + 2] = castles / max(1, state.victory_castles)
+    out[offset + 3] = min(1.0, house.power / MAX_POWER)
+    out[offset + 4] = house.supply_level / max(1, len(SUPPLY_LIMITS) - 1)
+    out[offset + 5] = 1.0 - (
+        state.track_position(house_id, Track.IRON_THRONE) - 1
+    ) / (N_HOUSES - 1)
+    out[offset + 6] = 1.0 - (
+        state.track_position(house_id, Track.FIEFDOMS) - 1
+    ) / (N_HOUSES - 1)
+    out[offset + 7] = 1.0 - (
+        state.track_position(house_id, Track.KINGS_COURT) - 1
+    ) / (N_HOUSES - 1)
+    out[offset + 8] = min(1.0, land / 16.0)
+    out[offset + 9] = min(1.0, ships / 12.0)
+    out[offset + 10] = min(1.0, len(house.orders_placed) / 12.0)
+    out[offset + 11] = len(house.house_cards_available) / CARD_SLOTS
+    out[offset + 12] = 1.0 if house_id == actor else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -309,80 +353,168 @@ def _house_features(state: GameState, house_id: str, actor: str | None) -> np.nd
 # ---------------------------------------------------------------------------
 
 
-def encode_action(game: Game, action: Action, actor: str | None = None) -> np.ndarray:
-    """Encode one candidate action as a fixed-length feature vector."""
+#: Memo of :func:`_region_block` results, keyed by ``id(region)``.
+#:
+#: Keying on the *object* rather than the region id is what makes the memo
+#: shareable across the leaves of one inference batch: two leaves can hold
+#: different objects under the same region id, because a determinization
+#: swaps in a copy for the regions it resamples. Region objects are immutable
+#: in place -- :meth:`agot.engine.state.GameState.mut` is the only write path,
+#: and it replaces rather than edits -- so an object's identity pins its
+#: contents. The cache must not outlive the objects it keys on (a freed
+#: region's address could be reused), so it lives for one encode call, over
+#: which the caller keeps the game(s) alive. A single cache is valid for one
+#: ``(actor, orders_revealed)`` pair only; batched callers keep one per pair.
+RegionCache = dict[int, np.ndarray]
+
+
+def encode_action(
+    game: Game,
+    action: Action,
+    actor: str | None = None,
+    _region_cache: RegionCache | None = None,
+) -> np.ndarray:
+    """Encode one candidate action as a fixed-length feature vector.
+
+    Thin wrapper over :func:`encode_action_into` that allocates the result. The
+    batched paths (pointer-net inference, :func:`observe`) call
+    ``encode_action_into`` directly to fill preallocated rows instead.
+    """
+    out = np.zeros(ACTION_DIM, dtype=np.float32)
+    return encode_action_into(game, action, out, actor, _region_cache)
+
+
+def encode_action_into(
+    game: Game,
+    action: Action,
+    out: np.ndarray,
+    actor: str | None = None,
+    region_cache: RegionCache | None = None,
+) -> np.ndarray:
+    """Write one action's features into ``out`` (length ``ACTION_DIM``).
+
+    ``out`` must already be zeroed: the writer sets only the slots that apply,
+    which is what lets the batched evaluator fill a whole action tensor
+    without allocating a temporary array per candidate. ``region_cache`` is an
+    optional memo of :func:`_region_block` results (see :data:`RegionCache`);
+    many candidates in one position share a region (every order for an area,
+    every march out of it) and the block depends only on the region object, the
+    actor and the reveal flag.
+    """
     state = game.state
     actor = actor if actor is not None else state.active_house
 
-    card_vector = np.zeros(CARD_BLOCK, dtype=np.float32)
+    offset = 0
+    index = _ACTION_KIND_INDEX.get(action.kind)
+    if index is not None:
+        out[offset + index] = 1.0
+    offset += N_ACTION_KINDS
+    index = _HOUSE_INDEX.get(action.house)
+    if index is not None:
+        out[offset + index] = 1.0
+    offset += N_HOUSES
+    if action.house == actor:
+        out[offset] = 1.0
+    offset += 1
+
+    # Region and target blocks. The row is already zeroed, so a field with no
+    # region (or one outside the map) is simply skipped rather than copied from
+    # an all-zero block, and the memo lookup is inlined to keep this hot path
+    # free of per-candidate function calls.
+    region_id = action.region
+    if region_id is not None:
+        region = state.regions.get(region_id)
+        if region is not None:
+            key = id(region)
+            block = None if region_cache is None else region_cache.get(key)
+            if block is None:
+                block = _region_block(region, actor, state)
+                if region_cache is not None:
+                    region_cache[key] = block
+            out[offset : offset + REGION_BLOCK] = block
+    offset += REGION_BLOCK
+    region_id = action.target
+    if region_id is not None:
+        region = state.regions.get(region_id)
+        if region is not None:
+            key = id(region)
+            block = None if region_cache is None else region_cache.get(key)
+            if block is None:
+                block = _region_block(region, actor, state)
+                if region_cache is not None:
+                    region_cache[key] = block
+            out[offset : offset + REGION_BLOCK] = block
+    offset += REGION_BLOCK
+
     if action.card is not None and action.house is not None:
-        card_vector = _card_features(action.house, action.card)
+        out[offset : offset + CARD_BLOCK] = _card_features(action.house, action.card)
+    offset += CARD_BLOCK
 
-    order_vector = np.zeros(ORDER_BLOCK, dtype=np.float32)
-    order_vector[:N_ORDERS] = _one_hot(action.order, ORDER_KEYS)
+    index = _ORDER_INDEX.get(action.order)
+    if index is not None:
+        out[offset + index] = 1.0
     if action.order is not None:
-        order_vector[N_ORDERS] = ORDERS_BY_KEY[action.order].strength / 2.0
+        out[offset + N_ORDERS] = ORDERS_BY_KEY[action.order].strength / 2.0
+    offset += ORDER_BLOCK
 
-    amount_vector = np.zeros(AMOUNT_BLOCK, dtype=np.float32)
     if action.amount is not None:
-        amount_vector[0] = min(1.0, action.amount / MAX_POWER)
-        amount_vector[1] = 1.0
+        out[offset] = min(1.0, action.amount / MAX_POWER)
+        out[offset + 1] = 1.0
+    offset += AMOUNT_BLOCK
 
-    region_vector = (
-        _region_block(state.regions[action.region], actor, state)
-        if action.region is not None and action.region in state.regions
-        else np.zeros(REGION_BLOCK, dtype=np.float32)
-    )
-    target_vector = (
-        _region_block(state.regions[action.target], actor, state)
-        if action.target is not None and action.target in state.regions
-        else np.zeros(REGION_BLOCK, dtype=np.float32)
-    )
+    index = _UNIT_VALUE_INDEX.get(action.unit)
+    if index is not None:
+        out[offset + index] = 1.0
+    offset += N_UNITS
 
-    move_vector = np.zeros(MOVE_BLOCK, dtype=np.float32)
     if action.units is not None:
-        for index, count in enumerate(action.units[:N_UNITS]):
-            move_vector[index] = min(1.0, count / 4.0)
-        move_vector[N_UNITS] = 1.0
-    move_vector[N_UNITS + 1] = 1.0 if action.establish else 0.0
+        for unit_index, count in enumerate(action.units[:N_UNITS]):
+            out[offset + unit_index] = min(1.0, count / 4.0)
+        out[offset + N_UNITS] = 1.0
+    if action.establish:
+        out[offset + N_UNITS + 1] = 1.0
+    offset += MOVE_BLOCK
 
-    vector = np.concatenate(
-        [
-            _one_hot(action.kind, tuple(ActionKind)),
-            _one_hot(action.house, HOUSE_ORDER),
-            np.array([1.0 if action.house == actor else 0.0], dtype=np.float32),
-            region_vector,
-            target_vector,
-            card_vector,
-            order_vector,
-            amount_vector,
-            _one_hot(action.unit, tuple(unit.value for unit in UNIT_ORDER)),
-            move_vector,
-            _one_hot(action.side, SUPPORT_SIDES),
-        ]
-    ).astype(np.float32)
+    index = _SIDE_INDEX.get(action.side)
+    if index is not None:
+        out[offset + index] = 1.0
+    offset += N_SIDES
 
-    if vector.shape != (ACTION_DIM,):  # pragma: no cover - shape guard
-        raise AssertionError(f"action feature size {vector.shape} != {ACTION_DIM}")
-    return vector
+    if offset != ACTION_DIM:  # pragma: no cover - layout guard
+        raise AssertionError(f"action feature size {offset} != {ACTION_DIM}")
+    return out
+
+
+@lru_cache(maxsize=1)
+def _card_table() -> dict[tuple[str, str], np.ndarray]:
+    """Precompute one feature vector per House card, keyed by (house, card id).
+
+    The old version rebuilt the vector (and rescanned the deck for the card's
+    slot) on every encoded action; a battle-heavy decision encodes several
+    card actions at once, so the lookup is worth caching.
+    """
+    from agot.engine.map import load_house_cards
+
+    table: dict[tuple[str, str], np.ndarray] = {}
+    for house_id, deck in load_house_cards().cards.items():
+        for slot, data in enumerate(deck):
+            vector = np.zeros(CARD_BLOCK, dtype=np.float32)
+            vector[0] = 1.0
+            vector[1] = data["strength"] / 5.0
+            vector[2] = data["swords"] / 3.0
+            vector[3] = data["forts"] / 3.0
+            vector[4] = (slot + 1) / CARD_SLOTS
+            vector[5] = 1.0
+            table[(house_id, data["id"])] = vector
+    return table
 
 
 def _card_features(house_id: str, card_id: str) -> np.ndarray:
-    from agot.engine.map import load_house_cards
-
-    deck = load_house_cards().deck(house_id)
-    slot = next(
-        (index for index, card in enumerate(deck) if card["id"] == card_id), -1
-    )
-    data = next((card for card in deck if card["id"] == card_id), None)
-    vector = np.zeros(CARD_BLOCK, dtype=np.float32)
-    vector[0] = 0.0 if data is None else 1.0
-    if data is not None:
-        vector[1] = data["strength"] / 5.0
-        vector[2] = data["swords"] / 3.0
-        vector[3] = data["forts"] / 3.0
-    vector[4] = (slot + 1) / CARD_SLOTS if slot >= 0 else 0.0
-    vector[5] = 1.0
+    vector = _card_table().get((house_id, card_id))
+    if vector is None:
+        # Unknown card: keep the "a card field is present" marker only.
+        vector = np.zeros(CARD_BLOCK, dtype=np.float32)
+        vector[5] = 1.0
     return vector
 
 
@@ -415,7 +547,10 @@ def observe(game: Game, actions: list[Action] | None = None) -> Observation:
     actor = game.current_player() or ""
     if not actions:
         raise ValueError("observe() called with no legal actions")
-    matrix = np.stack([encode_action(game, action, actor) for action in actions])
+    cache: RegionCache = {}
+    matrix = np.zeros((len(actions), ACTION_DIM), dtype=np.float32)
+    for row, action in enumerate(actions):
+        encode_action_into(game, action, matrix[row], actor, cache)
     return Observation(
         actor=actor,
         actions=tuple(actions),

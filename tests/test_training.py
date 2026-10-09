@@ -7,9 +7,30 @@ import numpy as np
 from agot.agents import RandomPolicy
 from agot.engine.game import GameConfig
 from agot.engine.observation import HOUSE_ORDER
-from agot.training.evaluate import evaluate_match
+from agot.training.evaluate import evaluate_match, evaluate_vs_field, wilson_interval
 from agot.training.replay import ReplayBuffer
-from agot.training.selfplay import play_game, self_play
+from agot.training.selfplay import (
+    DEFAULT_TEMPERATURE_SCHEDULE,
+    play_game,
+    scheduled_temperature,
+    self_play,
+)
+
+
+def test_temperature_schedule_sharpens_after_the_opening() -> None:
+    """The recorded self-play target is built from the temperature.
+
+    A flat ``1.0`` for a whole game, with only a handful of visits per candidate,
+    trains the network to imitate something close to noise: hence a schedule.
+    """
+    schedule = ((3, 1.0), (10_000, 0.25))
+    assert scheduled_temperature(schedule, 1) == 1.0
+    assert scheduled_temperature(schedule, 3) == 1.0
+    assert scheduled_temperature(schedule, 4) == 0.25
+    assert scheduled_temperature(schedule, 99) == 0.25
+    # Past the last band the final temperature holds, rather than raising.
+    assert scheduled_temperature(DEFAULT_TEMPERATURE_SCHEDULE, 10_000) == 0.25
+    assert scheduled_temperature(((1, 0.5),), 7) == 0.5
 
 
 def _factory(house: str, seed: int) -> RandomPolicy:
@@ -60,3 +81,19 @@ def test_evaluate_match_splits_the_wins() -> None:
     assert result.wins_a + result.wins_b == 2
     assert 0.0 <= result.win_rate_a <= 1.0
     assert result.average_steps > 0
+
+
+def test_wilson_interval_brackets_the_mean() -> None:
+    low, high = wilson_interval(5, 10)
+    assert low < 0.5 < high
+    assert wilson_interval(0, 0) == (0.0, 0.0)
+
+
+def test_evaluate_vs_field_rotates_the_candidate_seat() -> None:
+    result = evaluate_vs_field(_factory, {"random": _factory}, games=6, seed=0)
+    assert result.games == 6
+    assert 0 <= result.wins <= 6
+    assert result.wins + result.draws <= 6
+    assert 0.0 <= result.win_rate <= 1.0
+    assert result.ci_low <= result.win_rate <= result.ci_high
+    assert len(result.per_seat) == 6  # every seat was used across six games

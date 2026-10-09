@@ -23,10 +23,13 @@ A Game of Thrones is an unusually awkward fit for textbook AlphaZero:
   at each node.
 * **Open-ended action space.** A planning turn can offer dozens of
   region/order pairs; a bid offers a range of integers. There is no fixed move
-  list, so the policy is a **pointer network**: it scores each candidate action
-  by embedding it and taking a dot product with the position embedding.
-* **Hidden information.** Order tokens are placed face down. The current engine
-  models them face up, which is a deliberate simplification (see below).
+  list, so the policy is a **scorer network**: it embeds each candidate action
+  and feeds `[position, action]` through a small MLP that emits one logit per
+  candidate. (It began as a dot product `position · action`; that collapsed to
+  zero and never learned — see the *Notable fixes* in `docs/roadmap.md`.)
+* **Hidden information.** Order tokens are placed face down and Power bids are
+  secret. The search does not peek: it resamples the information it cannot see
+  (PIMC, see below) and averages over those worlds before choosing.
 
 ## Layout
 
@@ -45,7 +48,7 @@ src/agot/
   training/      self-play, replay buffer, trainer, evaluation
   cli.py         command-line entry point
 tests/           map, engine, combat, observation, agents, training, network
-docs/            architecture, roadmap and the rulebook fidelity audit
+docs/            architecture, methods, roadmap and the rulebook fidelity audit
 ```
 
 The **rules engine depends only on `numpy`**. PyTorch is an optional extra
@@ -69,11 +72,36 @@ agot demo --policy greedy --seed 1
 # Head-to-head over several games (random vs greedy).
 agot evaluate --a random --b greedy --games 20
 
+# Strength check: candidate's single-seat win rate vs a field (1/6 = parity).
+agot gauntlet --candidate greedy --opponents random --games 60
+
 # See the legal actions at the start of a game.
 agot legal
 
-# Self-play training loop (requires PyTorch).
-agot train --games 50 --simulations 32 --epochs 2 --checkpoint checkpoints/agot.pt
+# Self-play training loop (requires PyTorch). The defaults are the ones that
+# matter: 128 simulations over 2 determinizations (--determinizations > 1 is what
+# keeps the search and its targets honest about face-down information), and a
+# temperature that holds for the opening rounds then cools, because the recorded
+# target is built from it. --workers spreads games over CPU cores; --eval-games
+# turns on the periodic gauntlet and best net (its budget follows --simulations
+# unless --eval-simulations says otherwise). --train-threads caps torch in the
+# training process (small mini-batches are faster on a few threads than on every
+# core; the workers stay single-threaded).
+agot train --iterations 100 --games 48 --workers 12 --batch-games 4 \
+  --opponent-rate 0.2 --train-threads 4 \
+  --temperature-rounds 3 --final-temperature 0.25 \
+  --eval-games 30 --eval-every 10 --checkpoint checkpoints/agot.pt
+
+# Continue a run after a crash or restart: reloads the weights, iteration
+# counter, best-eval and optimizer state from the checkpoint's companion file.
+agot train --iterations 100 --resume checkpoints/agot.pt \
+  --checkpoint checkpoints/agot.pt
+
+# Watch a run: renders the companion *.log.jsonl as a self-contained HTML page
+# (loss curves, seconds per iteration, eval trend vs parity/greedy, ETA). No
+# extra dependencies. The page is a snapshot; --watch regenerates it so an open
+# tab keeps up (Ctrl-C stops it).
+agot report --checkpoint checkpoints/agot.pt --iterations 100 --watch 15 --open
 ```
 
 From Python:
@@ -97,7 +125,11 @@ Run the tests with `pytest -q` and the linter with `ruff check src tests`.
 
 1. **Self-play.** Each seat is played by MCTS guided by the current network.
    At every decision the search's visit counts become a policy target, and the
-   position is stored with the final per-house outcome.
+   position is stored with the final per-house outcome. Hidden information is
+   respected: when `determinizations > 1`, MCTS resamples the face-down Order
+   tokens and secret Power bids it cannot see (PIMC) and averages over those
+   worlds before producing the target. Games are run in lockstep batches and
+   across CPU processes so the network is fed large forward-pass batches.
 2. **Replay.** Examples go into a bounded buffer
    ([`training/replay.py`](src/agot/training/replay.py)).
 3. **Training.** The network is trained to match the search's policy
@@ -113,12 +145,18 @@ players.
 These are real deviations from the physical game. They are tracked in
 [`docs/roadmap.md`](docs/roadmap.md) rather than hidden:
 
-* **Order tokens are face up.** The real game hides them until the reveal, so
-  the engine currently has perfect information.
-* **Support is automatic and self-directed.** A house only supports its own
-  battles; the real game lets any house support either side.
-* **Casualty and retreat choices are automatic** (cheapest unit first, first
-  legal destination).
+* **Hidden information is sampled, not solved.** Order tokens are placed face
+  down and Power bids are secret; the engine tracks reveal timing and the
+  observation masks what a house may not see. The search uses PIMC
+  (`--determinizations`): it resamples the face-down Orders and secret bids from
+  the observer's belief and averages the root visits over those worlds. The one
+  remaining leak is the first chooser's House card inside a battle, which the
+  physical game reveals simultaneously.
+* **Support is a real choice across houses.** A Support order may back either
+  side of an adjacent battle, and its owner decides in Iron Throne order.
+* **Casualty and retreat choices are player decisions.** The defeated player
+  picks their own casualties and, when defending, the retreat area. Only the
+  non-interactive `combat.resolve_and_apply` path falls back to cheapest-first.
 * **Wildling attacks** model the secret Power bid, the Night's Watch strength
   and all nine cards' win/loss consequences. Sub-choices inside a consequence
   (which units are destroyed, which track is moved, which House card is

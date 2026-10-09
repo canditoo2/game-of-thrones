@@ -9,7 +9,7 @@ into the layer below it, which keeps the rules code testable and torch-free.
             └───────────────┬──────────────────────────────┘
                             │ uses
             ┌───────────────▼──────────────┐   ┌───────────────────────┐
-            │  agents/   random · greedy   │   │  nn/  pointer net     │
+            │  agents/   random · greedy   │   │  nn/  scorer net     │
             │            PUCT MCTS         │──▶│       (optional torch) │
             └───────────────┬──────────────┘   └───────────────────────┘
                             │ drives
@@ -48,8 +48,22 @@ into the layer below it, which keeps the rules code testable and torch-free.
   (Order removals, Influence moves, card swaps) on a `BattleContext`, and
   `resolve_and_apply` commits them and runs the post-combat abilities.
 
-`Game.clone()` is the backbone of search. It deep-copies the state and gives the
-clone a fresh RNG seeded from the parent, so a cloned game is independent. A
+`Game.clone()` is the backbone of search. It shallow-copies the state's region
+dict and gives the clone a fresh RNG seeded from the parent, so a cloned game is
+independent. Regions are shared between a state and the states cloned from it
+until someone writes one: the engine fetches a region to mutate with
+`GameState.mut(region_id)`, which takes a private copy on the first write (see
+the copy-on-write note in `state.py`). Cloning also drops the *source's* record of
+which regions it had taken private, because those objects are shared again from
+that moment — both sides re-copy on their next write. A step writes about six of
+the 58 regions, so this costs a fraction of copying the board per node. Two tests
+pin the invariant, one per direction: stepping a clone must not touch the source,
+and stepping the source must not touch a clone already taken. The pending-effect
+dicts (`wildling_attack`, `westeros_choice`, `pending_battle`, `pending_march`)
+are rebuilt structurally rather than with `copy.deepcopy`, and the copy is handed
+a memo that rebinds any back-reference to the state: a resolved battle's
+`BattleResult` carries a context whose `state` is read *and written* by the
+post-combat House-card abilities, so it has to point at the clone. A
 clone does not re-run the phase machine: the source position is already settled
 and advancing would move the Action Phase turn-order cursor.
 
@@ -94,10 +108,28 @@ sign bookkeeping. The network's value head mirrors this by emitting six numbers.
 
 ## The network
 
-`nn/model.py` is a **pointer network**. A trunk embeds the position to `h`; a
-second trunk embeds each candidate action to `a_i`; the policy logit for action
-`i` is `(a_i · W h) / sqrt(d)`. Logits for illegal actions are masked to a large
-negative number. The value head maps `h` to six tanh-bounded house values.
+`nn/model.py` is a **scorer network**. A trunk embeds the position to `h`; a
+second trunk embeds each candidate action to `a_i`; a small MLP reads the
+concatenation `[h, a_i]` and emits the logit for that action. Logits for illegal
+actions are masked to a large negative number. The value head maps `h` to six
+tanh-bounded house values.
+
+The scorer is deliberately an MLP rather than the dot product `h · a_i` it
+started as. A dot product is a product of two learned tensors, so it has a zero
+fixed point: once either factor reaches zero the gradient through the other is
+zero too and the whole policy branch stops training permanently. That is what
+happened to the first two runs — the policy emitted a uniform distribution from
+the first iteration to the last. See the *Notable fixes* section of
+`docs/roadmap.md`.
+
+Batched inference (`predict_many`, used by the lockstep self-play driver) scores
+many leaves in one pass. It concatenates every leaf's candidates into a single
+flat tensor rather than padding them up to the widest action set in the batch —
+on real batches that padding made the action and scorer trunks do 2.5× the rows
+they needed — and normalises each leaf's own slice with `segment_softmax`, so a
+leaf's distribution cannot depend on what else shares its batch. Encoding shares
+one region-block memo across the leaves, keyed on region object identity, since
+the leaves are usually the same position seen through several hidden worlds.
 
 Training (in `training/trainer.py`) minimises
 
@@ -105,7 +137,12 @@ Training (in `training/trainer.py`) minimises
 policy cross-entropy  +  value_weight · masked MSE over the six house values
 ```
 
-where the value mask restricts the loss to houses actually in the game.
+where the value mask restricts the loss to houses actually in the game. The
+optimiser is `AdamW`, with *decoupled* weight decay applied to weight matrices
+only — biases and other one-dimensional parameters are never decayed. Decoupled
+decay shrinks a weight geometrically instead of adding `weight_decay · parameter`
+to its gradient, which is what let the old optimiser (plain `Adam` plus an L2
+penalty) grind the policy parameters to zero.
 
 ## Data flow of one self-play game
 
@@ -142,5 +179,7 @@ where the value mask restricts the loss to houses actually in the game.
 * `test_observation.py` — fixed dimensions, determinism, one-hot blocks.
 * `test_agents.py` — every policy returns actions aligned with its targets.
 * `test_training.py` — examples are labelled, replay round-trips, matches run.
-* `test_nn.py` — network shapes, save/load, masking, and one training step.
+* `test_nn.py` — network shapes, save/load, masking, one training step, and the
+  policy-head health checks (candidates scored differently, every parameter
+  receiving gradient, cross-entropy reaching a learnable target's entropy).
   Skipped automatically when torch is absent.

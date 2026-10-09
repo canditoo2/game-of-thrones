@@ -115,3 +115,98 @@ def test_opponent_orders_are_hidden_until_the_action_phase() -> None:
     state.regions["winterfell"].order = "march_plus"
     revealed_march = obs.encode_action(game, action, "baratheon")
     assert not np.array_equal(revealed_defend, revealed_march)
+
+
+def test_region_block_initialises_every_slot() -> None:
+    """`_region_block` returns an ``np.empty`` array, so no slot may leak garbage.
+
+    Two slots used to be left unwritten - the reserved controller slot and the
+    whole Order one-hot while an order is hidden - which occasionally surfaced
+    as an enormous (uninitialised-memory) float that blew up the network.
+    """
+    game = Game.new(GameConfig(seed=0))
+    state = game.state
+    region = state.regions["the_golden_sound"]
+    region.order = "march"
+    region.order_house = "baratheon"
+    state.phase = Phase.PLANNING  # so the order is hidden from stark
+
+    block = obs._region_block(region, "stark", state)
+    base = 6 + obs.N_UNITS
+    controller = block[base + 6 : base + 10]
+    assert controller.sum() == 1.0, "exactly one controller flag must be set"
+    assert controller[1] == 0.0  # reserved
+    order_start = base + 10
+    assert not block[order_start : order_start + obs.N_ORDERS].any()
+    # The order-strength slot must be written even while the order is hidden.
+    assert block[order_start + obs.N_ORDERS] == 0.0
+    assert np.isfinite(block).all()
+
+
+def test_encoded_actions_stay_bounded_across_a_game() -> None:
+    """No candidate action may carry a runaway feature value.
+
+    A regression guard for the ``np.empty`` leaks in :func:`obs._region_block`.
+    """
+    game = Game.new(GameConfig(seed=3, max_rounds=3))
+    steps = 0
+    while not game.is_terminal() and steps < 60:
+        actions = game.legal_actions()
+        if not actions:
+            break
+        for action in actions:
+            vector = obs.encode_action(game, action)
+            assert np.isfinite(vector).all()
+            assert np.abs(vector).max() < 100.0, (action, vector.max())
+        game.step(actions[0])
+        steps += 1
+
+
+def _positions_across_games(count: int = 3, depth: int = 20) -> list:
+    positions = []
+    for seed in range(count):
+        game = Game.new(GameConfig(seed=seed, max_rounds=10))
+        for _ in range(depth):
+            actions = game.legal_actions()
+            if game.is_terminal() or not actions:
+                break
+            positions.append((game.clone(), actions))
+            game.step(actions[0])
+    return positions
+
+
+def test_region_memo_scope_does_not_change_a_row() -> None:
+    """A memo shared across positions must encode the same rows as a fresh one.
+
+    ``PolicyValueNet.predict_many`` shares one :data:`obs.RegionCache` across
+    every leaf in a batch and keys it on region *object identity*, because two
+    leaves can hold different objects under the same region id. Keying on the id
+    string instead would let one leaf's block stand in for another's. This checks
+    the invariant from the outside.
+    """
+    positions = _positions_across_games()
+    assert len(positions) > 10
+
+    def encode_all(shared: bool) -> list[np.ndarray]:
+        caches: dict[tuple, obs.RegionCache] = {}
+        rows: list[np.ndarray] = []
+        for game, actions in positions:
+            actor = game.state.active_house
+            cache = (
+                caches.setdefault((actor, game.state.orders_revealed), {})
+                if shared
+                else {}
+            )
+            for action in actions:
+                out = np.zeros(obs.ACTION_DIM, dtype=np.float32)
+                obs.encode_action_into(game, action, out, actor, cache)
+                rows.append(out)
+        return rows
+
+    fresh = encode_all(shared=False)
+    shared = encode_all(shared=True)
+    assert len(fresh) == len(shared)
+    for index, (alone, together) in enumerate(zip(fresh, shared, strict=True)):
+        np.testing.assert_array_equal(
+            alone, together, err_msg=f"row {index} differed under a shared memo"
+        )

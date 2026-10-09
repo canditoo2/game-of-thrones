@@ -2,10 +2,18 @@
 
 Architecture: a *pointer* network, the standard answer to an open-ended action
 space. A shared trunk embeds the position into a vector ``h``; a second trunk
-embeds each candidate action into a vector ``a_i``; the policy logit for action
-``i`` is their dot product scaled by ``1/sqrt(d)``. The value head emits one
-number per canonical house, because the game has up to six players and a single
-scalar cannot express everybody's prospects.
+embeds each candidate action into a vector ``a_i``; a scorer MLP reads the
+concatenation ``[h, a_i]`` and emits one logit per candidate. The value head
+emits one number per canonical house, because the game has up to six players and
+a single scalar cannot express everybody's prospects.
+
+The scorer is deliberately *not* a bare dot product ``h . a_i``. A product of two
+learned tensors has an absorbing state: if either factor reaches zero the
+gradient through the other vanishes, and the whole policy branch stops training
+for good. That is what happened to the first two runs -- the policy parameters
+were ground down to the float32 floor (~1e-37) and emitted a uniform
+distribution forever -- so the head now reads ``h`` unconditionally and cannot
+shut itself off. See the "Notable fixes" section of ``docs/roadmap.md``.
 
 Requires PyTorch, which is an optional extra::
 
@@ -17,19 +25,24 @@ the rules engine keeps working on a machine without torch.
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import torch
 from torch import nn
 
 from agot.engine.actions import Action
 from agot.engine.game import Game
-from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM, encode_action, encode_state
+from agot.engine.observation import (
+    ACTION_DIM,
+    N_HOUSES,
+    STATE_DIM,
+    RegionCache,
+    encode_action_into,
+    encode_state,
+)
 
 
 class PolicyValueNet(nn.Module):
-    """Pointer-style policy head plus a per-house value head."""
+    """A scorer MLP over ``[state, action]`` plus a per-house value head."""
 
     def __init__(
         self,
@@ -43,11 +56,18 @@ class PolicyValueNet(nn.Module):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.hidden = hidden
+        self.trunk_layers = trunk_layers
         self.n_houses = n_houses
 
         self.state_trunk = _mlp(state_dim, hidden, trunk_layers)
         self.action_trunk = _mlp(action_dim, hidden, trunk_layers)
-        self.policy_proj = nn.Linear(hidden, hidden)
+        #: Scorer over ``[h, a_i]``. A dot product here would be a product of two
+        #: learned tensors, which has a zero fixed point that kills all gradient.
+        self.policy_head = nn.Sequential(
+            nn.Linear(2 * hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
         self.value_head = nn.Sequential(
             nn.Linear(hidden, hidden),
             nn.ReLU(),
@@ -69,16 +89,41 @@ class PolicyValueNet(nn.Module):
         """
         h = self.state_trunk(state)  # (B, H)
         a = self.action_trunk(actions)  # (B, N, H)
-        query = self.policy_proj(h).unsqueeze(1)  # (B, 1, H)
-        logits = (a * query).sum(dim=-1) / math.sqrt(self.hidden)  # (B, N)
+        context = h.unsqueeze(1).expand(-1, a.size(1), -1)  # (B, N, H)
+        logits = self.policy_head(torch.cat([context, a], dim=-1)).squeeze(-1)  # (B, N)
         if mask is not None:
             logits = logits.masked_fill(mask <= 0, -1e9)
         values = self.value_head(h)  # (B, n_houses)
         return logits, values
 
+    def forward_packed(
+        self,
+        state: torch.Tensor,
+        actions: torch.Tensor,
+        index: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Forward over a *concatenated* action set, one segment per state row.
+
+        ``state`` is ``(B, state_dim)``, ``actions`` is ``(T, action_dim)`` for
+        ``T = sum_i N_i`` candidates, and ``index`` is ``(T,)`` giving the state
+        row each action belongs to. This is :meth:`forward` without the padding:
+        a leaf with two candidates costs two rows instead of being widened to the
+        widest leaf in the batch. On real self-play batches that padding made the
+        action trunk and the scorer do 2.5x the rows they needed, and up to 12x on
+        the worst batch.
+
+        Returns flat ``(T,)`` logits and ``(B, n_houses)`` values. The caller
+        normalises each segment, because the policy is a distribution over one
+        leaf's actions only (see :func:`segment_softmax`).
+        """
+        h = self.state_trunk(state)  # (B, H)
+        a = self.action_trunk(actions)  # (T, H)
+        logits = self.policy_head(torch.cat([h[index], a], dim=-1)).squeeze(-1)
+        return logits, self.value_head(h)
+
     # -- inference helpers ----------------------------------------------
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def predict(self, game: Game) -> tuple[list[Action], np.ndarray, np.ndarray]:
         """Evaluate one position end to end.
 
@@ -88,14 +133,86 @@ class PolicyValueNet(nn.Module):
         actions = game.legal_actions()
         if not actions:
             raise ValueError("cannot predict on a position with no legal actions")
+        return self.predict_actions(game, actions)
+
+    @torch.inference_mode()
+    def predict_actions(
+        self, game: Game, actions: list[Action] | tuple[Action, ...]
+    ) -> tuple[list[Action], np.ndarray, np.ndarray]:
+        """Like :meth:`predict` but for an action list the caller already has.
+
+        Tree search computes the legal actions to expand a node; re-deriving
+        them here would double that cost on every simulation.
+        """
+        actions = list(actions)
         state = torch.from_numpy(encode_state(game)).unsqueeze(0)
-        action_tensor = torch.from_numpy(
-            np.stack([encode_action(game, action) for action in actions])
-        ).unsqueeze(0)
+        action_tensor = np.zeros((1, len(actions), ACTION_DIM), dtype=np.float32)
+        actor = game.state.active_house
+        region_cache: dict[str, np.ndarray] = {}
+        for column, action in enumerate(actions):
+            encode_action_into(game, action, action_tensor[0, column], actor, region_cache)
         mask = torch.ones((1, len(actions)), dtype=torch.float32)
-        logits, values = self.forward(state, action_tensor, mask)
+        logits, values = self.forward(
+            state, torch.from_numpy(action_tensor), mask
+        )
         probs = torch.softmax(logits[0], dim=-1).cpu().numpy()
         return actions, probs.astype(np.float32), values[0].cpu().numpy()
+
+    @torch.inference_mode()
+    def predict_many(
+        self, requests: list[tuple[Game, list[Action]]]
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        """Score several positions in one forward pass, without padding.
+
+        ``requests`` is a list of ``(game, actions)``. Every candidate of every
+        request goes through the action trunk exactly once, and the policy head
+        is normalised within each request's own action set, so the two leaves
+        with the fewest candidates are not widened to match the widest one in the
+        batch. This is what makes batched self-play pay off: one network call
+        scores many leaves, and it no longer scores their padding too.
+        """
+        if not requests:
+            return []
+        counts = [len(actions) for _, actions in requests]
+        state = np.stack([encode_state(game) for game, _ in requests])
+        total = sum(counts)
+        action_tensor = np.zeros((total, ACTION_DIM), dtype=np.float32)
+        index = np.empty(total, dtype=np.int64)
+        # One memo per ``(actor, orders_revealed)``, shared by every leaf: the
+        # leaves of a batch are usually the same position seen through several
+        # hidden worlds, so they share almost every region object and a per-leaf
+        # memo recomputed the same blocks once per world.
+        caches: dict[tuple[str | None, bool], RegionCache] = {}
+        cursor = 0
+        for row, (game, actions) in enumerate(requests):
+            actor = game.state.active_house
+            region_cache = caches.setdefault(
+                (actor, game.state.orders_revealed), {}
+            )
+            for action in actions:
+                encode_action_into(
+                    game, action, action_tensor[cursor], actor, region_cache
+                )
+                index[cursor] = row
+                cursor += 1
+        logits, values = self.forward_packed(
+            torch.from_numpy(state),
+            torch.from_numpy(action_tensor),
+            torch.from_numpy(index),
+        )
+        flat_index = torch.from_numpy(index)
+        probabilities = (
+            segment_softmax(logits, flat_index, len(requests)).cpu().numpy()
+        )
+        value_rows = values.cpu().numpy()
+        bounds = np.concatenate(([0], np.cumsum(counts)))
+        return [
+            (
+                probabilities[bounds[row] : bounds[row + 1]].astype(np.float32),
+                value_rows[row],
+            )
+            for row in range(len(requests))
+        ]
 
     # -- persistence -----------------------------------------------------
 
@@ -107,6 +224,7 @@ class PolicyValueNet(nn.Module):
                     "state_dim": self.state_dim,
                     "action_dim": self.action_dim,
                     "hidden": self.hidden,
+                    "trunk_layers": self.trunk_layers,
                     "n_houses": self.n_houses,
                 },
             },
@@ -116,11 +234,37 @@ class PolicyValueNet(nn.Module):
     @classmethod
     def load(cls, path: str, map_location: str = "cpu") -> PolicyValueNet:
         payload = torch.load(path, map_location=map_location, weights_only=False)
+        state = payload.get("state_dict", {})
+        if any(key.startswith("policy_proj.") for key in state):
+            raise ValueError(
+                f"{path} was written by the old dot-product policy head. That "
+                "head collapsed to zero and never trained, so the checkpoint is "
+                "not worth loading; start a fresh run."
+            )
         config = payload.get("config", {})
         model = cls(**config)
         model.load_state_dict(payload["state_dict"])
         model.eval()
         return model
+
+
+def segment_softmax(
+    logits: torch.Tensor, index: torch.Tensor, rows: int
+) -> torch.Tensor:
+    """Softmax of ``logits`` within each of ``rows`` contiguous segments.
+
+    ``index`` maps each logit to its segment (``0 <= index[i] < rows``). This is
+    ``softmax`` along the last axis of the equivalent padded ``(rows, width)``
+    matrix, computed without materialising the padding.
+    """
+    maximum = torch.full(
+        (rows,), float("-inf"), dtype=logits.dtype, device=logits.device
+    ).scatter_reduce(0, index, logits, reduce="amax")
+    shifted = torch.exp(logits - maximum[index])
+    total = torch.zeros(
+        rows, dtype=logits.dtype, device=logits.device
+    ).index_add_(0, index, shifted)
+    return shifted / total[index]
 
 
 def _mlp(input_dim: int, hidden: int, layers: int) -> nn.Sequential:
@@ -142,7 +286,13 @@ class NeuralEvaluator:
     def __call__(
         self, game: Game, actions: list[Action]
     ) -> tuple[np.ndarray, np.ndarray]:
-        _, probs, values = self.model.predict(game)
+        _, probs, values = self.model.predict_actions(game, actions)
         if len(probs) != len(actions):  # pragma: no cover - safety net
             raise RuntimeError("network policy does not match the legal actions")
         return probs, values
+
+    def evaluate_batch(
+        self, requests: list[tuple[Game, list[Action]]]
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        """Score many ``(game, actions)`` leaves in one forward pass."""
+        return self.model.predict_many(requests)

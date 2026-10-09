@@ -393,6 +393,15 @@ class Game:
                     return
                 self._resolve_pending_battle()
             elif self.state.phase is Phase.ACTION:
+                pending = self.state.pending_march
+                if pending is not None:
+                    # Mid-march: keep the same house active until it has no
+                    # further moves; only then does play pass on (page 15).
+                    if self._march_actions(pending["house"], pending["origin"]):
+                        self.state.active_house = pending["house"]
+                        return
+                    self._finish_march()
+                    continue
                 self.state.active_house = self._next_action_house()
                 if self.state.active_house is not None:
                     return
@@ -402,13 +411,25 @@ class Game:
         raise RuntimeError("phase progression did not settle")  # pragma: no cover
 
     def _check_victory(self) -> None:
-        """The game ends immediately when a house controls enough castles."""
-        if self.state.winner is not None:
+        """The game ends immediately when a house controls enough castles.
+
+        One pass over the fortifications groups castle counts by controller,
+        rather than a full board scan per house on every phase transition (this
+        runs on every tick of :meth:`_advance`).
+        """
+        state = self.state
+        if state.winner is not None:
             return
-        for house_id in self.state.tracks[Track.IRON_THRONE]:
-            if self.state.houses[house_id].eliminated:
+        counts: dict[str, int] = {}
+        for rid in state.fortifications:
+            controller = state.regions[rid].controller
+            if controller is not None:
+                counts[controller] = counts.get(controller, 0) + 1
+        target = state.victory_castles
+        for house_id in state.tracks[Track.IRON_THRONE]:
+            if state.houses[house_id].eliminated:
                 continue
-            if self.state.castle_count(house_id) >= self.state.victory_castles:
+            if counts.get(house_id, 0) >= target:
                 self._declare_winner(house_id, "controls enough castles")
                 return
 
@@ -599,7 +620,7 @@ class Game:
             for rid in self.state.controlled_regions(house_id):
                 points = self.map.regions[rid].mustering
                 if points:
-                    self.state.regions[rid].mustering_points += points
+                    self.state.mut(rid).mustering_points += points
         self.state.note("mustering points granted per area")
 
     def _recalculate_supply(self) -> None:
@@ -633,7 +654,7 @@ class Game:
                 break  # pragma: no cover - defensive
 
     def _remove_one_unit(self, region_id: str) -> bool:
-        region = self.state.regions[region_id]
+        region = self.state.mut(region_id)
         for unit in (
             UnitType.FOOTMAN,
             UnitType.SIEGE,
@@ -966,7 +987,7 @@ class Game:
             self.state.controlled_regions(house),
             key=lambda rid: -self.state.regions[rid].total(include_routed=True),
         ):
-            region = self.state.regions[region_id]
+            region = self.state.mut(region_id)
             knights = region.units.get(UnitType.KNIGHT, 0)
             if knights <= 0:
                 continue
@@ -991,7 +1012,7 @@ class Game:
             self.state.controlled_regions(house),
             key=lambda rid: -self.state.regions[rid].total(include_routed=True),
         ):
-            region = self.state.regions[region_id]
+            region = self.state.mut(region_id)
             while remaining > 0 and region.units.get(UnitType.FOOTMAN, 0) > 0:
                 region.units[UnitType.FOOTMAN] -= 1
                 if region.units[UnitType.FOOTMAN] <= 0:
@@ -1013,7 +1034,7 @@ class Game:
         if not forts:
             return
         region_id = max(forts, key=lambda rid: self.map.regions[rid].mustering)
-        region = self.state.regions[region_id]
+        region = self.state.mut(region_id)
         points = self.map.regions[region_id].mustering
         while points > 0:
             if points >= MUSTER_COST[UnitType.KNIGHT] and self._muster_fits(
@@ -1159,6 +1180,7 @@ class Game:
 
     def _mustering_actions(self, house: str) -> list[Action]:
         actions: list[Action] = []
+        profile = self._supply_profile(house)
         for region_id in self.state.controlled_regions(house):
             static = self.map.regions[region_id]
             region = self.state.regions[region_id]
@@ -1166,15 +1188,15 @@ class Game:
             if points <= 0 or not static.is_fortification:
                 continue
             if points >= MUSTER_COST[UnitType.FOOTMAN] and self._muster_fits(
-                house, region_id, UnitType.FOOTMAN
+                house, region_id, UnitType.FOOTMAN, profile=profile
             ):
                 actions.append(Action.muster(house, region_id, UnitType.FOOTMAN.value))
             if points >= MUSTER_COST[UnitType.KNIGHT] and self._muster_fits(
-                house, region_id, UnitType.KNIGHT
+                house, region_id, UnitType.KNIGHT, profile=profile
             ):
                 actions.append(Action.muster(house, region_id, UnitType.KNIGHT.value))
             if points >= MUSTER_COST[UnitType.SIEGE] and self._muster_fits(
-                house, region_id, UnitType.SIEGE
+                house, region_id, UnitType.SIEGE, profile=profile
             ):
                 actions.append(Action.muster(house, region_id, UnitType.SIEGE.value))
             if points >= 1 and region.units.get(UnitType.FOOTMAN, 0) > 0:
@@ -1182,7 +1204,9 @@ class Game:
                 actions.append(Action.upgrade(house, region_id, UnitType.SIEGE.value))
             if points >= MUSTER_COST[UnitType.SHIP]:
                 for destination in self._ship_muster_targets(house, region_id):
-                    if self._muster_fits(house, destination, UnitType.SHIP):
+                    if self._muster_fits(
+                        house, destination, UnitType.SHIP, profile=profile
+                    ):
                         actions.append(
                             Action.muster(
                                 house,
@@ -1212,16 +1236,21 @@ class Game:
         return targets
 
     def _muster_fits(
-        self, house: str, destination: str, unit: UnitType, count: int = 1
+        self,
+        house: str,
+        destination: str,
+        unit: UnitType,
+        count: int = 1,
+        profile: tuple[tuple[int, ...], dict[str, int]] | None = None,
     ) -> bool:
         """Would adding ``count`` of ``unit`` in ``destination`` stay in Supply?"""
-        controlled = self.state.controlled_regions(house)
-        limits = self.state.houses[house].supply_limit()
+        if profile is None:
+            profile = self._supply_profile(house)
+        limits, controlled = profile
         sizes: list[int] = []
         found = False
-        for rid in controlled:
-            region = self.state.regions[rid]
-            size = region.total(include_routed=True)
+        for rid, base in controlled.items():
+            size = base
             if rid == destination:
                 size += count
                 found = True
@@ -1242,19 +1271,19 @@ class Game:
         cost = MUSTER_COST[unit]
         if unit is UnitType.SHIP:
             destination = action.target or source
-            placement = self.state.regions[destination]
+            placement = self.state.mut(destination)
         else:
-            placement = self.state.regions[source]
+            placement = self.state.mut(source)
         placement.units[unit] = placement.units.get(unit, 0) + 1
         placement.controller = house
-        self.state.regions[source].mustering_points -= cost
+        self.state.mut(source).mustering_points -= cost
         self.state.note(f"{house} musters {unit.value} in {placement.region_id}")
 
     def _apply_upgrade(self, action: Action) -> None:
         house = action.house or ""
         region_id = action.region or ""
         unit = UnitType(action.unit)
-        region = self.state.regions[region_id]
+        region = self.state.mut(region_id)
         region.units[UnitType.FOOTMAN] = region.units.get(UnitType.FOOTMAN, 0) - 1
         if region.units[UnitType.FOOTMAN] <= 0:
             del region.units[UnitType.FOOTMAN]
@@ -1291,26 +1320,33 @@ class Game:
         return None
 
     def _order_is_restricted(self, order_key: str) -> bool:
-        spec = ORDERS_BY_KEY[order_key]
         restrictions = self.state.order_restrictions
+        if not restrictions:
+            return False
+        spec = ORDERS_BY_KEY[order_key]
         return order_key in restrictions or spec.order_type.value in restrictions
 
     def _planning_actions(self, house: str) -> list[Action]:
         required = self._planning_required(house)
         if not required:
             return []
-        actions: list[Action] = []
         house_state = self.state.houses[house]
         stars_left = self.state.star_allowance(house) - house_state.stars_placed()
+        # Filter the order pool once: the starred and restriction checks depend
+        # only on the order token, not on the region it might be placed in.
+        placeable: list[tuple[str, bool]] = []
+        for order_key in house_state.orders_available:
+            spec = ORDERS_BY_KEY[order_key]
+            if spec.starred and stars_left <= 0:
+                continue
+            if self._order_is_restricted(order_key):
+                continue
+            placeable.append((order_key, spec.order_type is OrderType.MARCH))
+        actions: list[Action] = []
         for region_id in required:
-            region = self.state.regions[region_id]
-            for order_key in house_state.orders_available:
-                spec = ORDERS_BY_KEY[order_key]
-                if spec.starred and stars_left <= 0:
-                    continue
-                if spec.order_type is OrderType.MARCH and not region.units:
-                    continue
-                if self._order_is_restricted(order_key):
+            has_units = bool(self.state.regions[region_id].units)
+            for order_key, is_march in placeable:
+                if is_march and not has_units:
                     continue
                 actions.append(Action.place_order(house, region_id, order_key))
         # Placement is mandatory, but if the pool/restrictions leave no legal
@@ -1324,7 +1360,7 @@ class Game:
         region_id = action.region or ""
         order_key = action.order or ""
         house_state = self.state.houses[house]
-        region = self.state.regions[region_id]
+        region = self.state.mut(region_id)
 
         # Return any order already in the region to its owner's pool.
         if region.order is not None and region.order_house is not None:
@@ -1346,6 +1382,10 @@ class Game:
         elif phase is Phase.RAVEN:
             self.state.raven_used = True
         elif phase is Phase.ACTION:
+            if self.state.pending_march is not None:
+                # Finishing an unfinished multi-destination march.
+                self._finish_march()
+                return
             region_id = action.region
             if region_id is None:
                 # Backwards-compatible fallback: forfeit every order of the
@@ -1355,7 +1395,7 @@ class Game:
                 self._decline_order(house, region_id)
         elif phase is Phase.MUSTERING:
             for rid in self.state.controlled_regions(house):
-                self.state.regions[rid].mustering_points = 0
+                self.state.mut(rid).mustering_points = 0
         elif phase is Phase.COMBAT:
             battle = self.state.pending_battle
             if battle is not None:
@@ -1364,9 +1404,10 @@ class Game:
 
     def _decline_order(self, house: str, region_id: str) -> None:
         """Resolve one order with no effect, returning its token to the pool."""
-        region = self.state.regions[region_id]
-        if region.order is None or region.order_house != house:
+        existing = self.state.regions[region_id]
+        if existing.order is None or existing.order_house != house:
             return
+        region = self.state.mut(region_id)
         order_key = region.order
         region.order = None
         region.order_house = None
@@ -1377,9 +1418,8 @@ class Game:
 
     def _decline_orders_of_step(self, house: str) -> None:
         order_type = self._step_order_type()
-        for region_id, order_key in list(self.state.orders_on_board(house)):
-            if ORDERS_BY_KEY[order_key].order_type is order_type:
-                self._decline_order(house, region_id)
+        for region_id, _order_key in self.state.orders_of_type(house, order_type):
+            self._decline_order(house, region_id)
 
     # -- Action phase ----------------------------------------------------
 
@@ -1405,23 +1445,30 @@ class Game:
         ]
         if not order:
             return None
+        has_orders = self.state.houses_with_orders(order_type)
         last = self.state.action_house_last
         start = order.index(last) + 1 if last in order else 0
         for offset in range(len(order)):
             house_id = order[(start + offset) % len(order)]
-            if self.state.has_order_type(house_id, order_type):
+            if house_id in has_orders:
                 self.state.action_house_last = house_id
                 return house_id
         self.state.action_house_last = None
         return None
 
     def _action_actions(self, house: str) -> list[Action]:
+        pending = self.state.pending_march
+        if pending is not None:
+            if pending["house"] != house:  # pragma: no cover - defensive
+                return []
+            origin = pending["origin"]
+            # Further moves from the same area, or finish the march (rulebook
+            # page 15: units may move to several adjacent areas).
+            actions = self._march_actions(house, origin)
+            actions.append(Action.pass_(house, region=origin))
+            return actions
         order_type = self._step_order_type()
-        matches = [
-            (region_id, order_key)
-            for region_id, order_key in self.state.orders_on_board(house)
-            if ORDERS_BY_KEY[order_key].order_type is order_type
-        ]
+        matches = self.state.orders_of_type(house, order_type)
         if not matches:
             return []
         actions: list[Action] = []
@@ -1470,21 +1517,47 @@ class Game:
                 actions.append(Action.resolve_raid(house, region_id, neighbour))
         return actions
 
+    def _supply_profile(self, house: str) -> tuple[tuple[int, ...], dict[str, int]]:
+        """``(supply limits, {region_id: unit count})`` for a house's regions.
+
+        March legality tests Supply after the move, for every candidate amount;
+        computing the house's current region sizes once per march decision keeps
+        that from rescanning the whole board per candidate.
+        """
+        limits = self.state.houses[house].supply_limit()
+        controlled = {
+            rid: region.total(include_routed=True)
+            for rid, region in self.state.regions.items()
+            if region.controller == house
+        }
+        return limits, controlled
+
     def _march_actions(self, house: str, region_id: str) -> list[Action]:
         region = self.state.regions[region_id]
         if region.is_empty():
             return []
+        profile = self._supply_profile(house)
         actions: list[Action] = []
         for target in sorted(self._march_targets(house, region_id)):
             if self.map.regions[target].terrain in (Terrain.SEA, Terrain.PORT):
-                actions.extend(self._naval_march_actions(house, region_id, target))
+                actions.extend(
+                    self._naval_march_actions(house, region_id, target, profile)
+                )
             else:
-                actions.extend(self._land_march_actions(house, region_id, target))
+                actions.extend(
+                    self._land_march_actions(house, region_id, target, profile)
+                )
         return actions
 
     def _naval_march_actions(
-        self, house: str, origin: str, target: str
+        self,
+        house: str,
+        origin: str,
+        target: str,
+        profile: tuple[tuple[int, ...], dict[str, int]] | None = None,
     ) -> list[Action]:
+        if profile is None:
+            profile = self._supply_profile(house)
         ships = self.state.regions[origin].units.get(UnitType.SHIP, 0)
         if ships <= 0:
             return []
@@ -1495,7 +1568,7 @@ class Game:
             limit = min(limit, max(0, 3 - occupied))
         actions: list[Action] = []
         for count in range(1, limit + 1):
-            if not self._march_supply_ok(house, origin, target, count):
+            if not self._march_supply_ok(origin, target, count, profile):
                 continue
             actions.append(
                 Action.march(house, origin, target, units=(0, 0, 0, count))
@@ -1503,8 +1576,14 @@ class Game:
         return actions
 
     def _land_march_actions(
-        self, house: str, origin: str, target: str
+        self,
+        house: str,
+        origin: str,
+        target: str,
+        profile: tuple[tuple[int, ...], dict[str, int]] | None = None,
     ) -> list[Action]:
+        if profile is None:
+            profile = self._supply_profile(house)
         region = self.state.regions[origin]
         counts = [
             region.units.get(UnitType.FOOTMAN, 0),
@@ -1518,7 +1597,7 @@ class Game:
             moving = sum(combo)
             if moving == 0:
                 continue
-            if not self._march_supply_ok(house, origin, target, moving):
+            if not self._march_supply_ok(origin, target, moving, profile):
                 continue
             units = (combo[0], combo[1], combo[2], 0)
             if not self._beats_neutral(house, origin, target, units):
@@ -1573,21 +1652,24 @@ class Game:
             self._neutral_attack_strength(house, origin, target, units) >= neutral
         )
 
+    @staticmethod
     def _march_supply_ok(
-        self, house: str, origin: str, target: str, moving: int
+        origin: str,
+        target: str,
+        moving: int,
+        profile: tuple[tuple[int, ...], dict[str, int]],
     ) -> bool:
         """Would this move leave the house within its Supply limits?
 
         A player may never take an action that would exceed Supply, which can
         happen when a march merges two forces or splits one into several
-        (rulebook page 8).
+        (rulebook page 8). ``profile`` is the house's
+        :meth:`_supply_profile`, computed once per march decision.
         """
-        state = self.state
-        limits = state.houses[house].supply_limit()
-        controlled = set(state.controlled_regions(house))
+        limits, controlled = profile
         sizes: list[int] = []
-        for rid in controlled:
-            size = state.regions[rid].total(include_routed=True)
+        for rid, base in controlled.items():
+            size = base
             if rid == origin:
                 size -= moving
             if rid == target:
@@ -1678,7 +1760,7 @@ class Game:
         house = action.house or ""
         region_id = action.region or ""
         target_id = action.target or ""
-        target = self.state.regions[target_id]
+        target = self.state.mut(target_id)
         removed = target.order
         owner = target.order_house
         pillaging = (
@@ -1687,7 +1769,7 @@ class Game:
         )
         target.order = None
         target.order_house = None
-        source = self.state.regions[region_id]
+        source = self.state.mut(region_id)
         source.order = None
         source.order_house = None
         if removed and owner and removed in self.state.houses[owner].orders_placed:
@@ -1708,15 +1790,15 @@ class Game:
         house = action.house or ""
         origin = action.region or ""
         target_id = action.target or ""
-        source = self.state.regions[origin]
-        target = self.state.regions[target_id]
+        source = self.state.mut(origin)
+        target = self.state.mut(target_id)
         target_terrain = self.map.regions[target_id].terrain
 
-        # Capture the attacker's own March order bonus before clearing it.
+        # The March order stays on the board until the march ends, so its bonus
+        # still applies to a battle that follows the non-combat moves. This is
+        # what lets a single March Order reach several destinations (page 15).
         attacker_order_strength = order_modifier(self.state, origin, house, "attacker")
         attacker_order_key = source.order
-        source.order = None
-        source.order_house = None
 
         moving = self._moving_units(source, target_terrain, action.units)
         moving_total = sum(moving.values())
@@ -1763,6 +1845,8 @@ class Game:
                 "support_index": 0,
                 "support_choices": {},
             }
+            self._consume_order(house, origin)
+            self.state.pending_march = None
             self.state.phase = Phase.COMBAT
             self.state.note(
                 f"{house} marches into {target_id} and attacks the Neutral Force"
@@ -1806,6 +1890,8 @@ class Game:
                 "support_index": 0,
                 "support_choices": {},
             }
+            self._consume_order(house, origin)
+            self.state.pending_march = None
             self.state.phase = Phase.COMBAT
             self.state.note(f"{house} marches into {target_id} and attacks {defender}")
         else:
@@ -1820,12 +1906,25 @@ class Game:
             if self.map.regions[target_id].is_land:
                 self._capture_port(house, target_id)
             self.state.note(f"{house} marches {origin} -> {target_id}")
+            # The order is only spent once there is nothing left to move. Pausing
+            # here is what lets one March Order reach several destinations.
+            self.state.pending_march = {"house": house, "origin": origin}
+            if not self._march_actions(house, origin):
+                self._finish_march()
         if source.is_empty() and not source.routed:
             source.controller = (
                 source.influence_token
                 if source.influence_token is not None
                 else (source.owner if source.owner else None)
             )
+
+    def _finish_march(self) -> None:
+        """End a multi-destination march and spend its March order token."""
+        pending = self.state.pending_march
+        if pending is None:  # pragma: no cover - defensive
+            return
+        self._consume_order(pending["house"], pending["origin"])
+        self.state.pending_march = None
 
     def _finalize_neutral_battle(self, battle: dict) -> None:
         """Resolve a march against a Neutral Force token (rulebook page 26).
@@ -1839,7 +1938,7 @@ class Game:
         origin = battle["origin"]
         target_id = battle["region"]
         moving = battle["attacker_units"]
-        target = state.regions[target_id]
+        target = state.mut(target_id)
         static = self.map.regions[target_id]
         support, _a_units, _d_total, _d_units = support_from_choices(
             state, target_id, battle.get("support_choices", {})
@@ -1855,7 +1954,7 @@ class Game:
             # Support may have been refused; the attack then fails and the army
             # returns to where it marched from (rulebook page 26 says such a
             # march "may not be attempted").
-            source = state.regions[origin]
+            source = state.mut(origin)
             for unit, count in moving.items():
                 source.units[unit] = source.units.get(unit, 0) + count
             if source.controller != house:
@@ -1919,7 +2018,7 @@ class Game:
         port_id = self.map.port_of(land_region_id)
         if port_id is None:
             return
-        port = self.state.regions[port_id]
+        port = self.state.mut(port_id)
         enemy_ships = port.units.get(UnitType.SHIP, 0) + port.routed.get(
             UnitType.SHIP, 0
         )
@@ -1939,7 +2038,7 @@ class Game:
 
     def _consume_order(self, house: str, region_id: str) -> str | None:
         """Clear an area's order token and return it to its owner's pool."""
-        region = self.state.regions[region_id]
+        region = self.state.mut(region_id)
         order_key = region.order
         region.order = None
         region.order_house = None
@@ -1986,7 +2085,7 @@ class Game:
         self._consume_order(house, region_id)
         # The area is mustered as if a "Mustering" card had been played there,
         # using its printed mustering value (rulebook page 22).
-        self.state.regions[region_id].mustering_points += static.mustering
+        self.state.mut(region_id).mustering_points += static.mustering
         self.state.return_phase = Phase.ACTION
         self.state.phase = Phase.MUSTERING
         self.state.note(
@@ -1995,6 +2094,7 @@ class Game:
 
     def _next_action_step(self) -> None:
         self.state.action_house_last = None
+        self.state.pending_march = None
         if self.state.action_step is ActionStep.RAID:
             self.state.action_step = ActionStep.MARCH
         elif self.state.action_step is ActionStep.MARCH:
@@ -2004,13 +2104,15 @@ class Game:
             self.state.phase = Phase.CLEANUP
 
     def _clear_orders(self) -> None:
-        for region in self.state.regions.values():
+        for region_id in list(self.state.regions):
+            region = self.state.regions[region_id]
             if region.order is None:
                 continue
             owner = region.order_house
             if owner and region.order in self.state.houses[owner].orders_placed:
                 self.state.houses[owner].orders_placed.remove(region.order)
                 self.state.houses[owner].orders_available.append(region.order)
+            region = self.state.mut(region_id)
             region.order = None
             region.order_house = None
 
@@ -2061,7 +2163,7 @@ class Game:
         house = action.house or ""
         region_id = action.region or ""
         order_key = action.order or ""
-        region = self.state.regions[region_id]
+        region = self.state.mut(region_id)
         old_key = region.order
         house_state = self.state.houses[house]
         if old_key is not None and old_key in house_state.orders_placed:
@@ -2444,7 +2546,11 @@ class Game:
     def _run_cleanup_phase(self) -> None:
         state = self.state
         # Routed units recover.
-        for region in state.regions.values():
+        for region_id in list(state.regions):
+            region = state.regions[region_id]
+            if not region.routed:
+                continue
+            region = state.mut(region_id)
             for unit, count in list(region.routed.items()):
                 region.units[unit] = region.units.get(unit, 0) + count
             region.routed = {}
@@ -2458,10 +2564,13 @@ class Game:
 
         state.raven_used = False
         state.action_house_last = None
+        state.pending_march = None
         state.return_phase = None
 
-        for region in state.regions.values():
+        for region_id in list(state.regions):
+            region = state.regions[region_id]
             if region.is_empty() and not region.routed:
+                region = state.mut(region_id)
                 if region.influence_token is not None:
                     region.controller = region.influence_token
                 elif region.owner is not None:
@@ -2470,7 +2579,8 @@ class Game:
                     region.controller = None
             # Unspent mustering points are lost, and order restrictions last
             # only for the round in which their card was drawn.
-            region.mustering_points = 0
+            if region.mustering_points:
+                state.mut(region_id).mustering_points = 0
         state.order_restrictions = []
 
         # Victory check: immediate at seven castles, otherwise after round 10

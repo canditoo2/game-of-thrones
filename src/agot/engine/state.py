@@ -18,8 +18,10 @@ from __future__ import annotations
 import copy
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from enum import Enum
 
 from agot.engine.enums import (
+    ORDERS_BY_KEY,
     STAR_ALLOWANCE_BY_COURT_POSITION,
     SUPPLY_LIMITS,
     ActionStep,
@@ -30,7 +32,7 @@ from agot.engine.enums import (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class RegionState:
     """What is currently in one region."""
 
@@ -68,12 +70,29 @@ class RegionState:
     def contains_house(self, house_id: str) -> bool:
         return self.controller == house_id and not self.is_empty()
 
-    def clear_units(self) -> None:
-        self.units = {}
-        self.routed = {}
+    def clone(self) -> RegionState:
+        """Structural copy, far cheaper than ``copy.deepcopy``.
+
+        Every field is an immutable scalar or a flat ``dict`` of scalars, so the
+        copy is a plain reconstruction. Tree search calls this millions of times,
+        so it must stay allocation-only (see :meth:`GameState.clone`).
+        """
+        new = RegionState.__new__(RegionState)
+        new.region_id = self.region_id
+        new.controller = self.controller
+        new.owner = self.owner
+        new.units = dict(self.units)
+        new.routed = dict(self.routed)
+        new.neutral_force = self.neutral_force
+        new.garrison = self.garrison
+        new.mustering_points = self.mustering_points
+        new.influence_token = self.influence_token
+        new.order = self.order
+        new.order_house = self.order_house
+        return new
 
 
-@dataclass
+@dataclass(slots=True)
 class HouseState:
     """Per-house player state."""
 
@@ -97,8 +116,49 @@ class HouseState:
         level = max(0, min(self.supply_level, len(SUPPLY_LIMITS) - 1))
         return SUPPLY_LIMITS[level]
 
+    def clone(self) -> HouseState:
+        """Structural copy; see :meth:`RegionState.clone`."""
+        new = HouseState.__new__(HouseState)
+        new.house_id = self.house_id
+        new.power = self.power
+        new.supply_level = self.supply_level
+        new.orders_available = list(self.orders_available)
+        new.orders_placed = list(self.orders_placed)
+        new.house_cards_available = list(self.house_cards_available)
+        new.house_cards_used = list(self.house_cards_used)
+        new.blade_used = self.blade_used
+        new.passed = self.passed
+        new.eliminated = self.eliminated
+        return new
 
-@dataclass
+
+def _copy_pending(value, memo: dict | None = None):
+    """Copy a pending-effect value, reproducing nested ``dict``/``list`` values.
+
+    ``GameState`` keeps four pending dicts (``wildling_attack``,
+    ``westeros_choice``, ``pending_battle``, ``pending_march``). They are small
+    and are ``None`` for most of the game, but ``copy.deepcopy`` paid its dispatch
+    and memo bookkeeping on every single clone, and a ``GameState.clone`` is the
+    hottest operation in tree search. Containers are therefore copied
+    structurally and only genuinely opaque values fall through to
+    ``copy.deepcopy``, which receives ``memo`` so the caller can rebind
+    back-references (see :meth:`GameState.clone`). Immutable leaves (strings,
+    numbers, enums) are shared, which is what ``deepcopy`` does with them too.
+
+    Cloning is exactly where sharing has to stop: the engine writes into
+    ``pending_battle["support_choices"]`` and ``wildling_attack["bids"]`` in
+    place, so those inner dicts must not be shared between a state and its clone.
+    """
+    if isinstance(value, dict):
+        return {key: _copy_pending(item, memo) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_pending(item, memo) for item in value]
+    if isinstance(value, (str, int, float, bool, type(None), Enum)):
+        return value
+    return copy.deepcopy(value, memo)
+
+
+@dataclass(slots=True)
 class GameState:
     """Complete mutable state of one game."""
 
@@ -155,6 +215,11 @@ class GameState:
     pending_bids: dict[str, int] = field(default_factory=dict)
     #: Set while a battle is awaiting House card choices.
     pending_battle: dict | None = None
+    #: Set while a March Order is being resolved across several destinations.
+    #: ``{"house": house_id, "origin": region_id}``. The order token stays on
+    #: the board until the march ends, so its bonus still applies to a battle
+    #: that happens after the non-combat moves (rulebook page 15).
+    pending_march: dict | None = None
     #: Which influence tracks have still to be bid on, in resolution order.
     bid_tracks: list[str] = field(default_factory=list)
 
@@ -164,10 +229,106 @@ class GameState:
     #: strongholds). Populated by :func:`new_state`.
     fortifications: frozenset[str] = frozenset()
 
+    #: Region ids this state has already taken private *since the last clone*.
+    #: A clone shares every :class:`RegionState` with its source until one of
+    #: them writes to it (see :meth:`mut`). Both sides therefore drop their
+    #: bookkeeping when a clone is made: after the split this state's older
+    #: private objects are shared again, so it has to re-copy them too.
+    #: ``None`` means a brand new state whose regions no one else can see yet,
+    #: so writes need no copy. Excluded from equality and ``repr``: it is
+    #: bookkeeping, not game state.
+    _owned: set[str] | None = field(
+        default=None, init=False, compare=False, repr=False
+    )
+
     # -- convenience -----------------------------------------------------
 
     def clone(self) -> GameState:
-        return copy.deepcopy(self)
+        """Structural copy used by tree search.
+
+        This is deliberately hand-written rather than ``copy.deepcopy``: the
+        generic copier walks the whole dataclass tree with a memo dict and was
+        measured at ~86% of MCTS time. Every field below is copied explicitly.
+        The only fields that still need a generic deepcopy are the small opaque
+        "pending" dicts, which are ``None`` for most of the game; their copier
+        also rebinds any back-reference to the state, see :func:`_copy_pending`.
+        """
+        new = GameState.__new__(GameState)
+        new.max_rounds = self.max_rounds
+        new.victory_castles = self.victory_castles
+        new.round = self.round
+        new.phase = self.phase
+        new.action_step = self.action_step
+        new.active_house = self.active_house
+        new.winner = self.winner
+        new.action_house_last = self.action_house_last
+        new.raven_used = self.raven_used
+        new.return_phase = self.return_phase
+        new.tracks = {track: list(order) for track, order in self.tracks.items()}
+        new.regions = dict(self.regions)
+        new._owned = set()
+        # ``new`` shares every region object with this state from here on --
+        # including the ones this state had already taken private, which its
+        # ``_owned`` set can no longer vouch for. Clearing it makes this state
+        # re-copy on its next write to *any* region, so isolation holds in both
+        # directions. It costs nothing in tree search: a node is cloned and then
+        # stepped, and its parent is never stepped again.
+        self._owned = set()
+        new.houses = {hid: house.clone() for hid, house in self.houses.items()}
+        new.wildling_threat = self.wildling_threat
+        # A copied value may hold a back-reference to the state it was parked in:
+        # a resolved battle's ``BattleResult`` carries a context whose ``state`` is
+        # read *and written* by ``house_cards.apply_post_battle`` (Tywin's Power,
+        # Renly's upgrade, Cersei's Order removal, Roose's discard, Patchface).
+        # On the live game that back-reference is the state itself, so it has to
+        # become ``new`` here; otherwise the clone applies those abilities to a
+        # detached ghost board and search silently plays by different rules than
+        # the game being played. Seeding `deepcopy`'s memo with that one
+        # substitution rebinds every occurrence and skips copying the state.
+        pending_memo = {id(self): new}
+        new.wildling_attack = _copy_pending(self.wildling_attack, pending_memo)
+        new.westeros_decks = {
+            name: list(cards) for name, cards in self.westeros_decks.items()
+        }
+        new.westeros_deck_pos = dict(self.westeros_deck_pos)
+        new.westeros_drawn = dict(self.westeros_drawn)
+        new.pending_westeros = (
+            None if self.pending_westeros is None else list(self.pending_westeros)
+        )
+        new.westeros_choice = _copy_pending(self.westeros_choice, pending_memo)
+        new.wildling_deck = list(self.wildling_deck)
+        new.wildling_deck_pos = self.wildling_deck_pos
+        new.wildling_discard = list(self.wildling_discard)
+        new.order_restrictions = list(self.order_restrictions)
+        new.pending_planning = list(self.pending_planning)
+        new.pending_bids = dict(self.pending_bids)
+        new.pending_battle = _copy_pending(self.pending_battle, pending_memo)
+        new.pending_march = _copy_pending(self.pending_march, pending_memo)
+        new.bid_tracks = list(self.bid_tracks)
+        new.log = list(self.log)
+        new.fortifications = self.fortifications
+        return new
+
+    def mut(self, region_id: str) -> RegionState:
+        """Return ``region_id``'s region, taking a private copy before a write.
+
+        A clone shares its source's :class:`RegionState` objects; this hands the
+        caller a region only it can see, copying it the first time. The engine
+        mutates a clone right after building it (one ``step``), and a step
+        touches on average ~1 of the 58 regions, so this replaces a full
+        board copy per MCTS node with a shallow dict plus one region copy.
+
+        Callers must fetch through here (not ``regions[...]``) *before* the
+        first write to a region, and must keep using the returned object for
+        every later write in the same call.
+        """
+        owned = self._owned
+        if owned is None or region_id in owned:
+            return self.regions[region_id]
+        region = self.regions[region_id].clone()
+        self.regions[region_id] = region
+        owned.add(region_id)
+        return region
 
     def note(self, message: str) -> None:
         self.log.append(f"R{self.round} {self.phase.value}: {message}")
@@ -210,9 +371,14 @@ class GameState:
         ]
 
     def castle_count(self, house_id: str) -> int:
-        """Castles and strongholds controlled - the victory condition."""
+        """Castles and strongholds controlled - the victory condition.
+
+        Iterates only the fortifications rather than every region, because this
+        is checked on every phase transition.
+        """
+        regions = self.regions
         return sum(
-            1 for rid in self.controlled_regions(house_id) if rid in self.fortifications
+            1 for rid in self.fortifications if regions[rid].controller == house_id
         )
 
     def regions_of(self, house_id: str) -> Iterator[RegionState]:
@@ -293,16 +459,43 @@ class GameState:
 
     def has_order_type(self, house_id: str, order_type: OrderType) -> bool:
         return any(
-            region.order_house == house_id
-            and region.order is not None
-            and _order_type(region.order) is order_type
+            order_type_of(region.order) is order_type
             for region in self.regions.values()
+            if region.order_house == house_id
         )
 
+    def houses_with_orders(self, order_type: OrderType) -> set[str]:
+        """Houses with at least one placed order of ``order_type`` on the board.
 
-def _order_type(key: str) -> OrderType:
-    from agot.engine.enums import ORDERS_BY_KEY
+        One pass over the board, used by the Action Phase to skip houses with no
+        order of the current step instead of scanning once per house.
+        """
+        result: set[str] = set()
+        for region in self.regions.values():
+            if region.order_house is not None and order_type_of(region.order) is order_type:
+                result.add(region.order_house)
+        return result
 
+    def orders_of_type(
+        self, house_id: str, order_type: OrderType
+    ) -> list[tuple[str, str]]:
+        """``(region_id, order_key)`` pairs of ``house_id`` for one order type."""
+        matches: list[tuple[str, str]] = []
+        for rid, region in self.regions.items():
+            order = region.order
+            if (
+                region.order_house == house_id
+                and order is not None
+                and order_type_of(order) is order_type
+            ):
+                matches.append((rid, order))
+        return matches
+
+
+def order_type_of(key: str | None) -> OrderType | None:
+    """Order type of a placed order key (``None`` for an empty slot)."""
+    if key is None:
+        return None
     return ORDERS_BY_KEY[key].order_type
 
 

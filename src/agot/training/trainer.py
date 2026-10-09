@@ -29,6 +29,8 @@ class TrainConfig:
     batch_size: int = 64
     epochs: int = 1
     value_weight: float = 1.0
+    #: Decoupled (AdamW) decay on weight matrices only; biases and other 1-D
+    #: parameters are left alone. See :func:`_parameter_groups`.
     weight_decay: float = 1e-4
     grad_clip: float = 1.0
     device: str = "cpu"
@@ -56,6 +58,31 @@ class Batch:
         )
 
 
+def _parameter_groups(model: nn.Module, weight_decay: float) -> list[dict]:
+    """Split parameters into decayed and undecayed groups.
+
+    Biases and other one-dimensional parameters are never decayed. Decay is
+    *decoupled* (``AdamW``), so it shrinks a weight geometrically rather than by a
+    constant step. Plain ``Adam`` with an L2 penalty adds ``wd * parameter`` to
+    the gradient, which adaptive scaling turns into a roughly constant pull
+    toward zero -- strong enough to erase a parameter whose task gradient is
+    weak, which is how the original policy head died.
+    """
+    decayed: list[nn.Parameter] = []
+    undecayed: list[nn.Parameter] = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if parameter.ndim < 2 or name.endswith(".bias"):
+            undecayed.append(parameter)
+        else:
+            decayed.append(parameter)
+    return [
+        {"params": decayed, "weight_decay": weight_decay},
+        {"params": undecayed, "weight_decay": 0.0},
+    ]
+
+
 def collate(examples: list[Example]) -> Batch:
     """Pad a list of variable-length examples into dense tensors."""
     size = len(examples)
@@ -76,7 +103,11 @@ def collate(examples: list[Example]) -> Batch:
         mask[row, :count] = 1.0
         target = np.asarray(example.policy, dtype=np.float32)
         total = target.sum()
-        policy[row, :count] = target / total if total > 0 else 1.0 / count
+        if total > 0:
+            normalised = target / total
+        else:
+            normalised = np.full(count, 1.0 / count, dtype=np.float32)
+        policy[row, :count] = torch.from_numpy(normalised)
         outcome[row] = torch.from_numpy(np.asarray(example.outcome, dtype=np.float32))
         outcome_mask[row] = torch.from_numpy(
             (np.asarray(example.outcome) != 0).astype(np.float32)
@@ -117,12 +148,31 @@ class Trainer:
         self.config = config or TrainConfig()
         self.device = self.config.device
         self.model.to(self.device)
-        self.optimizer = torch.optim.Adam(
-            self.model.parameters(),
+        self.optimizer = torch.optim.AdamW(
+            _parameter_groups(self.model, self.config.weight_decay),
             lr=self.config.learning_rate,
-            weight_decay=self.config.weight_decay,
         )
         self.rng = np.random.default_rng(0)
+
+    # -- persistence -----------------------------------------------------
+
+    def state_dict(self) -> dict:
+        """Optimizer momentum and RNG state, for resuming a run.
+
+        The weights themselves live in the network checkpoint; this is the rest
+        of what :meth:`train_epoch` depends on. Adam's per-parameter moments are
+        the reason a resumed run does not take a transient hit.
+        """
+        return {
+            "optimizer": self.optimizer.state_dict(),
+            "rng": self.rng.bit_generator.state,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        if "optimizer" in state:
+            self.optimizer.load_state_dict(state["optimizer"])
+        if "rng" in state:
+            self.rng.bit_generator.state = state["rng"]
 
     def train_epoch(self, examples: list[Example]) -> TrainStats:
         if not examples:
@@ -160,7 +210,11 @@ class Trainer:
         if self.config.grad_clip:
             nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
         self.optimizer.step()
-        return float(policy_loss), float(value_loss), float(total)
+        return (
+            float(policy_loss.detach()),
+            float(value_loss.detach()),
+            float(total.detach()),
+        )
 
     def train(
         self,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from agot.agents import MCTS, GreedyPolicy, RandomPolicy, outcome_vector
+from agot.agents.mcts import SearchResult
 from agot.engine.game import Game, GameConfig
 from agot.engine.observation import HOUSE_ORDER
 
@@ -55,3 +56,34 @@ def test_outcome_vector_has_one_winner() -> None:
     outcome = outcome_vector(game)
     assert outcome.sum() == 1.0 + (-1.0) * (len(config.houses) - 1)
     assert outcome[HOUSE_ORDER.index("stark")] == 1.0
+
+
+def test_visit_distribution_sharpens_as_temperature_drops() -> None:
+    """Temperature is what the recorded self-play target is built from."""
+    game = Game.new(GameConfig(seed=5))
+    actions = game.legal_actions()[:3]
+    # A skewed visit count: the point is the shape, not how it was produced.
+    result = SearchResult(actions, np.array([6.0, 2.0, 1.0]), np.zeros(3))
+
+    hot = result.probabilities(temperature=1.0)
+    cold = result.probabilities(temperature=0.25)
+    frozen = result.probabilities(temperature=0.0)
+
+    np.testing.assert_allclose(hot.sum(), 1.0)
+    np.testing.assert_allclose(cold.sum(), 1.0)
+    assert cold[0] > hot[0], "a colder temperature must concentrate the mass"
+    assert frozen[0] == 1.0, "temperature 0 is a one-hot on the most visited"
+    assert frozen[1] == frozen[2] == 0.0
+
+
+def test_pick_honours_a_temperature_override() -> None:
+    """The schedule is applied by the caller, without rebuilding the policy."""
+    game = Game.new(GameConfig(seed=6))
+    mcts = MCTS(simulations=8, temperature=1.0, seed=0)
+    result = mcts.search(game)
+
+    action, target = mcts.pick(result, temperature=0.25)
+
+    assert action in result.actions
+    np.testing.assert_allclose(target, result.probabilities(0.25), atol=1e-6)
+    assert mcts.temperature == 1.0, "the instance's own temperature is unchanged"

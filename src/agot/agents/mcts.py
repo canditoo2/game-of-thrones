@@ -14,11 +14,22 @@ An :class:`Evaluator` supplies a prior distribution over the legal actions and a
 predicted value vector for a position. The default
 :class:`UniformEvaluator` needs no network at all, which is what lets the engine
 and MCTS be exercised without PyTorch installed.
+
+Hidden information
+------------------
+
+The engine stores the true state, so a naive search would read face-down Order
+tokens and secret bids. With ``determinizations > 1`` the search runs PIMC
+instead: it copies the position several times through
+:func:`agot.engine.hidden.determinize`, searching each resampled world and
+aggregating the root visit counts. The result reflects only what the acting
+house can actually see.
 """
 
 from __future__ import annotations
 
 import math
+import random
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -28,7 +39,11 @@ import numpy as np
 from agot.agents.base import Policy, outcome_vector
 from agot.engine.actions import Action
 from agot.engine.game import Game
-from agot.engine.observation import N_HOUSES
+from agot.engine.hidden import determinize
+from agot.engine.observation import HOUSE_ORDER, N_HOUSES
+
+#: House id -> canonical value-vector index, resolved once.
+_HOUSE_INDEX: dict[str, int] = {house: index for index, house in enumerate(HOUSE_ORDER)}
 
 
 class Evaluator(Protocol):
@@ -76,7 +91,10 @@ class _Node:
         self.priors: np.ndarray | None = None
         self.children: list[_Node] | None = None
         self.visits = 0
-        self.value_sums = np.zeros(N_HOUSES, dtype=np.float64)
+        #: Summed per-house reward, allocated on the first visit. A fresh
+        #: expansion creates one node per candidate action, and most of those
+        #: are never visited, so the array is created lazily.
+        self.value_sums: np.ndarray | None = None
 
     @property
     def game(self) -> Game:
@@ -114,6 +132,24 @@ class SearchResult:
         return scaled / scaled.sum()
 
 
+@dataclass
+class Simulation:
+    """One MCTS simulation paused between descent and leaf evaluation.
+
+    ``value`` is set when the descent stopped at a terminal (or actionless)
+    position. Otherwise ``leaf`` is the node that still needs a network score and
+    ``actions`` are its legal moves; a batching driver collects these across
+    games, scores them in one forward pass, then calls
+    :meth:`MCTS.finish_simulation`.
+    """
+
+    path: list[_Node]
+    leaf: _Node | None
+    actions: list[Action] | None
+    value: np.ndarray | None
+    apply_noise: bool
+
+
 class MCTS(Policy):
     """PUCT search that turns an evaluator into a policy."""
 
@@ -128,6 +164,7 @@ class MCTS(Policy):
         temperature: float = 1.0,
         dirichlet_alpha: float = 0.3,
         dirichlet_weight: float = 0.25,
+        determinizations: int = 1,
         seed: int | None = None,
     ) -> None:
         self.evaluator: Evaluator = evaluator or UniformEvaluator()
@@ -136,28 +173,127 @@ class MCTS(Policy):
         self.temperature = temperature
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_weight = dirichlet_weight
+        #: Number of resampled hidden states searched per move. ``1`` means plain
+        #: perfect-information search; higher values enable PIMC.
+        self.determinizations = max(1, determinizations)
         self.rng = np.random.default_rng(seed)
+        self._det_rng = random.Random(seed)
 
     # -- public API ------------------------------------------------------
 
     def search(self, game: Game) -> SearchResult:
+        observer = game.current_player()
+        if self.determinizations > 1 and observer is not None:
+            return self._search_determinized(game, observer)
+
         root = _Node(game=game.clone())
         if root.game.is_terminal():
             return SearchResult([], np.array([]), np.array([]))
+        self._run(root, self.simulations)
+        return self.result_from_root(root)
 
-        for _ in range(max(1, self.simulations)):
-            self._simulate(root)
+    def open_search(self, game: Game) -> _Node | None:
+        """Create (but do not run) a search root, for stepwise drivers."""
+        root = _Node(game=game.clone())
+        if root.game.is_terminal():
+            return None
+        return root
 
+    def open_search_worlds(self, game: Game) -> list[_Node]:
+        """Roots for one stepwise decision: one per determinized world.
+
+        With ``determinizations == 1`` this is a single perfect-information root.
+        Otherwise each root is a resampled world the acting house cannot
+        distinguish; a stepwise driver runs simulations on all of them and
+        aggregates with :meth:`aggregate_roots`.
+        """
+        observer = game.current_player()
+        if self.determinizations <= 1 or observer is None:
+            root = self.open_search(game)
+            return [] if root is None else [root]
+        roots: list[_Node] = []
+        for _ in range(self.determinizations):
+            world = determinize(game, observer, self._det_rng)
+            root = _Node(game=world)
+            if not root.game.is_terminal():
+                roots.append(root)
+        return roots
+
+    def result_from_root(self, root: _Node) -> SearchResult:
+        """Package a finished root into a :class:`SearchResult`."""
         assert root.actions is not None and root.children is not None
         visits = np.array([child.visits for child in root.children], dtype=np.float64)
         return SearchResult(root.actions, visits, self._root_q(root))
 
+    def aggregate_roots(
+        self, roots: list[_Node], observer: str | None = None
+    ) -> SearchResult:
+        """Merge finished PIMC roots into one visit distribution.
+
+        The action list is the same in every world (determinization never changes
+        the acting house's own legal moves), so visits simply add up.
+        """
+        if not roots:
+            return SearchResult([], np.array([]), np.array([]))
+        if len(roots) == 1:
+            return self.result_from_root(roots[0])
+        assert roots[0].actions is not None
+        actions = roots[0].actions
+        index_of = {action: index for index, action in enumerate(actions)}
+        visits = np.zeros(len(actions), dtype=np.float64)
+        value_sums = np.zeros((len(actions), N_HOUSES), dtype=np.float64)
+        for root in roots:
+            assert root.actions is not None and root.children is not None
+            for child_index, action in enumerate(root.actions):
+                position = index_of.get(action)
+                if position is None:  # pragma: no cover - action sets must agree
+                    continue
+                child = root.children[child_index]
+                if not child.visits:
+                    continue
+                visits[position] += child.visits
+                assert child.value_sums is not None
+                value_sums[position] += child.value_sums
+        value_index = node_value_index(observer or roots[0].player)
+        q = np.zeros(len(actions), dtype=np.float64)
+        for index in range(len(actions)):
+            if visits[index]:
+                q[index] = value_sums[index][value_index] / visits[index]
+        return SearchResult(actions, visits, q)
+
+    def _run(self, root: _Node, simulations: int) -> None:
+        for _ in range(max(1, simulations)):
+            self._simulate(root)
+
+    def _search_determinized(self, game: Game, observer: str) -> SearchResult:
+        """PIMC: average the root statistics over resampled hidden states."""
+        roots = self.open_search_worlds(game)
+        if not roots:
+            return SearchResult([], np.array([]), np.array([]))
+        per_world = max(1, self.simulations // self.determinizations)
+        for root in roots:
+            self._run(root, per_world)
+        return self.aggregate_roots(roots, observer)
+
     def decide(self, game: Game) -> tuple[Action, np.ndarray]:
-        result = self.search(game)
+        return self.pick(self.search(game))
+
+    def pick(
+        self, result: SearchResult, temperature: float | None = None
+    ) -> tuple[Action, np.ndarray]:
+        """Sample an action from a finished search (shared by every caller).
+
+        ``temperature`` overrides this policy's own value for the one call, which
+        is how a training driver applies a per-round schedule without rebuilding
+        the policy. It also sharpens the *returned target*: the target is the
+        same distribution the action is drawn from, so a flat temperature of 1
+        records a near-uniform target whenever visits are scarce.
+        """
         if not result.actions:  # pragma: no cover - defensive
             raise RuntimeError("MCTS was asked to move in a terminal position")
-        probs = result.probabilities(self.temperature)
-        if self.temperature <= 1e-3:
+        temperature = self.temperature if temperature is None else temperature
+        probs = result.probabilities(temperature)
+        if temperature <= 1e-3:
             index = int(np.argmax(result.visits))
         else:
             index = int(self.rng.choice(len(result.actions), p=probs))
@@ -169,30 +305,82 @@ class MCTS(Policy):
         return result.actions[index]
 
     # -- simulation ------------------------------------------------------
+    #
+    # A simulation splits into ``prepare_simulation`` / ``finish_simulation`` so
+    # a driver can pause many games at their leaves, score every leaf in one
+    # batched network call, then resume. ``_simulate`` is just the two halves
+    # run back to back with the evaluator in the middle.
 
-    def _simulate(self, root: _Node) -> None:
+    def prepare_simulation(self, root: _Node) -> Simulation:
+        """Descend to this simulation's leaf without evaluating it yet."""
         node = root
         path = [root]
-
         while True:
             if node.game.is_terminal():
-                value = outcome_vector(node.game)
-                break
+                return Simulation(path, None, None, outcome_vector(node.game), False)
             if not node.expanded:
-                value = self._expand(node, apply_noise=node is root)
-                break
+                actions = node.game.legal_actions()
+                if not actions:
+                    return Simulation(
+                        path, None, None, outcome_vector(node.game), False
+                    )
+                return Simulation(path, node, actions, None, node is root)
             node = self._select_child(node)
             path.append(node)
 
-        for visited in path:
+    def finish_simulation(
+        self,
+        simulation: Simulation,
+        priors: np.ndarray | None = None,
+        value: np.ndarray | None = None,
+    ) -> None:
+        """Expand the leaf (if any) and back up the value along the path."""
+        if simulation.leaf is not None:
+            if priors is None or value is None:
+                raise ValueError("an unexpanded leaf needs priors and a value")
+            assert simulation.actions is not None
+            value = self._expand_with(
+                simulation.leaf,
+                simulation.actions,
+                priors,
+                value,
+                apply_noise=simulation.apply_noise,
+            )
+        elif value is None:
+            value = simulation.value
+        assert value is not None
+        for visited in simulation.path:
             visited.visits += 1
-            visited.value_sums += value
+            if visited.value_sums is None:
+                visited.value_sums = value.copy()
+            else:
+                visited.value_sums += value
+
+    def _simulate(self, root: _Node) -> None:
+        simulation = self.prepare_simulation(root)
+        if simulation.leaf is None:
+            self.finish_simulation(simulation)
+        else:
+            assert simulation.actions is not None
+            priors, value = self.evaluator(simulation.leaf.game, simulation.actions)
+            self.finish_simulation(simulation, priors, value)
 
     def _expand(self, node: _Node, *, apply_noise: bool) -> np.ndarray:
         actions = node.game.legal_actions()
         if not actions:
             return outcome_vector(node.game)
         priors, value = self.evaluator(node.game, actions)
+        return self._expand_with(node, actions, priors, value, apply_noise=apply_noise)
+
+    def _expand_with(
+        self,
+        node: _Node,
+        actions: list[Action],
+        priors: np.ndarray,
+        value: np.ndarray,
+        *,
+        apply_noise: bool,
+    ) -> np.ndarray:
         priors = np.asarray(priors, dtype=np.float64)
         priors = np.clip(priors, 1e-8, None)
         priors /= priors.sum()
@@ -211,11 +399,12 @@ class MCTS(Policy):
         assert node.children is not None and node.priors is not None
         assert node.player is not None
         sqrt_total = math.sqrt(max(1, node.visits))
+        value_index = node_value_index(node.player)
         best_index = 0
         best_score = -math.inf
         for index, child in enumerate(node.children):
             if child.visits:
-                q = child.value_sums[node_value_index(node.player)] / child.visits
+                q = child.value_sums[value_index] / child.visits
             else:
                 q = 0.0
             u = (
@@ -243,8 +432,4 @@ class MCTS(Policy):
 
 def node_value_index(house: str | None) -> int:
     """Canonical vector index for a house id."""
-    from agot.engine.observation import HOUSE_ORDER
-
-    if house in HOUSE_ORDER:
-        return HOUSE_ORDER.index(house)
-    return 0
+    return _HOUSE_INDEX.get(house or "", 0)

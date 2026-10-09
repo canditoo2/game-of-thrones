@@ -387,7 +387,7 @@ def commit_deferred(ctx: BattleContext) -> None:
     for house, cost in ctx.power_costs:
         state.houses[house].power = max(0, state.houses[house].power - cost)
     for region_id in ctx.orders_to_remove:
-        region = state.regions[region_id]
+        region = state.mut(region_id)
         order = region.order
         holder = region.order_house
         region.order = None
@@ -454,7 +454,7 @@ def apply_post_battle(ctx: BattleContext, result: BattleResult) -> None:
 
 
 def _renly_upgrade(ctx: BattleContext, house: str) -> None:
-    region = ctx.state.regions[ctx.region_id]
+    region = ctx.state.mut(ctx.region_id)
     if _count(region.units, UnitType.FOOTMAN) > 0:
         region.units[UnitType.FOOTMAN] -= 1
         region.units[UnitType.KNIGHT] = region.units.get(UnitType.KNIGHT, 0) + 1
@@ -473,6 +473,7 @@ def _renly_upgrade(ctx: BattleContext, house: str) -> None:
             continue
         if _count(region.units, UnitType.FOOTMAN) <= 0:
             continue
+        region = ctx.state.mut(neighbour)
         region.units[UnitType.FOOTMAN] -= 1
         region.units[UnitType.KNIGHT] = region.units.get(UnitType.KNIGHT, 0) + 1
         if region.units[UnitType.FOOTMAN] == 0:
@@ -487,6 +488,7 @@ def _remove_any_order(ctx: BattleContext, house: str) -> None:
         if region.order is None or region.order_house != house:
             continue
         order = region.order
+        region = ctx.state.mut(region_id)
         region.order = None
         region.order_house = None
         placed = ctx.state.houses[house].orders_placed

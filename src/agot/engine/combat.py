@@ -615,7 +615,7 @@ def apply_battle_result(
     attacker_units = ctx.attacker_units
     defender_units = ctx.defender_units
 
-    region = state.regions[region_id]
+    region = state.mut(region_id)
     pre_routed = dict(region.routed)
 
     robb = house_cards.robb_chose_retreat(ctx, result.winner)
@@ -717,7 +717,7 @@ def _return_attacker(
         return
     if origin is None:  # pragma: no cover - defensive
         return
-    target = state.regions[origin]
+    target = state.mut(origin)
     for unit, count in units.items():
         target.units[unit] = target.units.get(unit, 0) + count
     if target.controller in (None, house):
@@ -733,7 +733,7 @@ def _try_loras(ctx: house_cards.BattleContext, result: BattleResult) -> None:
         return
     if ctx.attacker_order is None:
         return
-    region = ctx.state.regions[ctx.region_id]
+    region = ctx.state.mut(ctx.region_id)
     region.order = ctx.attacker_order
     region.order_house = ctx.attacker
     ctx.notes.append("Loras Tyrell re-places the March order to resolve again")
@@ -811,7 +811,7 @@ def _retreat_keeps_supply(
     state: GameState, destination: str, house: str, units: dict[UnitType, int]
 ) -> bool:
     """Whether routing ``units`` into ``destination`` keeps the house legal."""
-    target = state.regions[destination]
+    target = state.mut(destination)
     saved = dict(target.routed)
     for unit, count in units.items():
         if count > 0:
@@ -840,7 +840,7 @@ def _split_non_retreaters(
 def _move_routed(
     state: GameState, destination: str, house: str, units: dict[UnitType, int]
 ) -> None:
-    target = state.regions[destination]
+    target = state.mut(destination)
     for unit, count in units.items():
         if count > 0:
             target.routed[unit] = target.routed.get(unit, 0) + count
@@ -851,7 +851,7 @@ def _move_routed(
 
 def _enforce_supply_at(state: GameState, region_id: str, house: str) -> None:
     """Destroy routed/ready units in a region until Supply is satisfied."""
-    region = state.regions[region_id]
+    region = state.mut(region_id)
     guard = 0
     while not state.within_supply(house) and guard < 100:
         guard += 1
@@ -882,7 +882,7 @@ def apply_casualties(
     state: GameState, region_id: str, house: str, count: int
 ) -> list[UnitType]:
     """Remove ``count`` units controlled by ``house`` in a region, cheapest first."""
-    region = state.regions[region_id]
+    region = state.mut(region_id)
     if region.controller != house:
         return []
     removed: list[UnitType] = []
@@ -997,7 +997,7 @@ def retreat(
     state: GameState, region_id: str, house: str, target: str, *, naval: bool = False
 ) -> None:
     """Move a controlled army out of ``region_id`` and rout it."""
-    source = state.regions[region_id]
+    source = state.mut(region_id)
     units = {unit: count for unit, count in source.units.items() if count > 0}
     source.units = {}
     retreaters, _ = _split_non_retreaters(units, naval=naval)
@@ -1006,7 +1006,7 @@ def retreat(
 
 def destroy_army(state: GameState, region_id: str) -> None:
     """Wipe out everything in a region (used when no retreat is possible)."""
-    region = state.regions[region_id]
+    region = state.mut(region_id)
     region.units = {}
     region.routed = {}
     region.garrison = 0
@@ -1015,7 +1015,7 @@ def destroy_army(state: GameState, region_id: str) -> None:
 
 def _release_region(state: GameState, region_id: str) -> None:
     """Drop control and any order token from a now-empty region."""
-    region = state.regions[region_id]
+    region = state.mut(region_id)
     if region.influence_token is not None:
         region.controller = region.influence_token
     else:
