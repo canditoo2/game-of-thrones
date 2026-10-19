@@ -95,23 +95,24 @@ def _unpack(result, games: int) -> list[GameRecord]:
         outcomes,
         winners,
         steps,
+        examples_per_game,
         rounds,
     ) = result
 
-    # Each game records exactly one example per decision it took, so the per-game
-    # step counts are also the example counts. Asserted rather than assumed: a
-    # mismatch here would silently mis-attribute outcomes to positions.
-    total = int(sum(steps))
+    # `steps` is the number of decisions; `examples_per_game` is how many of
+    # them were recorded. They differ when a scripted seat acts without
+    # `record_opponents`, so the example buffers are sliced with the latter.
+    total = int(sum(examples_per_game))
     if total != int(states.shape[0]):
         raise RuntimeError(
-            f"the driver recorded {states.shape[0]} examples for {total} decisions"
+            f"the driver recorded {states.shape[0]} examples for {total} recorded decisions"
         )
     if len(steps) != games:
         raise RuntimeError(f"the driver played {len(steps)} of {games} games")
 
     records: list[GameRecord] = []
     cursor = 0
-    for index, taken in enumerate(steps):
+    for index, taken in enumerate(examples_per_game):
         examples: list[Example] = []
         for offset in range(cursor, cursor + int(taken)):
             start, end = int(offsets[offset]), int(offsets[offset + 1])
@@ -129,7 +130,7 @@ def _unpack(result, games: int) -> list[GameRecord]:
             GameRecord(
                 examples=examples,
                 winner=winners[index],
-                steps=int(taken),
+                steps=int(steps[index]),
                 rounds=int(rounds[index]),
             )
         )
@@ -170,14 +171,16 @@ def try_batched_self_play(
 ) -> list[GameRecord] | None:
     """Run a ``batched_self_play`` request on the Rust driver, or return ``None``.
 
+    Scripted opponent seats are supported too: the driver asks Python for one
+    decision at a time (never one per simulation), so a scripted seat costs a
+    Python policy call rather than a Python search. ``record_opponents`` decides
+    whether those decisions are imitated.
+
     Returns ``None`` — leaving the caller to use the Python driver — when the
-    request needs something the Rust driver does not implement yet (scripted
-    opponent seats, recording their decisions) or when the games do not share one
-    configuration. Falling back is cheap and silent by design: the two paths
+    games do not share one configuration or when the evaluator is not a
+    model-backed one. Falling back is cheap and silent by design: the two paths
     produce the same records, so a caller never has to care which ran.
     """
-    if opponents is not None or record_opponents:
-        return None
     extension = core()
     if extension is None:
         return None
@@ -206,6 +209,11 @@ def try_batched_self_play(
     # The driver derives each game's seed as `seed + index`, which is how
     # `parallel_self_play` builds its configs, so the seeds line up.
     schedule = tuple(temperature_schedule or ())
+    scripted: list[list[str]] = [
+        list(opponents[index] if opponents is not None else {})
+        for index in range(len(configs))
+    ]
+    decider = _scripted_decider(opponents, record_opponents) if any(scripted) else None
     spec = {
         "games": len(configs),
         "simulations": simulations,
@@ -220,9 +228,40 @@ def try_batched_self_play(
         "use_westeros_decks": first.use_westeros_decks,
         "houses": list(first.houses),
         "step_limit": step_limit,
+        "scripted": scripted,
+        "record_opponents": record_opponents,
     }
-    result = extension.selfplay(spec, leaf_evaluator(model))
+    result = extension.selfplay(spec, leaf_evaluator(model), decider)
     return _unpack(result, len(configs))
+
+
+def _scripted_decider(opponents, record_opponents: bool):
+    """Adapt scripted ``Policy`` objects to the driver's per-decision callback.
+
+    The driver hands over its own ``Game`` view; the policy is run through the
+    Python-shaped ``RustGame`` wrapper it already understands. Only one policy
+    call crosses the boundary per scripted decision — the search seats never do.
+    """
+    import numpy as np
+
+    from agot.engine.rust import RustGame
+
+    def decide(game_index: int, house: str, game) -> tuple[int, list[float] | None]:
+        policy = opponents[game_index][house]
+        view = RustGame(game)
+        action, target = policy.decide(view)
+        actions = view.legal_actions()
+        try:
+            index = actions.index(action)
+        except ValueError as error:  # pragma: no cover - defensive
+            raise RuntimeError(
+                f"scripted policy {policy.name!r} chose an action the engine did not offer"
+            ) from error
+        if record_opponents:
+            return index, np.asarray(target, dtype=np.float32).tolist()
+        return index, None
+
+    return decide
 
 
 def house_order() -> tuple[str, ...]:

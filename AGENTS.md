@@ -10,7 +10,7 @@ machine — this PC is the build-and-verify machine.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
-- Tests: `.venv\Scripts\python -m pytest -q` (103 tests; the rules/combat/encoder
+- Tests: `.venv\Scripts\python -m pytest -q` (104 tests; the rules/combat/encoder
   regressions live in Rust now — see `cargo test --release` below). When piped in PowerShell
   the final summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`
@@ -45,9 +45,10 @@ machine — this PC is the build-and-verify machine.
   in `selfplay.LAST_BACKEND`. The rules engine seam (`agot.engine.game`) now selects
   `agot.engine.rust` automatically when the extension is installed and falls back to the frozen
   Python implementation otherwise; `AGOT_ENGINE=python` forces the reference. The whole Python
-  suite passes both ways. The reference self-play driver builds `PythonGame` directly (scripted
-  seats still run there), so the remaining cutover work is scripted opponents in the Rust
-  driver, the packaging switch, and deleting the Python engine.
+  suite passes both ways. Scripted opponent seats now run on the Rust driver too (one Python
+  policy call per scripted decision, search seats stay native); the reference driver is only the
+  fallback for hand-written evaluators, mixed configurations and installs without the extension.
+  Remaining cutover work: the packaging switch and deleting the Python engine.
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 

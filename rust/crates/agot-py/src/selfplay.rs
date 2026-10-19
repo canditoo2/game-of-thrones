@@ -110,11 +110,19 @@ fn array2(py: Python<'_>, rows: usize, cols: usize, flat: Vec<f32>) -> PyResult<
 }
 
 /// Plays `spec["games"]` games, batching every network call.
+///
+/// Seats named in `spec["scripted"]` are driven by `scripted_decider` once per
+/// decision instead of by search; its call is `(game_index, house, game_view)`
+/// and it returns `(action_index, target | None)`, where `target` is only
+/// required when `spec["record_opponents"]` is true. Search seats remain fully
+/// native; only the scripted seat's own decisions cross the boundary.
 #[pyfunction]
+#[pyo3(signature = (spec, evaluator, scripted_decider=None))]
 pub fn selfplay<'py>(
     py: Python<'py>,
     spec: &Bound<'py, PyDict>,
     evaluator: Py<PyAny>,
+    scripted_decider: Option<Py<PyAny>>,
 ) -> PyResult<Bound<'py, PyTuple>> {
     let games: usize = spec_or(spec, "games", 1)?;
     let simulations: u32 = spec_or(spec, "simulations", 32)?;
@@ -154,6 +162,23 @@ pub fn selfplay<'py>(
         None => HouseId::ALL.into_iter().collect(),
     };
 
+    // `scripted` is one list of house names per game; a missing entry is an
+    // all-search game, which keeps the common request free of empty vectors.
+    let scripted_names: Vec<Vec<String>> = spec_or(spec, "scripted", Vec::new())?;
+    let mut scripted_houses: Vec<Vec<HouseId>> = Vec::with_capacity(games);
+    for index in 0..games {
+        let mut houses = Vec::new();
+        if let Some(names) = scripted_names.get(index) {
+            for name in names {
+                houses.push(HouseId::from_name(name).ok_or_else(|| {
+                    PyValueError::new_err(format!("unknown scripted house {name:?}"))
+                })?);
+            }
+        }
+        scripted_houses.push(houses);
+    }
+    let record_opponents: bool = spec_or(spec, "record_opponents", false)?;
+
     let schedule: Vec<(u8, f64)> = vec![
         (temperature_rounds, temperature),
         (u8::MAX, final_temperature),
@@ -192,27 +217,86 @@ pub fn selfplay<'py>(
         let mut winners: Vec<Option<HouseId>> = vec![None; chunk.len()];
 
         loop {
-            // Which games still need a decision, and their roots for this one.
+            // Advance every game to its next decision. Scripted seats decide
+            // immediately (possibly several in a row); search seats open their
+            // roots and wait for the shared leaf batch below.
             let mut active: Vec<(usize, Vec<u32>)> = Vec::new();
-            for (slot, game) in states.iter().enumerate() {
-                if game.is_terminal() || steps[slot] >= step_limit {
-                    if winners[slot].is_none() {
-                        winners[slot] = game.winner();
+            let mut acted = false;
+            for slot in 0..states.len() {
+                loop {
+                    if states[slot].is_terminal() || steps[slot] >= step_limit {
+                        if winners[slot].is_none() {
+                            winners[slot] = states[slot].winner();
+                        }
+                        break;
                     }
-                    continue;
+                    let Some(house) = states[slot].current_player() else {
+                        winners[slot] = states[slot].winner();
+                        break;
+                    };
+                    let global = start + slot;
+                    let is_scripted = scripted_houses
+                        .get(global)
+                        .map(|houses| houses.contains(&house))
+                        .unwrap_or(false);
+                    if !is_scripted {
+                        let roots = searchers[slot].open_search_worlds(&states[slot]);
+                        if roots.is_empty() {
+                            winners[slot] = states[slot].winner();
+                        } else {
+                            active.push((slot, roots));
+                        }
+                        break;
+                    }
+
+                    let decider = scripted_decider.as_ref().ok_or_else(|| {
+                        PyRuntimeError::new_err(
+                            "spec names a scripted seat but no scripted_decider was supplied",
+                        )
+                    })?;
+                    let view = Py::new(py, crate::PyGame::from_game(states[slot].clone()))?;
+                    let reply = decider.call1(py, (global, house.name(), view))?;
+                    let (index, target): (usize, Option<Vec<f32>>) = reply.extract(py)?;
+                    let actions = states[slot].legal_actions();
+                    if index >= actions.len() {
+                        return Err(PyValueError::new_err(format!(
+                            "scripted policy chose action {index} of {}",
+                            actions.len()
+                        )));
+                    }
+                    if record_opponents {
+                        let target = target.ok_or_else(|| {
+                            PyValueError::new_err(
+                                "record_opponents needs the scripted policy's target",
+                            )
+                        })?;
+                        if target.len() != actions.len() {
+                            return Err(PyValueError::new_err(format!(
+                                "scripted target has {} entries for {} actions",
+                                target.len(),
+                                actions.len()
+                            )));
+                        }
+                        let observation =
+                            observation::observe(&states[slot].state, &data, &actions, Some(house));
+                        histories[slot].push(Record {
+                            state: observation.state_features,
+                            actions: observation.action_features,
+                            policy: target,
+                            player: house.index() as u8,
+                        });
+                    }
+                    states[slot]
+                        .step(actions[index])
+                        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                    steps[slot] += 1;
+                    acted = true;
                 }
-                if game.current_player().is_none() {
-                    winners[slot] = game.winner();
-                    continue;
-                }
-                let roots = searchers[slot].open_search_worlds(game);
-                if roots.is_empty() {
-                    winners[slot] = game.winner();
-                    continue;
-                }
-                active.push((slot, roots));
             }
             if active.is_empty() {
+                if acted {
+                    continue;
+                }
                 break;
             }
 
@@ -399,6 +483,7 @@ pub fn selfplay<'py>(
     let mut outcomes: Vec<f32> = Vec::with_capacity(total_examples * N_HOUSES);
     let mut winners: Vec<Option<String>> = Vec::with_capacity(finished.len());
     let mut steps: Vec<u32> = Vec::with_capacity(finished.len());
+    let mut examples_per_game: Vec<u32> = Vec::with_capacity(finished.len());
     let mut rounds: Vec<u32> = Vec::with_capacity(finished.len());
 
     offsets.push(0);
@@ -428,6 +513,11 @@ pub fn selfplay<'py>(
         }
         winners.push(game.winner.map(|house| house.name().to_string()));
         steps.push(game.steps);
+        // Scripted seats are not recorded unless asked, so `steps` is the
+        // number of decisions while this is the number of examples. They are
+        // equal for a pure-search game and must be kept separate in the
+        // protocol: `steps` is also the game length the trainer logs.
+        examples_per_game.push(game.examples.len() as u32);
         rounds.push(game.rounds as u32);
     }
 
@@ -443,6 +533,7 @@ pub fn selfplay<'py>(
         array2(py, total_examples, N_HOUSES, outcomes)?.into_any(),
         winners.into_pyobject(py)?.unbind().into_any(),
         steps.into_pyobject(py)?.unbind().into_any(),
+        examples_per_game.into_pyobject(py)?.unbind().into_any(),
         rounds.into_pyobject(py)?.unbind().into_any(),
     ];
     PyTuple::new(py, items)

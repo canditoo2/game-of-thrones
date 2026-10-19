@@ -254,6 +254,11 @@ impl PyGame {
     fn wrap(&self, action: agot_core::action::Action) -> PyAction {
         PyAction::new(action, Arc::clone(&self.game.data))
     }
+
+    /// Wrap an owned core game, for the self-play driver's scripted-seat view.
+    pub(crate) fn from_game(game: CoreGame) -> PyGame {
+        PyGame { game }
+    }
 }
 
 #[pymethods]

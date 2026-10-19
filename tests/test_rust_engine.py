@@ -178,8 +178,12 @@ def test_batched_self_play_uses_the_rust_driver():
     assert all(record.steps == len(record.examples) for record in records)
 
 
-def test_batched_self_play_falls_back_when_the_request_needs_python():
-    """Scripted opponent seats are not implemented in Rust yet: no silent wrong."""
+def test_batched_self_play_drives_scripted_seats_from_rust():
+    """Scripted seats are decided in Python, but the game stays on the Rust driver.
+
+    Their decisions are not imitated unless `record_opponents` asks for it, so
+    the example count is lower than the game's step count.
+    """
     pytest.importorskip("torch")
 
     from agot.agents import GreedyPolicy
@@ -196,9 +200,38 @@ def test_batched_self_play_falls_back_when_the_request_needs_python():
         determinizations=1,
         opponents=opponents,
     )
-    assert selfplay_module.LAST_BACKEND == "python"
+    assert selfplay_module.LAST_BACKEND == "rust"
     assert len(records) == 2
     assert all(record.examples for record in records)
+    assert all(record.steps > len(record.examples) for record in records)
+    assert all(
+        example.player != 0
+        for record in records
+        for example in record.examples
+    )
+
+
+def test_batched_self_play_can_record_scripted_seats_from_rust():
+    pytest.importorskip("torch")
+
+    from agot.agents import GreedyPolicy
+    from agot.nn.model import NeuralEvaluator, PolicyValueNet
+    from agot.training import selfplay as selfplay_module
+
+    model = PolicyValueNet(hidden=32, trunk_layers=1)
+    config = GameConfig(seed=310, max_rounds=2)
+    opponents = [{config.houses[0]: GreedyPolicy(1, noise=0.0)}]
+    records = selfplay_module.batched_self_play(
+        NeuralEvaluator(model),
+        [config],
+        simulations=4,
+        determinizations=1,
+        opponents=opponents,
+        record_opponents=True,
+    )
+    assert selfplay_module.LAST_BACKEND == "rust"
+    assert records[0].steps == len(records[0].examples)
+    assert any(example.player == 0 for example in records[0].examples)
 
 
 def test_rust_snapshot_matches_the_python_position():
@@ -414,9 +447,18 @@ SPEC = {
 
 def test_selfplay_returns_packed_examples():
     calls: list = []
-    states, actions, offsets, policy, players, outcomes, winners, steps, rounds = (
-        core.selfplay(SPEC, uniform_evaluator(calls))
-    )
+    (
+        states,
+        actions,
+        offsets,
+        policy,
+        players,
+        outcomes,
+        winners,
+        steps,
+        examples_per_game,
+        rounds,
+    ) = core.selfplay(SPEC, uniform_evaluator(calls))
 
     assert states.shape[1] == 97
     assert actions.shape[1] == 141
@@ -424,6 +466,9 @@ def test_selfplay_returns_packed_examples():
     assert offsets[-1] == actions.shape[0] == policy.shape[0]
     assert states.shape[0] == players.shape[0] == outcomes.shape[0] == len(offsets) - 1
     assert len(winners) == len(steps) == len(rounds) == SPEC["games"]
+    # Every seat is searched here, so all decisions are recorded.
+    assert list(steps) == list(examples_per_game)
+    assert sum(examples_per_game) == states.shape[0]
 
     # Every recorded target is a distribution, and every outcome is a terminal
     # reward: +1 for the winner, -1 for the losers, 0 for absent houses.
@@ -467,9 +512,18 @@ def test_selfplay_respects_pimc_determinizations():
     """Two worlds per decision must still produce one target per decision."""
     calls: list = []
     spec = dict(SPEC, games=2, batch_games=2, determinizations=2, simulations=8)
-    states, actions, offsets, policy, players, outcomes, winners, steps, rounds = (
-        core.selfplay(spec, uniform_evaluator(calls))
-    )
+    (
+        states,
+        actions,
+        offsets,
+        policy,
+        players,
+        outcomes,
+        winners,
+        steps,
+        examples_per_game,
+        rounds,
+    ) = core.selfplay(spec, uniform_evaluator(calls))
     assert len(winners) == 2
     assert offsets[-1] == actions.shape[0]
     # Both worlds of a decision are searched before the move is chosen, so the

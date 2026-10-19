@@ -470,12 +470,19 @@ they should be fixed before expecting a strong agent.
     installed (`AGOT_ENGINE=python` still forces the reference; an install
     without the extension falls back to it). The scripted-seat self-play
     fallback was settled the same way: the *reference* driver builds
-    `PythonGame` directly, so `--opponent-rate` keeps using the fast frozen
-    Python engine until the Rust driver learns scripted opponents, and
-    `play_game` takes an optional `game_class` so the parity test compares the
-    two reference paths on one engine. The CLI, agents and the default
-    `play_game` follow the seam and therefore run Rust by default.
+    `PythonGame` directly, and `play_game` takes an optional `game_class` so the
+    parity test compares the two reference paths on one engine. The CLI, agents
+    and the default `play_game` follow the seam and therefore run Rust by
+    default.
 
-    Remaining: scripted opponent seats in the Rust self-play driver (so the
-    Python engine is no longer needed as the fallback), the maturin packaging
-    switch, and deleting the Python engine.
+    Scripted opponent seats now run on the Rust driver too: `selfplay` takes a
+    `scripted_decider` callback, and a scripted seat costs one Python policy
+    call per *decision* (never per simulation) while every search seat stays
+    native. The packed result grew a per-game example count, because
+    `record_opponents=False` makes a game's decisions and recorded examples
+    differ. That leaves the frozen Python engine needed only by the reference
+    driver used for hand-written evaluators, mixed configurations and the
+    no-extension fallback.
+
+    Remaining: the maturin packaging switch, and deleting the Python engine
+    (which now means porting or retiring that reference driver too).
