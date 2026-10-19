@@ -126,3 +126,46 @@ def test_summary_reports_the_same_shape_as_python():
         "tyrell",
         "martell",
     }
+
+
+def test_observation_is_bit_exact_with_the_python_encoder():
+    """The network input must not change when the engine does.
+
+    A checkpoint's weights only mean anything against the encoding they were
+    trained on, so the two encoders have to agree to the last bit — not
+    approximately.
+    """
+    import numpy as np
+
+    from agot.engine.observation import ACTION_DIM, STATE_DIM, observe
+
+    assert core.observation_dims() == (STATE_DIM, ACTION_DIM)
+
+    rust = core.Game.new(seed=1, use_westeros_decks=False)
+    python = Game.new(GameConfig(seed=1, use_westeros_decks=False))
+
+    for step in range(40):
+        actor, state, matrix = rust.observe()
+        reference = observe(python)
+        assert actor == reference.actor
+        assert state.shape == (STATE_DIM,)
+        assert matrix.shape == (len(reference.actions), ACTION_DIM)
+        assert np.array_equal(state, reference.state_features), f"step {step}: state"
+        assert np.array_equal(matrix, reference.action_features), f"step {step}: actions"
+        if rust.is_terminal():
+            break
+        action_index = (step * 5 + 1) % len(matrix)
+        rust.step(rust.legal_actions()[action_index])
+        python.step(python.legal_actions()[action_index])
+
+
+def test_observe_on_a_terminal_position_is_empty_not_an_error():
+    game = core.Game.new(seed=1, use_westeros_decks=False)
+    while not game.is_terminal():
+        actions = game.legal_actions()
+        if not actions:
+            break
+        game.step(actions[0])
+    _, state, matrix = game.observe()
+    assert state.shape == (97,)
+    assert matrix.shape == (0, 141)

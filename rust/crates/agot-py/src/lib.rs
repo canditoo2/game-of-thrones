@@ -19,10 +19,13 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyType;
 
+use numpy::IntoPyArray;
+
 use agot_core::action::{ActionKind, Side};
 use agot_core::enums::{HouseId, UnitType, N_HOUSES};
 use agot_core::game::{EngineError, Game as CoreGame};
 use agot_core::map::DataSet;
+use agot_core::observation;
 use agot_core::setup::GameConfig;
 
 /// Which engine implementation is loaded. Logged by training runs so a run's
@@ -267,6 +270,34 @@ impl PyGame {
         }
     }
 
+    /// The decision point as network input.
+    ///
+    /// Returns `(actor, state_features, action_features)` — the same triple
+    /// `agot.engine.observation.observe` produces, with the action matrix
+    /// row-aligned with [`PyGame::legal_actions`]. A terminal position yields an
+    /// empty matrix rather than raising, because the caller is already looping on
+    /// `is_terminal`.
+    fn observe(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(Option<&'static str>, Py<numpy::PyArray1<f32>>, Py<numpy::PyArray2<f32>>)> {
+        let actions = self.game.legal_actions();
+        let observation =
+            observation::observe(&self.game.state, &self.game.data, &actions, None);
+        let rows = observation.len();
+        let actor = observation.actor.map(|house| house.name());
+
+        let state = numpy::PyArray1::from_vec(py, observation.state_features).unbind();
+        let matrix = numpy::ndarray::Array2::from_shape_vec(
+            (rows, observation::ACTION_DIM),
+            observation.action_features,
+        )
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+        .into_pyarray(py)
+        .unbind();
+        Ok((actor, state, matrix))
+    }
+
     /// Compact description of the position, as in the Python engine.
     fn summary(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let value = self.game.summary();
@@ -304,11 +335,19 @@ fn vocabulary() -> (Vec<&'static str>, Vec<&'static str>, usize) {
     )
 }
 
+/// The observation layout, so the Python side can size its buffers without
+/// hard-coding numbers that must agree with the encoder.
+#[pyfunction]
+fn observation_dims() -> (usize, usize) {
+    (observation::STATE_DIM, observation::ACTION_DIM)
+}
+
 #[pymodule]
 fn agot_core_ext(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(backend, module)?)?;
     module.add_function(wrap_pyfunction!(action_kinds, module)?)?;
     module.add_function(wrap_pyfunction!(vocabulary, module)?)?;
+    module.add_function(wrap_pyfunction!(observation_dims, module)?)?;
     module.add_class::<PyAction>()?;
     module.add_class::<PyGame>()?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
