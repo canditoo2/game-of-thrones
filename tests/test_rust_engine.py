@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from agot.engine.actions import Action, ActionKind
-from agot.engine.game import Game, GameConfig
+from agot.engine.game import GameConfig, PythonGame
 from agot.engine.observation import HOUSE_ORDER
 
 core = pytest.importorskip("agot_core_ext")
@@ -38,7 +38,7 @@ POLICIES = {
 
 
 def play_python(seed: int, policy, decks: bool = False):
-    game = Game.new(GameConfig(seed=seed, use_westeros_decks=decks))
+    game = PythonGame.new(GameConfig(seed=seed, use_westeros_decks=decks))
     steps = 0
     while not game.is_terminal():
         actions = game.legal_actions()
@@ -143,7 +143,7 @@ def test_observation_is_bit_exact_with_the_python_encoder():
     assert core.observation_dims() == (STATE_DIM, ACTION_DIM)
 
     rust = core.Game.new(seed=1, use_westeros_decks=False)
-    python = Game.new(GameConfig(seed=1, use_westeros_decks=False))
+    python = PythonGame.new(GameConfig(seed=1, use_westeros_decks=False))
 
     for step in range(40):
         actor, state, matrix = rust.observe()
@@ -215,7 +215,7 @@ def test_rust_snapshot_matches_the_python_position():
     from dump_fixture import fingerprint
 
     rust = core.Game.new(seed=5, use_westeros_decks=False)
-    python = Game.new(GameConfig(seed=5, use_westeros_decks=False))
+    python = PythonGame.new(GameConfig(seed=5, use_westeros_decks=False))
 
     for step in range(60):
         assert rust.snapshot() == fingerprint(python), f"step {step}"
@@ -299,7 +299,7 @@ def test_rust_game_views_match_the_python_engine():
     from agot.engine import rust
 
     rust_game = rust.RustGame.new(GameConfig(seed=7, use_westeros_decks=False))
-    python_game = Game.new(GameConfig(seed=7, use_westeros_decks=False))
+    python_game = PythonGame.new(GameConfig(seed=7, use_westeros_decks=False))
 
     for step in range(50):
         assert rust_game.legal_actions() == python_game.legal_actions()

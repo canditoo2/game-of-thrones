@@ -2654,6 +2654,12 @@ class Game:
 # Engine selection
 # ---------------------------------------------------------------------------
 
+#: The Python implementation, always available under this name.
+#:
+#: The seam below may replace the module-level ``Game``; the differential tests
+#: still need the reference class when they run with ``AGOT_ENGINE=rust``.
+PythonGame = Game
+
 
 def _select_backend() -> str:
     """Which implementation this module's ``Game`` resolves to.

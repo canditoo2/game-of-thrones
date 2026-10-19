@@ -434,11 +434,23 @@ they should be fixed before expecting a strong agent.
     log), `RustGame` keeps the `GameConfig` it was built with, and the session
     tier grew `pending_battle`, `wildling_attack`, `log` and `max_rounds` /
     `victory_castles` getters. With the ported regressions landed,
-    `AGOT_ENGINE=rust` plays a full greedy demo to a winner; the remaining
-    failures are the tests that build positions by writing into
-    `state.regions[...]` (they need the same builder the extension already has,
-    wired into the view) and the PIMC path, which still resamples hidden state in
-    Python (`hidden.py` writes through `state.mut`).
+    `AGOT_ENGINE=rust` plays a full greedy demo to a winner.
+
+    The whole Python suite now passes with `AGOT_ENGINE=rust` as well as with
+    the Python engine — the write tier the old plan called for is no longer
+    needed by it, because the tests that built positions by hand were retired
+    with their Rust counterparts. Two seam problems surfaced on the way. PIMC
+    used to resample through `state.mut`, which the read view does not have, so
+    `hidden.determinize` now delegates to a `determinize(observer, seed)` method
+    that runs the Rust implementation (the seed is still drawn from the caller's
+    generator, so seeded runs stay reproducible). And the Python encoder's region
+    memo keys on object identity, while the view rebuilds its regions on every
+    read and CPython reuses the old ids: a stale block could be served for a
+    different region, which showed up as tiny nondeterministic policy shifts in
+    the NN tests. `RustGame.region_memo_safe = False` makes `predict_actions` /
+    `predict_many` skip that memo (the Rust encoder has its own cache). The
+    differential tests also import the reference class as `PythonGame`, so
+    `AGOT_ENGINE=rust` cannot silently compare Rust with itself.
 
     The duplicated Python tests were then retired rather than kept in parallel:
     `test_rules_fixes.py`, `test_combat.py`, `test_cross_house_support.py`,
@@ -454,7 +466,9 @@ they should be fixed before expecting a strong agent.
     above the engine — 103 tests across the agents, training loop, NN, CLI and
     the extension itself.
 
-    Remaining: finishing the write tier over the Rust state so the Python tests
-    that mutate a position can run against the extension, then the maturin
-    packaging switch, changing the default engine, and finally deleting the
-    Python engine.
+    Remaining: the maturin packaging switch and changing the default engine.
+    Before flipping it, the Python self-play fallback (scripted opponent seats)
+    should be settled: it currently drives whichever `Game` the seam selected,
+    so under a Rust default it would run the Python MCTS over the Rust view
+    instead of the faster frozen Python engine. After that, the Python engine
+    can be deleted.

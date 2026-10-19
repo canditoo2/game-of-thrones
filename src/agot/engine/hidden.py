@@ -51,6 +51,14 @@ def determinize(
     The original game is never mutated. With the same ``rng`` sequence the
     result is deterministic, which keeps tests and seeded self-play reproducible.
     """
+    # The Rust engine has its own determinization (and an owned state, so there
+    # is no `state.mut` to write through). Delegate when the game offers it; the
+    # seed is drawn from the caller's generator so a seeded run stays
+    # reproducible. The Python engine keeps the reference path below.
+    rust_determinize = getattr(game, "determinize", None)
+    if rust_determinize is not None:
+        return rust_determinize(observer, rng.getrandbits(64))
+
     clone = game.clone()
     state = clone.state
     _resample_orders(state, observer, rng)

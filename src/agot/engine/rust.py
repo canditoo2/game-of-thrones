@@ -348,6 +348,13 @@ class RustGame:
     through the extension's own APIs (`set_region`, `selfplay`).
     """
 
+    #: The Python encoder memoises region blocks by *object identity*. This view
+    #: rebuilds its regions on every access, and CPython reuses the ids of the
+    #: discarded objects, so an identity-keyed memo can hand back another
+    #: region's block. Callers that accept a `RegionCache` disable it for this
+    #: game instead; the Rust encoder has its own cache.
+    region_memo_safe = False
+
     def __init__(self, inner, config: GameConfig | None = None) -> None:
         self._inner = inner
         self._config = config or GameConfig()
@@ -381,6 +388,14 @@ class RustGame:
 
     def clone(self) -> RustGame:
         return RustGame(self._inner.clone(), self._config)
+
+    def determinize(self, observer: str, seed: int) -> RustGame:
+        """A copy with hidden orders and bids resampled, run in Rust.
+
+        ``hidden.determinize`` delegates here; the seed is drawn from the
+        caller's own generator so a seeded PIMC run stays reproducible.
+        """
+        return RustGame(self._inner.determinize(observer, seed), self._config)
 
     def is_terminal(self) -> bool:
         return self._inner.is_terminal()

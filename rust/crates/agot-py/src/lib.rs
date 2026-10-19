@@ -357,6 +357,20 @@ impl PyGame {
         }
     }
 
+    /// A copy with the hidden state resampled as `observer` sees it.
+    ///
+    /// This is `agot.engine.hidden.determinize` for the Rust engine: the caller
+    /// supplies a seed so the resampling stays reproducible without sharing the
+    /// Python generator's stream.
+    fn determinize(&self, observer: &str, seed: u64) -> PyResult<PyGame> {
+        let observer = HouseId::from_name(observer)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown house {observer:?}")))?;
+        let mut rng = agot_core::rng::Rng::from_seed(seed);
+        Ok(PyGame {
+            game: agot_core::hidden::determinize(&self.game, observer, &mut rng),
+        })
+    }
+
     /// The decision point as network input.
     ///
     /// Returns `(actor, state_features, action_features)` — the same triple

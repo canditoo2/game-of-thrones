@@ -148,7 +148,11 @@ class PolicyValueNet(nn.Module):
         state = torch.from_numpy(encode_state(game)).unsqueeze(0)
         action_tensor = np.zeros((1, len(actions), ACTION_DIM), dtype=np.float32)
         actor = game.state.active_house
-        region_cache: dict[str, np.ndarray] = {}
+        # The identity-keyed memo is unsafe for a view that rebuilds its region
+        # objects on every read (see `RustGame.region_memo_safe`).
+        region_cache: dict[str, np.ndarray] | None = (
+            {} if getattr(game, "region_memo_safe", True) else None
+        )
         for column, action in enumerate(actions):
             encode_action_into(game, action, action_tensor[0, column], actor, region_cache)
         mask = torch.ones((1, len(actions)), dtype=torch.float32)
@@ -186,8 +190,10 @@ class PolicyValueNet(nn.Module):
         cursor = 0
         for row, (game, actions) in enumerate(requests):
             actor = game.state.active_house
-            region_cache = caches.setdefault(
-                (actor, game.state.orders_revealed), {}
+            region_cache = (
+                caches.setdefault((actor, game.state.orders_revealed), {})
+                if getattr(game, "region_memo_safe", True)
+                else None
             )
             for action in actions:
                 encode_action_into(
