@@ -55,3 +55,51 @@ jobs:
 
       - name: Test (RL)
         run: pytest -q --no-header
+
+  # The Rust engine: its own tests, then the extension it builds, then the whole
+  # Python suite against that extension. `tests/test_rust_engine.py` skips itself
+  # when the module is missing, so the jobs above stay independent of this one.
+  rust:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Format
+        working-directory: rust
+        run: cargo fmt --check
+
+      - name: Lint
+        working-directory: rust
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test (engine)
+        working-directory: rust
+        run: cargo test --release
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Build the extension
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --release --out dist --manifest-path rust/crates/agot-py/Cargo.toml
+          pip install dist/*.whl
+
+      - name: Install the package
+        run: pip install -e ".[dev,rl]"
+        # torch is needed by the training-loop adapter test; the extension is
+        # already installed from the wheel above.
+
+      - name: Test (Rust engine)
+        run: pytest -q --no-header
