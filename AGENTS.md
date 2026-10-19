@@ -38,6 +38,11 @@ machine — this PC is the build-and-verify machine.
   UCRT build — plus `PYO3_PYTHON` pointing at the venv interpreter. The wheel is abi3
   (Python ≥3.10), so one build covers the local venv, CI and Colab. `tests/test_rust_engine.py`
   skips itself when the module is missing.
+- Training self-play already runs on the Rust engine when the extension is installed:
+  `agot.training.rust_engine` adapts it, `selfplay.batched_self_play` takes that path whenever
+  it can (falling back to the Python driver for scripted opponent seats) and records which ran
+  in `selfplay.LAST_BACKEND`. The rules engine itself (`agot.engine`) is still the Python one:
+  switching it over needs a view tier over the Rust state and is the remaining cutover step.
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 

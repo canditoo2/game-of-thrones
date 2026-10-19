@@ -394,6 +394,18 @@ they should be fixed before expecting a strong agent.
     bit for bit; `tests/combat_semantics.rs` and `tests/search_semantics.rs` pin
     the battle rules and the search's semantic gates.
 
+    The Python side is wired up too: `rust/crates/agot-py` builds an abi3 wheel
+    (one artefact for the local venv, CI and Colab) exposing a session tier
+    (`Game`, `legal_actions`, `step`, `observe`) and a batch tier
+    (`selfplay(spec, evaluator)`), and `agot.training.rust_engine` adapts the
+    batch tier to the training loop. `batched_self_play` takes the Rust driver
+    whenever the request is one it can serve and falls back to the reference
+    driver otherwise, recording which ran in `selfplay.LAST_BACKEND`.
+    `tests/test_rust_engine.py` is the acceptance gate: the two engines play
+    identical games move for move, the encoder agrees to the last bit through the
+    binding, and the driver's packed output unpacks into the `Example` objects the
+    trainer already consumes.
+
     Two reference-engine defects were found and fixed by the port, both
     reproducibility bugs rather than rule bugs: `GameMap.neighbours_of` returned a
     `frozenset`, so the *order* of the legal actions a Raid offers (and of the
@@ -402,7 +414,7 @@ they should be fixed before expecting a strong agent.
     Westeros decks off, because the two engines shuffle differently and nothing
     may be drawn if the games are to stay comparable move for move.
 
-    Remaining: the PyO3 extension module, the Python-side integration (the
-    `agot.engine` shim, batched self-play over a leaf-evaluation callback, the CLI
-    and the gauntlet on the Rust engine), packaging/CI, and the cutover that
-    deletes the Python engine.
+    Remaining: resolving `agot.engine` itself to the extension, which needs a
+    view tier over the Rust state (the existing tests build positions by mutating
+    `state.regions[...]` directly), then the maturin packaging switch, the CI job
+    and the Colab wheel cell, and finally deleting the Python engine.
