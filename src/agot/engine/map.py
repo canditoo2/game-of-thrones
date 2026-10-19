@@ -134,18 +134,26 @@ class GameMap:
         except KeyError as exc:  # pragma: no cover - defensive
             raise KeyError(f"unknown region: {region_id}") from exc
 
-    def neighbours_of(self, region_id: str) -> frozenset[str]:
-        """All regions orthogonally adjacent to ``region_id``."""
-        return self.neighbours[region_id]
+    def neighbours_of(self, region_id: str) -> tuple[str, ...]:
+        """All regions orthogonally adjacent to ``region_id``, in a stable order.
 
-    def land_neighbours_of(self, region_id: str) -> frozenset[str]:
-        return frozenset(
-            n for n in self.neighbours[region_id] if self.regions[n].is_land
+        Sorted on purpose. A ``frozenset``'s iteration order depends on the
+        interpreter's string-hash seed, so iterating the raw set made the *order*
+        of the legal actions a Raid offers (and of the greedy baseline's
+        tie-breaks) change from process to process. That is invisible to a single
+        run but breaks reproducibility of recorded games, self-play targets and
+        the Rust port's differential tests.
+        """
+        return tuple(sorted(self.neighbours[region_id]))
+
+    def land_neighbours_of(self, region_id: str) -> tuple[str, ...]:
+        return tuple(
+            sorted(n for n in self.neighbours[region_id] if self.regions[n].is_land)
         )
 
-    def sea_neighbours_of(self, region_id: str) -> frozenset[str]:
-        return frozenset(
-            n for n in self.neighbours[region_id] if self.regions[n].is_sea
+    def sea_neighbours_of(self, region_id: str) -> tuple[str, ...]:
+        return tuple(
+            sorted(n for n in self.neighbours[region_id] if self.regions[n].is_sea)
         )
 
     def port_of(self, land_region_id: str) -> str | None:
