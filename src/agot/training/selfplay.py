@@ -19,6 +19,12 @@ from agot.training.replay import Example
 #: Hard cap so a bug can never hang a training run forever.
 DEFAULT_STEP_LIMIT = 20_000
 
+#: Which driver produced the most recent :func:`batched_self_play` records:
+#: ``"rust"`` when the extension handled the request, ``"python"`` when the
+#: reference driver did. Logged with a run's timings so a regression can be
+#: attributed to the right backend.
+LAST_BACKEND = "python"
+
 #: Self-play temperature schedule as ``(last_round, temperature)`` bands: the
 #: first band whose ``last_round`` is not exceeded wins. The opening plays hot so
 #: the search explores, and everything after the opening is sharpened. The
@@ -171,6 +177,30 @@ def batched_self_play(
     near-uniform target whenever visits are scarce. See
     :data:`DEFAULT_TEMPERATURE_SCHEDULE`.
     """
+    # Fast path: when the Rust extension is installed and the request needs
+    # nothing it does not implement, the whole game runs natively and only the
+    # leaf batches cross into Python. `try_batched_self_play` returns None when
+    # it cannot help, and the reference driver below takes over unchanged.
+    from agot.training import rust_engine
+
+    global LAST_BACKEND
+    rust_records = rust_engine.try_batched_self_play(
+        evaluator,
+        configs,
+        simulations=simulations,
+        temperature=temperature,
+        temperature_schedule=temperature_schedule,
+        determinizations=determinizations,
+        seed=seed,
+        opponents=opponents,
+        record_opponents=record_opponents,
+        step_limit=step_limit,
+    )
+    if rust_records is not None:
+        LAST_BACKEND = "rust"
+        return rust_records
+    LAST_BACKEND = "python"
+
     games = [Game.new(config) for config in configs]
     seat_policies: list[dict[str, Policy]] = []
     for index, game in enumerate(games):

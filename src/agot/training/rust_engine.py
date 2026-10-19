@@ -84,27 +84,8 @@ def spec_for(plan: SelfPlayPlan, base_config: GameConfig | None = None) -> dict:
     }
 
 
-def self_play_records(
-    model,
-    plan: SelfPlayPlan,
-    *,
-    base_config: GameConfig | None = None,
-) -> list[GameRecord]:
-    """Play ``plan.games`` games with the Rust driver and return the records.
-
-    The examples come back packed — one buffer per field, with an offset per
-    decision — because that is what lets a whole game cross the boundary in one
-    go. This function unpacks them into the objects the rest of the training code
-    already understands.
-    """
-    extension = core()
-    if extension is None:  # pragma: no cover - depends on the environment
-        raise RuntimeError(
-            f"{MODULE} is not installed; build it with maturin or use "
-            "agot.training.selfplay.batched_self_play"
-        )
-
-    spec = spec_for(plan, base_config)
+def _unpack(result, games: int) -> list[GameRecord]:
+    """Unpack the driver's packed buffers into :class:`GameRecord` objects."""
     (
         states,
         actions,
@@ -115,7 +96,7 @@ def self_play_records(
         winners,
         steps,
         rounds,
-    ) = extension.selfplay(spec, leaf_evaluator(model))
+    ) = result
 
     # Each game records exactly one example per decision it took, so the per-game
     # step counts are also the example counts. Asserted rather than assumed: a
@@ -125,6 +106,8 @@ def self_play_records(
         raise RuntimeError(
             f"the driver recorded {states.shape[0]} examples for {total} decisions"
         )
+    if len(steps) != games:
+        raise RuntimeError(f"the driver played {len(steps)} of {games} games")
 
     records: list[GameRecord] = []
     cursor = 0
@@ -151,6 +134,95 @@ def self_play_records(
             )
         )
     return records
+
+
+def self_play_records(
+    model,
+    plan: SelfPlayPlan,
+    *,
+    base_config: GameConfig | None = None,
+) -> list[GameRecord]:
+    """Play ``plan.games`` games with the Rust driver and return the records."""
+    extension = core()
+    if extension is None:  # pragma: no cover - depends on the environment
+        raise RuntimeError(
+            f"{MODULE} is not installed; build it with maturin or use "
+            "agot.training.selfplay.batched_self_play"
+        )
+    spec = spec_for(plan, base_config)
+    result = extension.selfplay(spec, leaf_evaluator(model))
+    return _unpack(result, plan.games)
+
+
+def try_batched_self_play(
+    evaluator,
+    configs,
+    *,
+    simulations: int,
+    temperature: float = 1.0,
+    temperature_schedule=None,
+    determinizations: int = 1,
+    seed: int = 0,
+    opponents=None,
+    record_opponents: bool = False,
+    step_limit: int = 20_000,
+    batch_games: int = 4,
+) -> list[GameRecord] | None:
+    """Run a ``batched_self_play`` request on the Rust driver, or return ``None``.
+
+    Returns ``None`` — leaving the caller to use the Python driver — when the
+    request needs something the Rust driver does not implement yet (scripted
+    opponent seats, recording their decisions) or when the games do not share one
+    configuration. Falling back is cheap and silent by design: the two paths
+    produce the same records, so a caller never has to care which ran.
+    """
+    if opponents is not None or record_opponents:
+        return None
+    extension = core()
+    if extension is None:
+        return None
+    model = getattr(evaluator, "model", None)
+    if model is None:  # a hand-written evaluator: the Python driver handles it
+        return None
+    if not configs:
+        return []
+
+    first = configs[0]
+    shared = (
+        first.max_rounds,
+        first.victory_castles,
+        first.use_westeros_decks,
+        tuple(first.houses),
+    )
+    for config in configs:
+        if (
+            config.max_rounds,
+            config.victory_castles,
+            config.use_westeros_decks,
+            tuple(config.houses),
+        ) != shared:
+            return None
+
+    # The driver derives each game's seed as `seed + index`, which is how
+    # `parallel_self_play` builds its configs, so the seeds line up.
+    schedule = tuple(temperature_schedule or ())
+    spec = {
+        "games": len(configs),
+        "simulations": simulations,
+        "determinizations": determinizations,
+        "batch_games": max(1, batch_games),
+        "seed": first.seed if first.seed is not None else seed,
+        "temperature": temperature,
+        "temperature_rounds": schedule[0][0] if schedule else 3,
+        "final_temperature": schedule[-1][1] if schedule else temperature,
+        "max_rounds": first.max_rounds,
+        "victory_castles": first.victory_castles,
+        "use_westeros_decks": first.use_westeros_decks,
+        "houses": list(first.houses),
+        "step_limit": step_limit,
+    }
+    result = extension.selfplay(spec, leaf_evaluator(model))
+    return _unpack(result, len(configs))
 
 
 def house_order() -> tuple[str, ...]:

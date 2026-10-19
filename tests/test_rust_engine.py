@@ -159,6 +159,47 @@ def test_observation_is_bit_exact_with_the_python_encoder():
         python.step(python.legal_actions()[action_index])
 
 
+def test_batched_self_play_uses_the_rust_driver():
+    """The training entry point must actually take the Rust path."""
+    pytest.importorskip("torch")
+
+    from agot.nn.model import NeuralEvaluator, PolicyValueNet
+    from agot.training import selfplay as selfplay_module
+
+    model = PolicyValueNet(hidden=32, trunk_layers=1)
+    configs = [GameConfig(seed=200 + index, max_rounds=2) for index in range(3)]
+    records = selfplay_module.batched_self_play(
+        NeuralEvaluator(model), configs, simulations=4, determinizations=1
+    )
+    assert selfplay_module.LAST_BACKEND == "rust"
+    assert len(records) == 3
+    assert all(record.examples for record in records)
+    assert all(record.steps == len(record.examples) for record in records)
+
+
+def test_batched_self_play_falls_back_when_the_request_needs_python():
+    """Scripted opponent seats are not implemented in Rust yet: no silent wrong."""
+    pytest.importorskip("torch")
+
+    from agot.agents import GreedyPolicy
+    from agot.nn.model import NeuralEvaluator, PolicyValueNet
+    from agot.training import selfplay as selfplay_module
+
+    model = PolicyValueNet(hidden=32, trunk_layers=1)
+    configs = [GameConfig(seed=300 + index, max_rounds=2) for index in range(2)]
+    opponents = [{config.houses[0]: GreedyPolicy(1, noise=0.0)} for config in configs]
+    records = selfplay_module.batched_self_play(
+        NeuralEvaluator(model),
+        configs,
+        simulations=4,
+        determinizations=1,
+        opponents=opponents,
+    )
+    assert selfplay_module.LAST_BACKEND == "python"
+    assert len(records) == 2
+    assert all(record.examples for record in records)
+
+
 def test_observe_on_a_terminal_position_is_empty_not_an_error():
     game = core.Game.new(seed=1, use_westeros_decks=False)
     while not game.is_terminal():
