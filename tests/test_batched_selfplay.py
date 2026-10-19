@@ -7,7 +7,7 @@ import pytest
 
 from agot.agents import GreedyPolicy
 from agot.agents.mcts import MCTS, UniformEvaluator
-from agot.engine.game import Game, GameConfig
+from agot.engine.game import Game, GameConfig, PythonGame
 from agot.engine.observation import N_HOUSES
 from agot.training.selfplay import batched_self_play, play_game
 
@@ -60,6 +60,7 @@ def test_batched_selfplay_matches_single_game_example_count() -> None:
             for i, house in enumerate(config.houses)
         },
         config,
+        game_class=PythonGame,
     )
     batched = batched_self_play(
         UniformEvaluator(), [config], simulations=4, seed=0

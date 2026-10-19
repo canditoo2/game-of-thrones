@@ -42,11 +42,12 @@ machine — this PC is the build-and-verify machine.
 - Training self-play already runs on the Rust engine when the extension is installed:
   `agot.training.rust_engine` adapts it, `selfplay.batched_self_play` takes that path whenever
   it can (falling back to the Python driver for scripted opponent seats) and records which ran
-  in `selfplay.LAST_BACKEND`. The rules engine itself (`agot.engine`) still defaults to Python:
-  `AGOT_ENGINE=rust` swaps in `agot.engine.rust`, whose read views are complete and whose
-  rule-fix regressions live in `crates/agot-core/src/rules_fixes.rs`. The whole Python suite
-  passes under `AGOT_ENGINE=rust`; the remaining cutover work is the packaging/default-engine
-  switch (settling the scripted-seat fallback first) and deleting the Python engine.
+  in `selfplay.LAST_BACKEND`. The rules engine seam (`agot.engine.game`) now selects
+  `agot.engine.rust` automatically when the extension is installed and falls back to the frozen
+  Python implementation otherwise; `AGOT_ENGINE=python` forces the reference. The whole Python
+  suite passes both ways. The reference self-play driver builds `PythonGame` directly (scripted
+  seats still run there), so the remaining cutover work is scripted opponents in the Rust
+  driver, the packaging switch, and deleting the Python engine.
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 

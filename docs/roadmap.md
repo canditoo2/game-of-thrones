@@ -466,9 +466,16 @@ they should be fixed before expecting a strong agent.
     above the engine — 103 tests across the agents, training loop, NN, CLI and
     the extension itself.
 
-    Remaining: the maturin packaging switch and changing the default engine.
-    Before flipping it, the Python self-play fallback (scripted opponent seats)
-    should be settled: it currently drives whichever `Game` the seam selected,
-    so under a Rust default it would run the Python MCTS over the Rust view
-    instead of the faster frozen Python engine. After that, the Python engine
-    can be deleted.
+    The seam now selects the Rust engine automatically when the extension is
+    installed (`AGOT_ENGINE=python` still forces the reference; an install
+    without the extension falls back to it). The scripted-seat self-play
+    fallback was settled the same way: the *reference* driver builds
+    `PythonGame` directly, so `--opponent-rate` keeps using the fast frozen
+    Python engine until the Rust driver learns scripted opponents, and
+    `play_game` takes an optional `game_class` so the parity test compares the
+    two reference paths on one engine. The CLI, agents and the default
+    `play_game` follow the seam and therefore run Rust by default.
+
+    Remaining: scripted opponent seats in the Rust self-play driver (so the
+    Python engine is no longer needed as the fallback), the maturin packaging
+    switch, and deleting the Python engine.

@@ -228,7 +228,9 @@ class Game:
         The clone does not re-run the phase machine: the source state is
         already settled, and advancing would move the Action Phase cursor.
         """
-        return Game(
+        # `type(self)`, not `Game`: the module-level name may have been rebound
+        # to the Rust view by the engine seam, and a clone must stay Python.
+        return type(self)(
             self.state.clone(),
             self.config,
             random.Random(self.rng.random()),
@@ -2664,19 +2666,18 @@ PythonGame = Game
 def _select_backend() -> str:
     """Which implementation this module's ``Game`` resolves to.
 
-    ``AGOT_ENGINE=rust`` swaps in the Rust engine when the extension is
-    installed. The Python implementation stays the default until the cutover is
-    finished, because the tests that *build* positions by writing state fields
-    still need it: the Rust engine has the read views and the named builder, not
-    the writable view tier.
+    The Rust engine is selected automatically when the extension is installed;
+    without it the Python implementation remains the reference. Set
+    ``AGOT_ENGINE=python`` to force the reference either way (the differential
+    tests import it as :data:`PythonGame` regardless).
 
-    This is the seam the cutover closes. Everything that imports ``Game`` from
-    here -- the CLI, the agents, the training loop, the tests -- follows this
-    choice without knowing about it.
+    This is the seam everything follows: the CLI, the agents, the training loop
+    and the tests import ``Game`` from here without knowing which engine it is.
     """
     import os
 
-    if os.environ.get("AGOT_ENGINE", "python").strip().lower() != "rust":
+    setting = os.environ.get("AGOT_ENGINE", "auto").strip().lower()
+    if setting == "python":
         return "python"
     try:
         from agot.engine import rust
