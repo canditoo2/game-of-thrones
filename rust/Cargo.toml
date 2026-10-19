@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/agot-core"]
+members = ["crates/agot-core", "crates/agot-py"]
+# The default build/test loop covers the pure-Rust core only: building the
+# Python extension needs PyO3's build requirements (on Windows, binutils for
+# `dlltool`), and the engine's own tests must not depend on that toolchain.
+# Build the binding explicitly: `cargo build -p agot-py`, or via maturin.
+default-members = ["crates/agot-core"]
 
 [workspace.package]
 version = "0.1.0"

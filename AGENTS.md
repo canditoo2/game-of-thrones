@@ -31,6 +31,13 @@ machine — this PC is the build-and-verify machine.
   `tools\debug_parity.py` (print the reference position at a decision),
   `tools\debug_step.py` (print the actions around a decision),
   `tools\diff_state.py` (diff a Rust dump against a Python one).
+- The Python extension (`rust/crates/agot-py`, PyO3 → the `agot_core_ext` module) is **not** in
+  the default workspace build, so the engine's own loop needs no PyO3 toolchain:
+  `cargo build -p agot-py`, or `maturin build --release --out dist` from
+  `rust/crates/agot-py`. On Windows that needs binutils (`dlltool`) on `PATH` — WinLibs'
+  UCRT build — plus `PYO3_PYTHON` pointing at the venv interpreter. The wheel is abi3
+  (Python ≥3.10), so one build covers the local venv, CI and Colab. `tests/test_rust_engine.py`
+  skips itself when the module is missing.
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 
