@@ -157,32 +157,44 @@ penalty) grind the policy parameters to zero.
 
 ## Testing strategy
 
-* `test_map.py` — board data invariants.
-* `test_engine.py` — full games terminate, legal actions are never empty,
-  clones are independent, round 1 skips Westeros.
-* `test_combat.py` — strength arithmetic, the tie-break, `swords − forts`
-  casualties, and a regression test that the defender's units are never
-  credited to the attacker.
-* `test_player_choice_combat.py` — the defeated player chooses which units die
-  and (when defending) where to retreat; Blackfish, Robb Stark and the forced
-  attacker retreat.
-* `test_cross_house_support.py` — third houses back either side or refuse,
-  Iron Throne declaration order, own-side restriction, unconsumed Support
-  orders, siege support and support against a Neutral Force.
-* `test_rules_fixes.py` — one regression test per audited rule fix: Action-Phase
-  turn order, per-order decline, consolidate on open water, port capacity and
+The rules, combat, hidden-information and encoder gates have moved into the Rust
+crate; the Python suite covers the layer above the engine (agents, training,
+CLI). The retired Python copies of the rules/combat/encoder tests were ported
+one-for-one first, so no audit entry lost its regression.
+
+Rust (`cd rust && cargo test --release`):
+
+* `src/rules_fixes.rs` — one regression per audited rule fix: Action-Phase turn
+  order, per-order decline, consolidate on open water, port capacity and
   capture, supply on marches, establishing control, Special Consolidate Power
   mustering, the Messenger Raven, the Valyrian Steel Blade, neutral forces,
   Wildling icon ordering, Wildling bidding and card effects, the end-of-game
   tiebreakers, House Stark's starting Supply, the three holders'-choice Westeros
-  cards, and a representative ability for every House-card mechanic. The same
-  regressions exist in Rust (`crates/agot-core/src/rules_fixes.rs`, one test per
-  Python original) and the Rust copy is the one that will outlive the Python
-  engine.
-* `test_observation.py` — fixed dimensions, determinism, one-hot blocks.
+  cards, and every House-card ability.
+* `tests/combat_semantics.rs` — strength arithmetic, the Fiefdoms tie-break,
+  `swords − forts` casualties, retreats, and the engine-level halves of
+  cross-house support and player-chosen casualties.
+* `src/support_semantics.rs` — the phase-machine halves: who is asked, what
+  they may declare, neutral forces never receiving support, and the Support
+  stage opening on a real march.
+* `src/hidden.rs` and `tests/search_semantics.rs` — determinization (Order
+  tokens, secret bids, pool bookkeeping, seeding) and PIMC search/decide.
+* `src/observation.rs` and `tests/encoder_parity.rs` — encoder layout, hidden
+  orders, slot initialisation, bounded actions, and bit-exact golden vectors.
+* `tests/engine_parity.rs` — complete games replayed against the Python
+  reference fingerprint for fingerprint.
+
+Python:
+
+* `test_map.py` — board data invariants.
+* `test_engine.py` — full games terminate, legal actions are never empty,
+  clones are independent, round 1 skips Westeros.
 * `test_agents.py` — every policy returns actions aligned with its targets.
 * `test_training.py` — examples are labelled, replay round-trips, matches run.
+* `test_batched_selfplay.py` — the batched/parallel self-play drivers.
 * `test_nn.py` — network shapes, save/load, masking, one training step, and the
   policy-head health checks (candidates scored differently, every parameter
   receiving gradient, cross-entropy reaching a learnable target's entropy).
   Skipped automatically when torch is absent.
+* `test_rust_engine.py` — the extension's acceptance gate (both engines play
+  identical games, the encoder agrees bit for bit through the binding).

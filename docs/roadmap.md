@@ -274,7 +274,9 @@ they should be fixed before expecting a strong agent.
     instead of all 58 — `GameState.clone` fell from 56 µs to 5.9 µs (~10×) and
     `Game.clone` from 70 µs to 12 µs. The invariant that makes it safe (cloning a
     game and stepping the clone never mutates the source) is pinned by
-    `tests/test_clone_isolation.py`, which clones and steps *every* legal action
+    `tests/test_clone_isolation.py` (retired with the other Python engine tests;
+    the Rust clones own their state, and both directions are pinned in `game.rs`
+    and `search_semantics.rs`), which clones and steps *every* legal action
     at every decision of several seeded games; a wider sweep of 213k such checks
     found no violation, and the full test suite is unchanged. A missed `mut` call
     on a rarely-taken path was the residual risk, which is why the isolation test
@@ -437,6 +439,20 @@ they should be fixed before expecting a strong agent.
     `state.regions[...]` (they need the same builder the extension already has,
     wired into the view) and the PIMC path, which still resamples hidden state in
     Python (`hidden.py` writes through `state.mut`).
+
+    The duplicated Python tests were then retired rather than kept in parallel:
+    `test_rules_fixes.py`, `test_combat.py`, `test_cross_house_support.py`,
+    `test_player_choice_combat.py`, `test_clone_isolation.py`, `test_hidden.py`
+    and `test_observation.py` are gone. Every behaviour they pinned has a Rust
+    home (`rules_fixes.rs`, `combat_semantics.rs`, the new in-crate
+    `support_semantics.rs`, `hidden.rs`, `search_semantics.rs`,
+    `observation.rs`, `encoder_parity.rs`); the phase-level support tests that
+    `combat_semantics.rs` had deliberately left to `Game._combat_actions` moved
+    into `support_semantics.rs`, and the clone-isolation invariant gained the
+    reverse-direction test that the old copy-on-write bug needed (stepping the
+    *source* must not reach an existing clone). The Python suite is now the layer
+    above the engine — 103 tests across the agents, training loop, NN, CLI and
+    the extension itself.
 
     Remaining: finishing the write tier over the Rust state so the Python tests
     that mutate a position can run against the extension, then the maturin

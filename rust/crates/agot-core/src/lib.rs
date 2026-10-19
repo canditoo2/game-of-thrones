@@ -31,6 +31,8 @@ mod rules_fixes;
 pub mod search;
 pub mod setup;
 pub mod state;
+#[cfg(test)]
+mod support_semantics;
 
 pub use action::{Action, ActionKind, Side};
 pub use combat::{

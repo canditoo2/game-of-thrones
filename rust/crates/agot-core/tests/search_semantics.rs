@@ -342,6 +342,23 @@ fn pimc_aggregates_the_worlds_visits() {
     assert_eq!(total, 4.0, "each world spends one simulation on its root");
 }
 
+/// Python: `test_pimc_decide_returns_a_legal_action`.
+#[test]
+fn pimc_decide_returns_a_legal_action() {
+    let game = planning_with_a_rival_order();
+    let actions = game.legal_actions();
+    let mut search = Mcts::with_seed(UniformEvaluator, 1);
+    search.simulations = 24;
+    search.determinizations = 3;
+
+    let (action, probabilities) = search.decide(&game).expect("searchable");
+    assert!(
+        actions.contains(&action),
+        "decide must pick an offered action"
+    );
+    assert_eq!(probabilities.len(), actions.len());
+}
+
 // ---------------------------------------------------------------------------
 // Determinism
 // ---------------------------------------------------------------------------

@@ -10,8 +10,9 @@ machine — this PC is the build-and-verify machine.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
-- Tests: `.venv\Scripts\python -m pytest -q` (215 tests). When piped in PowerShell the final
-  summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
+- Tests: `.venv\Scripts\python -m pytest -q` (103 tests; the rules/combat/encoder
+  regressions live in Rust now — see `cargo test --release` below). When piped in PowerShell
+  the final summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`
 - Lint: `.venv\Scripts\ruff check src tests` (line-length 100, py310 target).
 - CLI: `.venv\Scripts\agot <demo|legal|evaluate|gauntlet|round-robin|train|report>`. One full
@@ -58,9 +59,12 @@ machine — this PC is the build-and-verify machine.
   it must not reach for the network. While the port runs, the Python engine is the reference
   oracle: ported behaviour is pinned by the differential fixture, and a disagreement is a bug in
   the Rust side (or in the fixture's generator) — never something to fix by editing the fixture.
-- Copy-on-write regions: every write to a `RegionState` must go through `GameState.mut(id)`;
-  direct writes silently corrupt clones and search. `tests/test_clone_isolation.py` pins this —
-  run it after any state-mutation change.
+- Copy-on-write regions (Python engine only, frozen until deletion): every write to a
+  `RegionState` must go through `GameState.mut(id)`; direct writes silently corrupt clones and
+  search. The retired `tests/test_clone_isolation.py` pinned both clone directions; its Rust
+  successors are `game.rs::cloned_games_do_not_share_state` and
+  `stepping_the_source_leaves_a_clone_untouched`, plus the PIMC source check in
+  `search_semantics.rs`.
 - `Game.step` applies one player decision and auto-advances every phase that needs no input;
   legal actions are non-empty only when a player must decide.
 - MCTS stores a value *vector* per house (multiplayer; no sign flipping). The policy head is a

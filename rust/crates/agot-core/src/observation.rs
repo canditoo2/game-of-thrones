@@ -847,6 +847,100 @@ mod tests {
         assert_eq!(out[ACTION_DIM - 1], 0.0);
     }
 
+    /// Python: `test_support_side_is_encoded`.
+    #[test]
+    fn support_side_is_encoded() {
+        let data = data();
+        let state = planning_state(&data);
+        let winterfell = data.map.lookup("winterfell").expect("winterfell");
+
+        let attacking = Action::declare_support(HouseId(2), winterfell, Side::Attacker);
+        let vector = encode_action(&state, &data, &attacking, Some(HouseId(2)));
+        assert_eq!(vector.len(), ACTION_DIM);
+        assert_eq!(
+            vector[ACTION_DIM - N_SIDES..],
+            [1.0, 0.0, 0.0],
+            "the attacker slot is the first side"
+        );
+
+        let refusing = Action::declare_support(HouseId(2), winterfell, Side::Refuse);
+        let vector = encode_action(&state, &data, &refusing, Some(HouseId(2)));
+        assert_eq!(vector[ACTION_DIM - N_SIDES..], [0.0, 0.0, 1.0]);
+    }
+
+    /// Python: `test_region_block_initialises_every_slot`.
+    #[test]
+    fn region_block_initialises_every_slot() {
+        let data = data();
+        let mut state = planning_state(&data);
+        let golden_sound = data
+            .map
+            .lookup("the_golden_sound")
+            .expect("the golden sound");
+        {
+            let region = state.region_mut(golden_sound);
+            region.order = OrderKey::from_name("march");
+            region.order_house = Some(HouseId(0));
+        }
+        state.phase = Phase::Planning; // so the order is hidden from Stark
+
+        let block = block_of(&state, &data, golden_sound, Some(HouseId(2)));
+        let controller = &block[16..20];
+        assert_eq!(
+            controller.iter().sum::<f32>(),
+            1.0,
+            "exactly one controller flag must be set"
+        );
+        assert_eq!(controller[1], 0.0, "the reserved slot stays zero");
+        let order_start = 20;
+        assert!(
+            block[order_start..order_start + N_ORDERS]
+                .iter()
+                .all(|value| *value == 0.0),
+            "a hidden order writes its whole one-hot as zero"
+        );
+        assert_eq!(
+            block[order_start + N_ORDERS],
+            0.0,
+            "the order-strength slot is written even while the order is hidden"
+        );
+        assert!(block.iter().all(|value| value.is_finite()));
+    }
+
+    /// Python: `test_encoded_actions_stay_bounded_across_a_game`.
+    #[test]
+    fn encoded_actions_stay_bounded_across_a_game() {
+        use std::sync::Arc;
+
+        use crate::game::Game;
+
+        let data = Arc::new(data());
+        let config = GameConfig {
+            seed: 3,
+            max_rounds: 3,
+            ..GameConfig::default()
+        };
+        let mut game = Game::new(Arc::clone(&data), config).expect("game must start");
+        let mut steps = 0;
+        while !game.is_terminal() && steps < 60 {
+            let actions = game.legal_actions();
+            if actions.is_empty() {
+                break;
+            }
+            for action in &actions {
+                let vector = encode_action(&game.state, &data, action, None);
+                assert!(vector.iter().all(|value| value.is_finite()));
+                let largest = vector
+                    .iter()
+                    .fold(0.0f32, |max, value| max.max(value.abs()));
+                assert!(largest < 100.0, "runaway feature for {action:?}: {largest}");
+            }
+            let action = actions[0];
+            game.step(action).expect("a legal action applies");
+            steps += 1;
+        }
+    }
+
     #[test]
     fn region_blocks_hide_other_houses_orders_until_the_reveal() {
         let data = data();

@@ -928,4 +928,35 @@ mod tests {
             "the clone's order must not leak into the source"
         );
     }
+
+    /// The other direction of the clone invariant.
+    ///
+    /// Python's copy-on-write bookkeeping once let the *source* write into an
+    /// existing clone; an owned state makes that impossible, and this pins the
+    /// direction that bug lived in (the retired `test_clone_isolation.py`).
+    #[test]
+    fn stepping_the_source_leaves_a_clone_untouched() {
+        use crate::fingerprint::state_fingerprint;
+
+        let mut game = Game::new(data(), GameConfig::with_seed(4)).unwrap();
+        let clone = game.clone();
+        let before = state_fingerprint(&clone.state, &clone.data);
+        let action = game.legal_actions()[0];
+        let region = action.region;
+        game.step(action).unwrap();
+
+        assert_eq!(
+            state_fingerprint(&clone.state, &clone.data),
+            before,
+            "stepping the source must never reach into a clone"
+        );
+        if let Some(region) = region {
+            assert_eq!(
+                clone.state.region(region).order,
+                None,
+                "the source's order must not leak into the clone"
+            );
+        }
+        assert!(!clone.legal_actions().is_empty());
+    }
 }
