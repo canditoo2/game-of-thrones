@@ -540,3 +540,136 @@ fn martell_deck_matches_the_reference_sheet() {
     assert!(deck.iter().all(|card| card.id != "ellaria_sand"));
     assert_eq!(deck.len(), 7);
 }
+
+// ---------------------------------------------------------------------------
+// Ships, Neutral Forces and Ports
+// ---------------------------------------------------------------------------
+
+/// A land neighbour of a region, for tests that need somewhere to march from.
+fn land_neighbour(data: &DataSet, region: RegionId) -> RegionId {
+    data.map
+        .land_neighbours_of(region)
+        .into_iter()
+        .find(|candidate| *candidate != region)
+        .unwrap_or_else(|| panic!("{} has no land neighbour", data.map.id_of(region)))
+}
+
+/// Python: `test_ships_may_muster_into_a_friendly_sea_but_not_an_enemy_one`.
+#[test]
+fn ships_may_muster_into_a_friendly_sea_but_not_an_enemy_one() {
+    let (mut game, data) = blank(1);
+    let house = HouseId(2);
+    let winterfell = region_of(&data, "winterfell");
+    let port = data.map.port_of(winterfell).expect("Winterfell has a Port");
+    let sea = data.map.region(port).sea.expect("a Port names its sea");
+    {
+        let region = game.state.region_mut(winterfell);
+        region.controller = Some(house);
+        region.owner = Some(house);
+        region.mustering_points = 1; // enough for a Ship
+    }
+    let ship_targets = |game: &Game| -> Vec<RegionId> {
+        game.mustering_actions(house)
+            .iter()
+            .filter(|action| action.unit == Some(UnitType::Ship))
+            .filter_map(|action| action.target)
+            .collect()
+    };
+
+    game.state.region_mut(sea).controller = Some(house);
+    assert!(
+        ship_targets(&game).contains(&sea),
+        "a friendly sea may receive a new Ship"
+    );
+
+    // Only enemy Ships block mustering, which is what an enemy-held sea means.
+    game.state.region_mut(sea).controller = Some(HouseId(3));
+    assert!(
+        !ship_targets(&game).contains(&sea),
+        "an enemy-held sea refuses one"
+    );
+}
+
+/// Python: `test_too_weak_an_army_cannot_attack_a_neutral_force`.
+///
+/// A Neutral Force may only be attacked with enough strength to destroy it, and
+/// the check uses the *maximum possible* support, because support is not declared
+/// yet when the legal marches are generated.
+#[test]
+fn too_weak_an_army_cannot_attack_a_neutral_force() {
+    let (mut game, data) = blank(1);
+    let house = HouseId(2);
+    let kings_landing = region_of(&data, "kings_landing");
+    let origin = land_neighbour(&data, kings_landing);
+    assert_eq!(
+        game.state.region(kings_landing).neutral_force,
+        5,
+        "the test assumes King's Landing's printed strength"
+    );
+    {
+        let region = game.state.region_mut(origin);
+        region.controller = Some(house);
+        region.owner = None;
+        region.units = [1, 0, 0, 0];
+    }
+    with_march_order(&mut game, origin, house);
+    let offered = |game: &Game| {
+        game.march_actions(house, origin)
+            .iter()
+            .any(|action| action.target == Some(kings_landing))
+    };
+
+    assert!(!offered(&game), "one Footman cannot break a force of five");
+
+    // Three Knights are six strength, which is enough.
+    game.state.region_mut(origin).units = [0, 3, 0, 0];
+    assert!(offered(&game), "three Knights can");
+}
+
+/// Python: `test_a_neutral_force_blocks_a_retreat`.
+#[test]
+fn a_neutral_force_blocks_a_retreat() {
+    let (mut game, data) = blank(1);
+    let house = HouseId(2);
+    let kings_landing = region_of(&data, "kings_landing");
+    let origin = land_neighbour(&data, kings_landing);
+
+    let options = crate::combat::legal_retreats(&game.state, &data.map, origin, house, false, None);
+    assert!(
+        !options.contains(&kings_landing),
+        "a Neutral Force token defends its area against retreaters too"
+    );
+
+    // With the token gone the area is open, because nothing else holds it.
+    game.state.region_mut(kings_landing).neutral_force = 0;
+    let options = crate::combat::legal_retreats(&game.state, &data.map, origin, house, false, None);
+    assert!(options.contains(&kings_landing), "the area is now empty");
+}
+
+/// Python: `test_capturing_a_land_area_replaces_enemy_port_ships`.
+#[test]
+fn capturing_a_land_area_replaces_enemy_port_ships() {
+    let (mut game, data) = blank(1);
+    let house = HouseId(2);
+    let winterfell = region_of(&data, "winterfell");
+    let port = data.map.port_of(winterfell).expect("Winterfell has a Port");
+    {
+        let region = game.state.region_mut(port);
+        region.controller = Some(HouseId(3));
+        region.units = [0, 0, 0, 2];
+    }
+    if let Some(state) = game.state.house_mut(house) {
+        state.supply_level = 4; // room for the captured fleet
+    }
+
+    game.capture_port(house, winterfell);
+
+    let after = game.state.region(port);
+    assert_eq!(after.controller, Some(house));
+    assert_eq!(
+        after.unit_count(UnitType::Ship),
+        2,
+        "two enemy Ships become two of the captor's"
+    );
+    assert_eq!(after.routed_count(UnitType::Ship), 0);
+}
