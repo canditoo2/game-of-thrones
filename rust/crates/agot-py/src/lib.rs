@@ -300,6 +300,21 @@ impl PyGame {
         Ok((actor, state, matrix))
     }
 
+    /// The whole position as plain Python data.
+    ///
+    /// This is the same structure the differential corpus records, so a Rust
+    /// position and a Python one can be compared field by field from Python —
+    /// which is what the engine tests need in order to read a position without
+    /// caring which implementation produced it.
+    fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let value =
+            agot_core::fingerprint::state_fingerprint(&self.game.state, &self.game.data);
+        let text = serde_json::to_string(&value)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let json = py.import("json")?;
+        Ok(json.call_method1("loads", (text,))?.unbind())
+    }
+
     /// Compact description of the position, as in the Python engine.
     fn summary(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let value = self.game.summary();

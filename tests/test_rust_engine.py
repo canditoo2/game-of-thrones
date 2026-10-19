@@ -200,6 +200,31 @@ def test_batched_self_play_falls_back_when_the_request_needs_python():
     assert all(record.examples for record in records)
 
 
+def test_rust_snapshot_matches_the_python_position():
+    """The read-only view must describe the same position, field for field.
+
+    This is what lets a caller inspect a position without caring which engine
+    produced it — and it is the structure the differential corpus records, so a
+    mismatch here is the same failure the Rust-side parity test would report.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    from dump_fixture import fingerprint
+
+    rust = core.Game.new(seed=5, use_westeros_decks=False)
+    python = Game.new(GameConfig(seed=5, use_westeros_decks=False))
+
+    for step in range(60):
+        assert rust.snapshot() == fingerprint(python), f"step {step}"
+        if rust.is_terminal():
+            break
+        index = (step * 3 + 1) % len(rust.legal_actions())
+        rust.step(rust.legal_actions()[index])
+        python.step(python.legal_actions()[index])
+
+
 def test_observe_on_a_terminal_position_is_empty_not_an_error():
     game = core.Game.new(seed=1, use_westeros_decks=False)
     while not game.is_terminal():
