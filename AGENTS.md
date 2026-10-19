@@ -1,8 +1,9 @@
 # AGENTS.md
 
-AlphaZero-style RL agent for **A Game of Thrones: The Board Game (2E)**, six players: a
-numpy-only rules engine + PUCT MCTS (`agents/`), an optional PyTorch scorer network (`nn/`) and
-the self-play training loop (`training/`). Everything is driven by the `agot` CLI.
+AlphaZero-style RL agent for **A Game of Thrones: The Board Game (2E)**, six players: a Rust
+rules engine, search and encoder (`rust/`) behind a thin Python facade, an optional PyTorch
+scorer network (`nn/`) and the self-play training loop (`training/`). Everything is driven by
+the `agot` CLI.
 
 **Current direction (2026-10-09):** the pipeline was rebuilt after two void runs (below); the
 first credible training run (`run3`) has not happened yet. Heavy training is meant for a separate
@@ -10,65 +11,53 @@ machine — this PC is the build-and-verify machine.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
-- Tests: `.venv\Scripts\python -m pytest -q` (104 tests; the rules/combat/encoder
-  regressions live in Rust now — see `cargo test --release` below). When piped in PowerShell
+- Tests: `.venv\Scripts\python -m pytest -q` (85 tests; the rules/combat/encoder
+  regressions live in Rust — see `cargo test --release` below). When piped in PowerShell
   the final summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`
 - Lint: `.venv\Scripts\ruff check src tests` (line-length 100, py310 target).
 - CLI: `.venv\Scripts\agot <demo|legal|evaluate|gauntlet|round-robin|train|report>`. One full
-  game is ~0.1 s: `agot demo --policy greedy --seed 1`. Gauntlet = single-seat win rate vs a
+  game is ~0.2 s: `agot demo --policy greedy --seed 1`. Gauntlet = single-seat win rate vs a
   field; any policy argument accepts `net:<checkpoint>` (MCTS over that saved network), and
   `round-robin` builds a league table across checkpoints.
 - Most of the suite runs without torch: only `test_nn` and `test_checkpoint` skip entirely
   (module-level `importorskip`), plus a few individual cases in `test_batched_selfplay` and
-  `test_report`. CI (`.github/workflows/ci.yml`) runs the numpy-only suite on Python 3.10/3.12
-  plus an allowed-to-fail torch job; the local venv is Python 3.14 — don't assume CI parity.
-- Rust core (engine port in progress, `rust/`): run from `rust/` with the stable
-  `x86_64-pc-windows-gnu` toolchain (not on `PATH`; use `%USERPROFILE%\.cargo\bin\cargo`).
-  `cargo test --release`, `cargo clippy --all-targets -- -D warnings`,
-  `cargo bench --bench clone_step`. `tools\dump_fixture.py` regenerates the differential
-  fixture the parity tests replay — regenerate it from Python, never hand-edit it. The
-  other generators/debug aids: `tools\dump_encoder_golden.py` (bit-exact encoder vectors),
-  `tools\debug_parity.py` (print the reference position at a decision),
-  `tools\debug_step.py` (print the actions around a decision),
-  `tools\diff_state.py` (diff a Rust dump against a Python one).
-- The Python extension (`rust/crates/agot-py`, PyO3 → the `agot_core_ext` module) is **not** in
-  the default workspace build, so the engine's own loop needs no PyO3 toolchain:
-  `cargo build -p agot-py`, or `maturin build --release --out dist` from
-  `rust/crates/agot-py`. On Windows that needs binutils (`dlltool`) on `PATH` — WinLibs'
-  UCRT build — plus `PYO3_PYTHON` pointing at the venv interpreter. The wheel is abi3
-  (Python ≥3.10), so one build covers the local venv, CI and Colab. `tests/test_rust_engine.py`
-  skips itself when the module is missing.
-- Training self-play already runs on the Rust engine when the extension is installed:
-  `agot.training.rust_engine` adapts it, `selfplay.batched_self_play` takes that path whenever
-  it can (falling back to the Python driver for scripted opponent seats) and records which ran
-  in `selfplay.LAST_BACKEND`. The rules engine seam (`agot.engine.game`) now selects
-  `agot.engine.rust` automatically when the extension is installed and falls back to the frozen
-  Python implementation otherwise; `AGOT_ENGINE=python` forces the reference. The whole Python
-  suite passes both ways. Scripted opponent seats now run on the Rust driver too (one Python
-  policy call per scripted decision, search seats stay native); the reference driver is only the
-  fallback for hand-written evaluators, mixed configurations and installs without the extension.
-  Remaining cutover work: the packaging switch and deleting the Python engine.
+  `test_report`. CI (`.github/workflows/ci.yml`) installs a Rust toolchain and builds the
+  extension, then runs the suite on Python 3.10/3.12 plus an allowed-to-fail torch job; the
+  local venv is Python 3.14 — don't assume CI parity.
+- Rust engine (`rust/`): run from `rust/` with the stable `x86_64-pc-windows-gnu` toolchain
+  (not on `PATH`; use `%USERPROFILE%\.cargo\bin\cargo`). Gates:
+  `cargo test --release`, `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets -- -D warnings`,
+  `cargo clippy -p agot-py --all-targets -- -D warnings`, `cargo bench --bench clone_step`.
+  The differential fixture (`crates/agot-core/tests/data/engine_fixture.json`) and the encoder
+  golden file are **frozen regression pins** — the Python generators that produced them were
+  retired with the Python engine, so never hand-edit either file.
+- Packaging: `pyproject.toml` uses maturin; `pip install -e .` builds the abi3 extension into
+  `agot._core`. `rust/crates/agot-py` is not a default workspace member, so the engine's own
+  `cargo test` loop needs no PyO3 toolchain. On Windows a direct `maturin build` needs binutils
+  (`dlltool`) on `PATH` — WinLibs' UCRT build — plus `PYO3_PYTHON` pointing at the venv
+  interpreter; plain `pip install -e .` works with the toolchain on `PATH` as it is here. The
+  wheel is abi3 (Python ≥3.10), so one build covers the local venv, CI and Colab.
+- Self-play: `agot.training.rust_engine` drives the batch tier and
+  `selfplay.batched_self_play` takes it whenever the evaluator is model-backed and the configs
+  share one game configuration, recording the path in `selfplay.LAST_BACKEND`. Scripted seats
+  run on the Rust driver too (one Python policy call per scripted decision, search seats stay
+  native). The reference driver remains only for hand-written evaluators and mixed configs.
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 
 ## Architecture constraints (easy to break)
 
-- Layering: `engine/` is numpy-only and must stay importable without torch; never import torch
-  from `engine/` or `agents/`.
-- The Rust port (`rust/crates/agot-core`) is the future home of the engine, search and encoder.
-  `agot-core` must never depend on torch or PyO3 (the Python binding is a separate crate), and
-  it must not reach for the network. While the port runs, the Python engine is the reference
-  oracle: ported behaviour is pinned by the differential fixture, and a disagreement is a bug in
-  the Rust side (or in the fixture's generator) — never something to fix by editing the fixture.
-- Copy-on-write regions (Python engine only, frozen until deletion): every write to a
-  `RegionState` must go through `GameState.mut(id)`; direct writes silently corrupt clones and
-  search. The retired `tests/test_clone_isolation.py` pinned both clone directions; its Rust
-  successors are `game.rs::cloned_games_do_not_share_state` and
-  `stepping_the_source_leaves_a_clone_untouched`, plus the PIMC source check in
-  `search_semantics.rs`.
+- Layering: the Python `engine/` facade is numpy-only and must stay importable without torch;
+  never import torch from `engine/` or `agents/`.
+- `rust/crates/agot-core` is the engine, search and encoder. It must never depend on torch or
+  PyO3 (the Python binding is a separate crate), and it must not reach for the network. The
+  differential fixture and encoder golden vectors are frozen regression pins: a disagreement is
+  a bug in the Rust side, never something to fix by editing a fixture or a golden file.
 - `Game.step` applies one player decision and auto-advances every phase that needs no input;
-  legal actions are non-empty only when a player must decide.
+  legal actions are non-empty only when a player must decide. `RustGame` caches its snapshot
+  view per step (`StateView._version`); any new mutation path must invalidate it.
 - MCTS stores a value *vector* per house (multiplayer; no sign flipping). The policy head is a
   scorer MLP over `[h, a_i]` — deliberately NOT a dot product: a product has a zero fixed point
   that killed runs 1-2, and `PolicyValueNet.load` refuses those checkpoints. Don't "simplify" it
@@ -78,9 +67,10 @@ machine — this PC is the build-and-verify machine.
 - Self-play defaults are load-bearing: 128 simulations / 2 determinizations (PIMC) and a
   temperature schedule (1.0 for 3 rounds, then 0.25). The recorded policy target is built from
   the temperature, so flat 1.0 or too few sims trains on near-uniform noise.
-- Hidden information: `engine/hidden.py` resamples face-down orders and secret bids (PIMC);
-  observation masks hidden orders. Known remaining leak: the first chooser's House card in a
-  battle (revealed simultaneously in the physical game).
+- Hidden information: `agot.engine.hidden.determinize` delegates to the Rust resampling of
+  face-down orders and secret bids (PIMC); the encoder masks hidden orders. Known remaining
+  leak: the first chooser's House card in a battle (revealed simultaneously in the physical
+  game).
 
 ## Training runs
 
@@ -106,5 +96,5 @@ machine — this PC is the build-and-verify machine.
   5×greedy; parity = 1/6 ≈ 16.7%).
 - `PROVENANCE.md` + `verified` flags in `src/agot/data/*.json` — board-data confidence; data
   fixes need no engine code.
-- `docs/rulebook-audit.md` — rule-fidelity audit trail; `tests/test_rules_fixes.py` holds one
-  regression per audited rule fix (add one when fixing a rule).
+- `docs/rulebook-audit.md` — rule-fidelity audit trail; `crates/agot-core/src/rules_fixes.rs`
+  holds one regression per audited rule fix (add one when fixing a rule).

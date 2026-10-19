@@ -18,7 +18,6 @@ import numpy as np
 
 from agot.agents.base import Policy, one_hot_target
 from agot.engine.actions import Action, ActionKind
-from agot.engine.combat import order_modifier, unit_strength
 from agot.engine.enums import ORDERS_BY_KEY, OrderType, Phase, UnitType
 from agot.engine.game import Game
 
@@ -34,6 +33,44 @@ _TRACK_VALUE = {
     "iron_throne": 1.5,  # first player picks mustering and breaks ties
     "fiefdoms": 1.4,  # the Valyrian Steel Blade
 }
+
+#: Printed unit strengths, used only by this heuristic. The heuristics never
+#: count a Siege Engine (its 4 applies only when attacking a fortification).
+_COMBAT_STRENGTH = {
+    UnitType.FOOTMAN: 1,
+    UnitType.KNIGHT: 2,
+    UnitType.SIEGE: 4,
+    UnitType.SHIP: 1,
+}
+
+
+def _unit_strength(state, region_id: str, house: str) -> int:
+    """Combat strength of ``house``'s ready units in a region.
+
+    Siege Engines are excluded: the greedy heuristic does not model whether the
+    target is a fortification, and treating them as 0 is the conservative choice.
+    """
+    region = state.regions[region_id]
+    if region.controller != house:
+        return 0
+    return sum(
+        _COMBAT_STRENGTH[unit] * count
+        for unit, count in region.units.items()
+        if unit is not UnitType.SIEGE
+    )
+
+
+def _order_modifier(state, region_id: str, house: str, side: str) -> int:
+    """March bonus for an attacker or Defend bonus for a defender."""
+    region = state.regions[region_id]
+    if region.order is None or region.order_house != house:
+        return 0
+    spec = ORDERS_BY_KEY[region.order]
+    if side == "attacker" and spec.order_type is OrderType.MARCH:
+        return spec.strength
+    if side == "defender" and spec.order_type is OrderType.DEFEND:
+        return spec.strength
+    return 0
 
 
 class GreedyPolicy(Policy):
@@ -150,7 +187,7 @@ class GreedyPolicy(Policy):
         static = game_map.regions[target_id]
         house = action.house or ""
 
-        attack = unit_strength(state, origin_id, house) + order_modifier(
+        attack = _unit_strength(state, origin_id, house) + _order_modifier(
             state, origin_id, house, "attacker"
         )
         score = 0.0
@@ -164,7 +201,7 @@ class GreedyPolicy(Policy):
                 score -= 4.0
         elif target.controller not in (None, house):
             defender = target.controller or ""
-            defense = unit_strength(state, target_id, defender) + order_modifier(
+            defense = _unit_strength(state, target_id, defender) + _order_modifier(
                 state, target_id, defender, "defender"
             )
             if attack > defense:
@@ -344,5 +381,5 @@ class GreedyPolicy(Policy):
             region = game.state.regions[neighbour]
             if region.controller in (None, house):
                 continue
-            threat += unit_strength(game.state, neighbour, region.controller)
+            threat += _unit_strength(game.state, neighbour, region.controller)
         return threat

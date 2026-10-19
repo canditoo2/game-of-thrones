@@ -1,43 +1,40 @@
-"""A Python-shaped view over the Rust engine.
+"""The Python-shaped view over the Rust engine.
 
-``agot.engine`` is still the Python implementation, and this module is the
-bridge the cutover is built on: it drives the extension's session tier but
-presents the same objects the rest of the package already expects — ``Action``
-dataclasses, a ``state`` whose regions and houses have attribute access, the
-static ``map``.
+This module drives the extension's session tier and presents the objects the
+rest of the package expects: ``Action`` dataclasses, a ``state`` whose regions
+and houses have attribute access, and the static ``map``. Everything from the
+CLI to ``GreedyPolicy`` reads a position as ``game.state.regions[rid].controller``
+and friends, so the view is what keeps those call sites unchanged.
 
-Why a view rather than a rewrite of the call sites: everything from the CLI to
-``GreedyPolicy`` reads a position as ``game.state.regions[rid].controller`` and
-friends, and the tests do the same. Rebuilding those shapes here — from the
-Rust engine's own ``snapshot()`` — means a call site can move to the Rust engine
-without changing a line, which is what makes the cutover incremental instead of
-a big-bang change.
-
-Reading is complete; **writing is not**: a test that *builds* a position still
-needs the Python engine (or the extension's ``set_region``/``set_house``
-builder, which this module does not wrap yet). That is the remaining piece of
-the cutover, and it is deliberately not faked here.
+The view reads through the engine's own ``snapshot()``. It caches the snapshot
+and its derived regions/houses/tracks per step and invalidates them in ``step``,
+which is safe because the wrapper is the only session mutation path. Building a
+position goes through the extension's named builder (``set_region`` /
+``set_house`` / ``set_track``), used by the engine tests.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from agot.engine.actions import Action, ActionKind
 from agot.engine.enums import ActionStep, OrderType, Phase, Track, UnitType
-from agot.engine.game import GameConfig
 from agot.engine.map import load_map
 
-MODULE = "agot_core_ext"
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from agot.engine.game import GameConfig
+
+MODULE = "agot._core"
 
 
 def core():
     """The extension module, or ``None`` when it is not installed."""
     try:
-        import agot_core_ext  # noqa: PLC0415 - deliberately lazy
+        from agot import _core  # noqa: PLC0415 - deliberately lazy
     except ImportError:  # pragma: no cover - depends on the environment
         return None
-    return agot_core_ext
+    return _core
 
 
 def available() -> bool:
@@ -118,17 +115,33 @@ class HouseView:
 
 
 class StateView:
-    """A position, rebuilt from the Rust engine's ``snapshot()``.
+    """A position, read from the Rust engine's ``snapshot()``.
 
-    Rebuilt on every access rather than cached: the Rust state is the truth, and
-    a stale cache is exactly the class of bug the port removed.
+    The snapshot is cached on the game and invalidated by every ``step``. The
+    cache lives here because the view used to rebuild the whole JSON snapshot on
+    *every attribute read*, which made a greedy game ~800x slower than the
+    retired Python engine. Invalidation is centralised in ``RustGame.step``, and
+    a clone/determinization gets a fresh view, so the cache cannot outlive the
+    position it describes.
     """
 
     def __init__(self, game: RustGame) -> None:
         self._game = game
+        self._version = -1
+        self._regions: dict[str, RegionView] | None = None
+        self._houses: dict[str, HouseView] | None = None
+        self._tracks: dict[Track, list[str]] | None = None
 
     def _data(self) -> dict:
         return self._game.snapshot()
+
+    def _sync(self) -> None:
+        """Drop memoised sub-views when the underlying position changed."""
+        if self._version != self._game._version:
+            self._version = self._game._version
+            self._regions = None
+            self._houses = None
+            self._tracks = None
 
     @property
     def round(self) -> int:
@@ -242,52 +255,63 @@ class StateView:
 
     @property
     def regions(self) -> dict[str, RegionView]:
-        raw = self._data()["regions"]
-        # The snapshot arrives as a JSON object, whose keys are sorted; the
-        # Python engine iterates regions in *map* order, and call sites depend on
-        # it (`controlled_regions`, the planning order, the encoder's own order).
-        # Rebuilding in map order keeps the view faithful.
-        map_order = [region_id for region_id in self._game.map.regions if region_id in raw]
-        return {
-            region_id: RegionView(
-                region_id=region_id,
-                controller=raw[region_id]["controller"],
-                owner=raw[region_id]["owner"],
-                units=_units(raw[region_id]["units"]),
-                routed=_units(raw[region_id]["routed"]),
-                neutral_force=raw[region_id]["neutral_force"],
-                garrison=raw[region_id]["garrison"],
-                mustering_points=raw[region_id]["mustering_points"],
-                influence_token=raw[region_id]["influence_token"],
-                order=raw[region_id]["order"],
-                order_house=raw[region_id]["order_house"],
-            )
-            for region_id in map_order
-        }
+        self._sync()
+        if self._regions is None:
+            raw = self._data()["regions"]
+            # The snapshot arrives as a JSON object, whose keys are sorted; the
+            # view must iterate regions in *map* order, and call sites depend on
+            # it (`controlled_regions`, the planning order, the encoder's own
+            # order). Rebuilding in map order keeps it faithful.
+            map_order = [
+                region_id for region_id in self._game.map.regions if region_id in raw
+            ]
+            self._regions = {
+                region_id: RegionView(
+                    region_id=region_id,
+                    controller=raw[region_id]["controller"],
+                    owner=raw[region_id]["owner"],
+                    units=_units(raw[region_id]["units"]),
+                    routed=_units(raw[region_id]["routed"]),
+                    neutral_force=raw[region_id]["neutral_force"],
+                    garrison=raw[region_id]["garrison"],
+                    mustering_points=raw[region_id]["mustering_points"],
+                    influence_token=raw[region_id]["influence_token"],
+                    order=raw[region_id]["order"],
+                    order_house=raw[region_id]["order_house"],
+                )
+                for region_id in map_order
+            }
+        return self._regions
 
     @property
     def houses(self) -> dict[str, HouseView]:
-        raw = self._data()["houses"]
-        return {
-            house_id: HouseView(
-                house_id=house_id,
-                power=entry["power"],
-                supply_level=entry["supply_level"],
-                orders_available=list(entry["orders_available"]),
-                orders_placed=list(entry["orders_placed"]),
-                house_cards_available=list(entry["cards_available"]),
-                house_cards_used=list(entry["cards_used"]),
-                blade_used=entry["blade_used"],
-                passed=entry["passed"],
-                eliminated=entry["eliminated"],
-            )
-            for house_id, entry in raw.items()
-        }
+        self._sync()
+        if self._houses is None:
+            raw = self._data()["houses"]
+            self._houses = {
+                house_id: HouseView(
+                    house_id=house_id,
+                    power=entry["power"],
+                    supply_level=entry["supply_level"],
+                    orders_available=list(entry["orders_available"]),
+                    orders_placed=list(entry["orders_placed"]),
+                    house_cards_available=list(entry["cards_available"]),
+                    house_cards_used=list(entry["cards_used"]),
+                    blade_used=entry["blade_used"],
+                    passed=entry["passed"],
+                    eliminated=entry["eliminated"],
+                )
+                for house_id, entry in raw.items()
+            }
+        return self._houses
 
     @property
     def tracks(self) -> dict[Track, list[str]]:
-        raw = self._data()["tracks"]
-        return {Track(name): list(order) for name, order in raw.items()}
+        self._sync()
+        if self._tracks is None:
+            raw = self._data()["tracks"]
+            self._tracks = {Track(name): list(order) for name, order in raw.items()}
+        return self._tracks
 
     def track_position(self, house_id: str, track: Track) -> int:
         order = self.tracks[track]
@@ -341,27 +365,28 @@ class StateView:
 
 
 class RustGame:
-    """The Rust engine behind the Python engine's interface.
+    """The Rust engine behind the package's Python-shaped interface.
 
     Only the session surface is wrapped: enough for the CLI, the demo and a
     policy that reads the board. Building positions and running self-play go
     through the extension's own APIs (`set_region`, `selfplay`).
     """
 
-    #: The Python encoder memoises region blocks by *object identity*. This view
-    #: rebuilds its regions on every access, and CPython reuses the ids of the
-    #: discarded objects, so an identity-keyed memo can hand back another
-    #: region's block. Callers that accept a `RegionCache` disable it for this
-    #: game instead; the Rust encoder has its own cache.
-    region_memo_safe = False
-
     def __init__(self, inner, config: GameConfig | None = None) -> None:
+        from agot.engine.game import GameConfig  # noqa: PLC0415 - avoids a cycle
+
         self._inner = inner
         self._config = config or GameConfig()
         self.map = load_map()
+        #: Bumped by every step; `StateView` memoises against it.
+        self._version = 0
+        self._snapshot: dict | None = None
+        self._state_view = StateView(self)
 
     @classmethod
     def new(cls, config: GameConfig | None = None) -> RustGame:
+        from agot.engine.game import GameConfig  # noqa: PLC0415 - avoids a cycle
+
         config = config or GameConfig()
         extension = core()
         if extension is None:  # pragma: no cover - depends on the environment
@@ -381,10 +406,12 @@ class RustGame:
 
     @property
     def state(self) -> StateView:
-        return StateView(self)
+        return self._state_view
 
     def snapshot(self) -> dict:
-        return self._inner.snapshot()
+        if self._snapshot is None:
+            self._snapshot = self._inner.snapshot()
+        return self._snapshot
 
     def clone(self) -> RustGame:
         return RustGame(self._inner.clone(), self._config)
@@ -451,6 +478,8 @@ class RustGame:
                 and candidate.establish == action.establish
             ):
                 self._inner.step(candidate)
+                self._version += 1
+                self._snapshot = None
                 return
         raise ValueError(f"{action} is not a legal action in this position")
 

@@ -1,14 +1,15 @@
-"""Self-play driven by the Rust engine, when the extension is available.
+"""Self-play driven by the Rust engine.
 
 The training loop's hot path is here: whole games are played by
-``agot_core_ext.selfplay`` and the network is called once per *batch of leaves*
+``agot._core.selfplay`` and the network is called once per *batch of leaves*
 through :func:`leaf_evaluator`, so the interpreter only sees one call per batch
-instead of one per decision.
+instead of one per decision. Scripted opponent seats are the exception: the
+driver asks Python for one decision at a time, never one per simulation.
 
-This module is additive. :func:`agot.training.selfplay.batched_self_play` stays
-the reference implementation and keeps working without the extension; once the
-port is cut over, this becomes the only path and the two can be compared on the
-same plan.
+:func:`agot.training.selfplay.batched_self_play` is the entry point. It uses the
+Rust driver whenever the evaluator is model-backed and the games share one
+configuration, and falls back to the Python reference driver for hand-written
+evaluators or mixed configurations.
 
 Shapes match the Python driver exactly, so ``replay.py`` and ``trainer.py`` need
 no changes: a :class:`GameRecord` holds :class:`Example` objects with
@@ -25,18 +26,18 @@ from agot.training.parallel import SelfPlayPlan
 from agot.training.replay import Example
 from agot.training.selfplay import GameRecord
 
-#: The extension's module name. Imported lazily so a torch-free or
-#: extension-free environment can import this module without failing.
-MODULE = "agot_core_ext"
+#: The extension's module name. Imported lazily so a torch-free environment can
+#: import this module without failing.
+MODULE = "agot._core"
 
 
 def core():
     """The extension module, or ``None`` when it is not installed."""
     try:
-        import agot_core_ext  # noqa: PLC0415 - deliberately lazy
+        from agot import _core  # noqa: PLC0415 - deliberately lazy
     except ImportError:  # pragma: no cover - depends on the environment
         return None
-    return agot_core_ext
+    return _core
 
 
 def available() -> bool:

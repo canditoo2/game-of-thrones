@@ -35,8 +35,7 @@ from agot.engine.observation import (
     ACTION_DIM,
     N_HOUSES,
     STATE_DIM,
-    RegionCache,
-    encode_action_into,
+    encode_actions,
     encode_state,
 )
 
@@ -146,19 +145,11 @@ class PolicyValueNet(nn.Module):
         """
         actions = list(actions)
         state = torch.from_numpy(encode_state(game)).unsqueeze(0)
-        action_tensor = np.zeros((1, len(actions), ACTION_DIM), dtype=np.float32)
-        actor = game.state.active_house
-        # The identity-keyed memo is unsafe for a view that rebuilds its region
-        # objects on every read (see `RustGame.region_memo_safe`).
-        region_cache: dict[str, np.ndarray] | None = (
-            {} if getattr(game, "region_memo_safe", True) else None
-        )
-        for column, action in enumerate(actions):
-            encode_action_into(game, action, action_tensor[0, column], actor, region_cache)
+        action_tensor = torch.from_numpy(
+            encode_actions(game, actions, game.state.active_house)
+        ).unsqueeze(0)
         mask = torch.ones((1, len(actions)), dtype=torch.float32)
-        logits, values = self.forward(
-            state, torch.from_numpy(action_tensor), mask
-        )
+        logits, values = self.forward(state, action_tensor, mask)
         probs = torch.softmax(logits[0], dim=-1).cpu().numpy()
         return actions, probs.astype(np.float32), values[0].cpu().numpy()
 
@@ -180,27 +171,21 @@ class PolicyValueNet(nn.Module):
         counts = [len(actions) for _, actions in requests]
         state = np.stack([encode_state(game) for game, _ in requests])
         total = sum(counts)
-        action_tensor = np.zeros((total, ACTION_DIM), dtype=np.float32)
         index = np.empty(total, dtype=np.int64)
-        # One memo per ``(actor, orders_revealed)``, shared by every leaf: the
-        # leaves of a batch are usually the same position seen through several
-        # hidden worlds, so they share almost every region object and a per-leaf
-        # memo recomputed the same blocks once per world.
-        caches: dict[tuple[str | None, bool], RegionCache] = {}
+        # One call per leaf: the Rust encoder writes its whole candidate matrix
+        # in one go, so there is no per-candidate Python work left.
+        rows: list[np.ndarray] = []
         cursor = 0
         for row, (game, actions) in enumerate(requests):
-            actor = game.state.active_house
-            region_cache = (
-                caches.setdefault((actor, game.state.orders_revealed), {})
-                if getattr(game, "region_memo_safe", True)
-                else None
-            )
-            for action in actions:
-                encode_action_into(
-                    game, action, action_tensor[cursor], actor, region_cache
-                )
-                index[cursor] = row
-                cursor += 1
+            matrix = encode_actions(game, actions, game.state.active_house)
+            rows.append(matrix)
+            index[cursor : cursor + len(actions)] = row
+            cursor += len(actions)
+        action_tensor = (
+            np.concatenate(rows, axis=0)
+            if rows
+            else np.zeros((0, ACTION_DIM), dtype=np.float32)
+        )
         logits, values = self.forward_packed(
             torch.from_numpy(state),
             torch.from_numpy(action_tensor),

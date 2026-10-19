@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from agot.agents.base import Policy, outcome_vector
 from agot.agents.mcts import MCTS
-from agot.engine.game import Game, GameConfig, PythonGame
+from agot.engine.game import Game, GameConfig
 from agot.engine.observation import HOUSE_ORDER, observe
 from agot.training.replay import Example
 
@@ -62,15 +62,9 @@ def play_game(
     config: GameConfig | None = None,
     *,
     step_limit: int = DEFAULT_STEP_LIMIT,
-    game_class: type[Game] | None = None,
 ) -> GameRecord:
-    """Play one game with ``policies`` (one per house) and record every decision.
-
-    ``game_class`` defaults to whichever engine the seam selected. The batched
-    reference driver passes the Python class explicitly so the two reference
-    paths are compared against the same engine.
-    """
-    game = (game_class or Game).new(config or GameConfig())
+    """Play one game with ``policies`` (one per house) and record every decision."""
+    game = Game.new(config or GameConfig())
     records: list[tuple[Example, ...]] = []
     steps = 0
 
@@ -207,11 +201,9 @@ def batched_self_play(
         return rust_records
     LAST_BACKEND = "python"
 
-    # The reference driver is the scripted-seat fallback. It deliberately uses
-    # the Python implementation rather than the seam: the Rust driver cannot
-    # serve scripted opponents yet, and running Python MCTS over the Rust view
-    # would be much slower than the reference engine it is replacing.
-    games = [PythonGame.new(config) for config in configs]
+    # The reference driver is the fallback for hand-written evaluators and
+    # mixed configurations. It drives the same Rust game as everything else.
+    games = [Game.new(config) for config in configs]
     seat_policies: list[dict[str, Policy]] = []
     for index, game in enumerate(games):
         table: dict[str, Policy] = {}

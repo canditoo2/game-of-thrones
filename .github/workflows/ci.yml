@@ -17,6 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -34,13 +40,19 @@ jobs:
         run: pytest -q
 
   # The RL stack is checked separately so that a PyTorch wheel problem never
-  # blocks the (numpy-only) rules engine from being verified.
+  # blocks the engine from being verified. The extension is built here too.
   test-with-torch:
     runs-on: ubuntu-latest
     continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
 
       - uses: actions/setup-python@v5
         with:
@@ -56,9 +68,8 @@ jobs:
       - name: Test (RL)
         run: pytest -q --no-header
 
-  # The Rust engine: its own tests, then the extension it builds, then the whole
-  # Python suite against that extension. `tests/test_rust_engine.py` skips itself
-  # when the module is missing, so the jobs above stay independent of this one.
+  # The Rust engine: its own tests, its lint/format gates, then the whole Python
+  # suite through the extension that the package build installs.
   rust:
     runs-on: ubuntu-latest
 
@@ -79,7 +90,9 @@ jobs:
 
       - name: Lint
         working-directory: rust
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy -p agot-py --all-targets -- -D warnings
 
       - name: Test (engine)
         working-directory: rust
@@ -90,16 +103,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Build the extension
+      - name: Install the package (builds the extension)
         run: |
-          python -m pip install --upgrade pip maturin
-          maturin build --release --out dist --manifest-path rust/crates/agot-py/Cargo.toml
-          pip install dist/*.whl
-
-      - name: Install the package
-        run: pip install -e ".[dev,rl]"
-        # torch is needed by the training-loop adapter test; the extension is
-        # already installed from the wheel above.
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,rl]"
 
       - name: Test (Rust engine)
         run: pytest -q --no-header

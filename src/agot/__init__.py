@@ -3,16 +3,16 @@
 The package is split into three layers:
 
 ``agot.engine``
-    A pure-Python (numpy-only) rules engine: map data, game state, legal
-    actions, combat resolution and the round loop.
+    A thin Python facade over the Rust engine: the ``Game`` session view,
+    actions, static map data and the encoder entry points.
 ``agot.agents``
     Policies that choose actions, including a random baseline and a
     neural-network-guided Monte Carlo tree search.
 ``agot.nn`` / ``agot.training``
     The policy/value network and the self-play training loop.
 
-The rules engine is deliberately free of any PyTorch dependency so it can be
-tested and simulated on machines without a GPU or without torch installed.
+The engine is a Rust extension (`agot._core`); the Python layer depends only on
+numpy, and PyTorch remains optional for the network and training loop.
 """
 
 from agot.engine.game import Game, GameConfig

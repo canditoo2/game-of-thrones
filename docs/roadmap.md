@@ -362,7 +362,7 @@ they should be fixed before expecting a strong agent.
 
 ## Rust engine port
 
-20. **Move the engine, search and encoder to Rust.** *(in progress)* The engine
+20. **Move the engine, search and encoder to Rust.** *(done)* The engine
     is the binding constraint on training throughput: profiling neural self-play
     on this machine puts ~61% of wall time in the Python engine, search and
     observation encoder, and only ~39% in the torch matmuls. The port targets
@@ -375,11 +375,12 @@ they should be fixed before expecting a strong agent.
     those exist to prevent cannot be expressed. Pending effects are enums rather
     than `dict[str, Any]`, and the per-node log is off during search.
 
-    Validation: `tools/dump_fixture.py` records action scripts and full state
-    fingerprints from the Python engine, and the parity tests replay them against
-    Rust, comparing the acting house, the canonical legal-action list at every
-    decision and the whole position at the end. Mismatches name the scenario, the
-    decision index and the first differing field.
+    Validation: a recorded corpus (action scripts plus full state fingerprints,
+    made with the Python reference before it was retired) is replayed by the
+    parity tests, comparing the acting house, the canonical legal-action list at
+    every decision and the whole position at the end. Mismatches name the
+    scenario, the decision index and the first differing field. The corpus and
+    the encoder golden vectors are frozen regression pins now.
 
     Measured (`cargo bench --bench clone_step`, release, this machine): `State`
     clone 364 ns against Python's 5 900 ns (16×), `Game` clone 432 ns against
@@ -433,24 +434,16 @@ they should be fixed before expecting a strong agent.
     Wildling attack, `max_rounds`/`victory_castles`, a settable `winner` and the
     log), `RustGame` keeps the `GameConfig` it was built with, and the session
     tier grew `pending_battle`, `wildling_attack`, `log` and `max_rounds` /
-    `victory_castles` getters. With the ported regressions landed,
-    `AGOT_ENGINE=rust` plays a full greedy demo to a winner.
-
-    The whole Python suite now passes with `AGOT_ENGINE=rust` as well as with
-    the Python engine — the write tier the old plan called for is no longer
-    needed by it, because the tests that built positions by hand were retired
-    with their Rust counterparts. Two seam problems surfaced on the way. PIMC
-    used to resample through `state.mut`, which the read view does not have, so
-    `hidden.determinize` now delegates to a `determinize(observer, seed)` method
-    that runs the Rust implementation (the seed is still drawn from the caller's
-    generator, so seeded runs stay reproducible). And the Python encoder's region
-    memo keys on object identity, while the view rebuilds its regions on every
-    read and CPython reuses the old ids: a stale block could be served for a
-    different region, which showed up as tiny nondeterministic policy shifts in
-    the NN tests. `RustGame.region_memo_safe = False` makes `predict_actions` /
-    `predict_many` skip that memo (the Rust encoder has its own cache). The
-    differential tests also import the reference class as `PythonGame`, so
-    `AGOT_ENGINE=rust` cannot silently compare Rust with itself.
+    `victory_castles` getters. The whole Python suite then ran on the view too —
+    the write tier the old plan called for was no longer needed, because the
+    tests that built positions by hand had been retired with their Rust
+    counterparts. Two view problems surfaced on the way. PIMC used to resample
+    through `state.mut`, which the read view does not have, so
+    `hidden.determinize` was routed to the Rust implementation (the seed is still
+    drawn from the caller's generator, so seeded runs stay reproducible). And the
+    Python encoder's region memo keyed on object identity while the view rebuilt
+    its regions on every read, so CPython could reuse an id and serve a stale
+    block; that memo disappeared when the encoder moved into the extension.
 
     The duplicated Python tests were then retired rather than kept in parallel:
     `test_rules_fixes.py`, `test_combat.py`, `test_cross_house_support.py`,
@@ -462,27 +455,26 @@ they should be fixed before expecting a strong agent.
     `combat_semantics.rs` had deliberately left to `Game._combat_actions` moved
     into `support_semantics.rs`, and the clone-isolation invariant gained the
     reverse-direction test that the old copy-on-write bug needed (stepping the
-    *source* must not reach an existing clone). The Python suite is now the layer
-    above the engine — 103 tests across the agents, training loop, NN, CLI and
-    the extension itself.
+    *source* must not reach an existing clone).
 
-    The seam now selects the Rust engine automatically when the extension is
-    installed (`AGOT_ENGINE=python` still forces the reference; an install
-    without the extension falls back to it). The scripted-seat self-play
-    fallback was settled the same way: the *reference* driver builds
-    `PythonGame` directly, and `play_game` takes an optional `game_class` so the
-    parity test compares the two reference paths on one engine. The CLI, agents
-    and the default `play_game` follow the seam and therefore run Rust by
-    default.
-
-    Scripted opponent seats now run on the Rust driver too: `selfplay` takes a
+    Scripted opponent seats run on the Rust driver too: `selfplay` takes a
     `scripted_decider` callback, and a scripted seat costs one Python policy
     call per *decision* (never per simulation) while every search seat stays
     native. The packed result grew a per-game example count, because
     `record_opponents=False` makes a game's decisions and recorded examples
-    differ. That leaves the frozen Python engine needed only by the reference
-    driver used for hand-written evaluators, mixed configurations and the
-    no-extension fallback.
+    differ. The Python reference driver is now only a fallback for hand-written
+    evaluators and mixed configurations, and it drives the same Rust game.
 
-    Remaining: the maturin packaging switch, and deleting the Python engine
-    (which now means porting or retiring that reference driver too).
+    The Python engine was then deleted. `agot.engine.game` is a small facade:
+    `GameConfig` plus `Game = RustGame`; `engine/observation.py` forwards state
+    and action encoding to the extension (one call per leaf, not per candidate),
+    and `engine/hidden.py` delegates determinization. The Game view caches its
+    snapshot per step, which brought the greedy demo from 82 s back to ~0.2 s.
+    The package is built with maturin: one abi3 wheel contains the Python package
+    and `agot._core`, so a source install needs a Rust toolchain and a wheel
+    install does not. The differential fixture and encoder golden vectors stay
+    checked in as frozen regression pins; their Python generators were retired
+    with the engine. The Python suite is the layer above the engine — 85 tests
+    across the facade, agents, training loop, NN, CLI and the extension.
+
+    **The Rust port is complete.**

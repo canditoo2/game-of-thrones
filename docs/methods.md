@@ -53,9 +53,9 @@ Kept short; each entry is *what it is → pro → con → verdict*.
 
 * **AlphaZero-style self-play (MCTS + scorer net).** The existing scaffold.
   General and needs no human data, but it assumes two-player perfect
-  information; this game is neither. Rough pure-Python throughput makes it
-  impractical without an engine speed-up. **Chosen backbone, after the speed and
-  hidden-information fixes.**
+  information; this game is neither. Rough pure-Python throughput made it
+  impractical, which is what drove the Rust port (now the engine, search and
+  encoder). **Chosen backbone, after the speed and hidden-information fixes.**
 * **Perfect-information MCTS with root determinization (PIMC).** Sample a
   consistent hidden state, search it, average. Cheap to add and removes the
   "search sees face-down orders" leak, but suffers strategy fusion and needs

@@ -1,19 +1,13 @@
 """Integration tests for the Rust engine extension (``agot._core``).
 
-Skipped when the extension is not installed, so the numpy-only CI job and a
-checkout without a built wheel still run the rest of the suite.
+The extension is the engine now: ``agot.engine.game.Game`` is its session view
+and ``agot.engine.observation`` forwards to its encoder. These tests exercise
+that seam - actions, stepping, snapshots, the position builder, observations,
+the batch self-play driver and the training-loop adapter.
 
-Why the decks are off
----------------------
-The two engines shuffle with different generators, so a game can only be compared
-move for move when nothing is *drawn*. With ``use_westeros_decks=False`` both
-engines play the identical game for a given seed and action policy, which is what
-these tests assert; the card-drawing phases are covered by the Rust unit tests
-and by the differential corpus.
-
-Once the port is finished these tests become the acceptance gate for swapping the
-Python engine out: the same assertions run against whichever implementation
-``agot.engine`` resolves to.
+The engine's own rules/parity gates live in the Rust crate; a game is played
+with ``use_westeros_decks=False`` here only where a deterministic script keeps a
+test short and independent of shuffle order.
 """
 
 from __future__ import annotations
@@ -21,13 +15,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from agot import _core as core
 from agot.engine.actions import Action, ActionKind
-from agot.engine.game import GameConfig, PythonGame
+from agot.engine.game import GameConfig
 from agot.engine.observation import HOUSE_ORDER
-
-core = pytest.importorskip("agot_core_ext")
-
-SEEDS = (1, 2, 3, 7, 11, 13)
 
 #: Deterministic action policies: first, last, and a fixed pseudo-random index.
 POLICIES = {
@@ -35,18 +26,6 @@ POLICIES = {
     "last": lambda count, step: count - 1,
     "mixed": lambda count, step: (step * 7 + 3) % count,
 }
-
-
-def play_python(seed: int, policy, decks: bool = False):
-    game = PythonGame.new(GameConfig(seed=seed, use_westeros_decks=decks))
-    steps = 0
-    while not game.is_terminal():
-        actions = game.legal_actions()
-        if not actions:
-            break
-        game.step(actions[policy(len(actions), steps)])
-        steps += 1
-    return steps, game.state.round, game.winner()
 
 
 def play_rust(seed: int, policy, decks: bool = False):
@@ -66,14 +45,6 @@ def test_backend_identity():
     assert core.__version__
 
 
-@pytest.mark.parametrize("policy_name", sorted(POLICIES))
-@pytest.mark.parametrize("seed", SEEDS)
-def test_rust_plays_the_same_game_as_python(seed: int, policy_name: str):
-    """Same seed, same policy, no card draws: identical game, step for step."""
-    policy = POLICIES[policy_name]
-    assert play_rust(seed, policy) == play_python(seed, policy)
-
-
 def test_rust_reaches_a_winner_with_the_decks_on():
     """The default configuration must at least terminate with a winner."""
     steps, rounds, winner = play_rust(1, POLICIES["first"], decks=True)
@@ -82,7 +53,7 @@ def test_rust_reaches_a_winner_with_the_decks_on():
     assert winner in {"baratheon", "lannister", "stark", "greyjoy", "tyrell", "martell"}
 
 
-def test_legal_actions_compare_and_hash_like_the_python_ones():
+def test_actions_compare_and_hash_by_value():
     """`action in game.legal_actions()` and set membership must keep working."""
     game = core.Game.new(seed=1, use_westeros_decks=False)
     actions = game.legal_actions()
@@ -131,33 +102,26 @@ def test_summary_reports_the_same_shape_as_python():
     }
 
 
-def test_observation_is_bit_exact_with_the_python_encoder():
-    """The network input must not change when the engine does.
-
-    A checkpoint's weights only mean anything against the encoding they were
-    trained on, so the two encoders have to agree to the last bit — not
-    approximately.
-    """
+def test_observation_wrapper_matches_the_extension():
+    """`agot.engine.observation` must be the extension's encoder, not a copy."""
+    from agot.engine import rust
     from agot.engine.observation import ACTION_DIM, STATE_DIM, observe
 
     assert core.observation_dims() == (STATE_DIM, ACTION_DIM)
 
-    rust = core.Game.new(seed=1, use_westeros_decks=False)
-    python = PythonGame.new(GameConfig(seed=1, use_westeros_decks=False))
-
+    game = rust.RustGame.new(GameConfig(seed=1, use_westeros_decks=False))
     for step in range(40):
-        actor, state, matrix = rust.observe()
-        reference = observe(python)
-        assert actor == reference.actor
-        assert state.shape == (STATE_DIM,)
-        assert matrix.shape == (len(reference.actions), ACTION_DIM)
-        assert np.array_equal(state, reference.state_features), f"step {step}: state"
-        assert np.array_equal(matrix, reference.action_features), f"step {step}: actions"
-        if rust.is_terminal():
+        actor, state, matrix = game._inner.observe()
+        wrapped = observe(game)
+        assert wrapped.actor == (actor or "")
+        assert wrapped.state_features.shape == (STATE_DIM,)
+        assert wrapped.action_features.shape == (len(wrapped.actions), ACTION_DIM)
+        assert np.array_equal(wrapped.state_features, state), f"step {step}: state"
+        assert np.array_equal(wrapped.action_features, matrix), f"step {step}: actions"
+        if game.is_terminal():
             break
-        action_index = (step * 5 + 1) % len(matrix)
-        rust.step(rust.legal_actions()[action_index])
-        python.step(python.legal_actions()[action_index])
+        action_index = (step * 5 + 1) % len(wrapped.actions)
+        game.step(game.legal_actions()[action_index])
 
 
 def test_batched_self_play_uses_the_rust_driver():
@@ -234,29 +198,53 @@ def test_batched_self_play_can_record_scripted_seats_from_rust():
     assert any(example.player == 0 for example in records[0].examples)
 
 
-def test_rust_snapshot_matches_the_python_position():
-    """The read-only view must describe the same position, field for field.
+def test_rust_view_matches_its_own_snapshot():
+    """Every field the Python-shaped view exposes comes from the engine snapshot."""
+    from agot.engine import rust
+    from agot.engine.enums import UnitType
 
-    This is what lets a caller inspect a position without caring which engine
-    produced it — and it is the structure the differential corpus records, so a
-    mismatch here is the same failure the Rust-side parity test would report.
-    """
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-    from dump_fixture import fingerprint
-
-    rust = core.Game.new(seed=5, use_westeros_decks=False)
-    python = PythonGame.new(GameConfig(seed=5, use_westeros_decks=False))
-
+    game = rust.RustGame.new(GameConfig(seed=5, use_westeros_decks=False))
     for step in range(60):
-        assert rust.snapshot() == fingerprint(python), f"step {step}"
-        if rust.is_terminal():
+        snapshot = game.snapshot()
+        state = game.state
+        assert state.round == snapshot["round"]
+        assert state.phase.value == snapshot["phase"]
+        assert state.active_house == snapshot["active_house"]
+        assert state.winner == snapshot["winner"]
+
+        for region_id, raw in snapshot["regions"].items():
+            view = state.regions[region_id]
+            assert view.controller == raw["controller"]
+            assert view.owner == raw["owner"]
+            assert view.order == raw["order"]
+            assert view.order_house == raw["order_house"]
+            assert view.units == {
+                UnitType(name): count for name, count in raw["units"].items() if count
+            }
+            assert view.routed == {
+                UnitType(name): count for name, count in raw["routed"].items() if count
+            }
+            assert view.garrison == raw["garrison"]
+            assert view.neutral_force == raw["neutral_force"]
+
+        for house_id, raw in snapshot["houses"].items():
+            view = state.houses[house_id]
+            assert view.power == raw["power"]
+            assert view.supply_level == raw["supply_level"]
+            assert view.orders_placed == raw["orders_placed"]
+            assert view.orders_available == raw["orders_available"]
+            assert view.house_cards_available == raw["cards_available"]
+            assert view.house_cards_used == raw["cards_used"]
+            assert view.blade_used == raw["blade_used"]
+
+        assert {
+            track.value: list(order) for track, order in state.tracks.items()
+        } == snapshot["tracks"]
+
+        if game.is_terminal():
             break
-        index = (step * 3 + 1) % len(rust.legal_actions())
-        rust.step(rust.legal_actions()[index])
-        python.step(python.legal_actions()[index])
+        index = (step * 3 + 1) % len(game.legal_actions())
+        game.step(game.legal_actions()[index])
 
 
 def test_position_builder_writes_through_to_the_engine():
@@ -320,72 +308,6 @@ def test_position_builder_builds_actions_the_engine_accepts():
     game.set_winner(house)
     assert game.snapshot()["winner"] == house
     assert game.is_terminal()
-
-
-def test_rust_game_views_match_the_python_engine():
-    """The Python-shaped view must be faithful, field by field.
-
-    This is what lets a call site move to the Rust engine without changing a
-    line: the same Action objects, the same `state.regions[rid].controller`,
-    `state.houses[h].power` and `state.tracks[Track]` reads.
-    """
-    from agot.engine import rust
-
-    rust_game = rust.RustGame.new(GameConfig(seed=7, use_westeros_decks=False))
-    python_game = PythonGame.new(GameConfig(seed=7, use_westeros_decks=False))
-
-    for step in range(50):
-        assert rust_game.legal_actions() == python_game.legal_actions()
-
-        rust_state, python_state = rust_game.state, python_game.state
-        assert rust_state.round == python_state.round
-        assert rust_state.phase is python_state.phase
-        assert rust_state.active_house == python_state.active_house
-        assert rust_state.winner == python_state.winner
-        assert rust_state.tracks == {
-            track: list(python_state.tracks[track]) for track in python_state.tracks
-        }
-
-        rust_regions = rust_state.regions
-        for region_id, python_region in python_state.regions.items():
-            view = rust_regions[region_id]
-            assert view.controller == python_region.controller
-            assert view.owner == python_region.owner
-            assert view.order == python_region.order
-            assert view.order_house == python_region.order_house
-            assert view.units == {
-                unit: count for unit, count in python_region.units.items() if count
-            }
-            assert view.routed == {
-                unit: count for unit, count in python_region.routed.items() if count
-            }
-            assert view.total() == python_region.total()
-            assert view.total(include_routed=False) == python_region.total(
-                include_routed=False
-            )
-            assert view.is_empty() == python_region.is_empty()
-
-        rust_houses = rust_state.houses
-        for house_id, python_house in python_state.houses.items():
-            view = rust_houses[house_id]
-            assert view.power == python_house.power
-            assert view.supply_level == python_house.supply_level
-            assert view.orders_placed == python_house.orders_placed
-            assert view.orders_available == python_house.orders_available
-            assert view.house_cards_available == python_house.house_cards_available
-            assert view.blade_used == python_house.blade_used
-
-        # A policy can read the board through the view: the greedy score helper
-        # uses exactly these calls.
-        assert rust_state.controlled_regions("stark") == python_state.controlled_regions(
-            "stark"
-        )
-
-        if rust_game.is_terminal():
-            break
-        index = (step * 3 + 1) % len(rust_game.legal_actions())
-        rust_game.step(rust_game.legal_actions()[index])
-        python_game.step(python_game.legal_actions()[index])
 
 
 def test_rust_game_rejects_an_action_the_engine_did_not_offer():
@@ -547,9 +469,6 @@ def test_rust_engine_driver_feeds_the_training_loop():
     from agot.nn.model import PolicyValueNet
     from agot.training import rust_engine
     from agot.training.parallel import SelfPlayPlan
-
-    if not rust_engine.available():  # pragma: no cover - depends on the environment
-        pytest.skip("the Rust extension is not installed")
 
     model = PolicyValueNet(hidden=32, trunk_layers=1)
     plan = SelfPlayPlan(

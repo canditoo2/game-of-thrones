@@ -22,7 +22,7 @@ use pyo3::types::{PyDict, PyType};
 use numpy::IntoPyArray;
 
 use agot_core::action::{ActionKind, Side};
-use agot_core::enums::{HouseId, UnitType, N_HOUSES};
+use agot_core::enums::{CardId, HouseId, UnitType, N_HOUSES};
 use agot_core::game::{EngineError, Game as CoreGame};
 use agot_core::map::DataSet;
 use agot_core::observation;
@@ -410,6 +410,60 @@ impl PyGame {
         Ok((actor, state, matrix))
     }
 
+    /// The network's state features for this position.
+    ///
+    /// `actor` defaults to the acting house, as `observation.encode_state`
+    /// does; the encoder itself lives in the core crate.
+    fn encode_state(
+        &self,
+        py: Python<'_>,
+        actor: Option<&str>,
+    ) -> PyResult<Py<numpy::PyArray1<f32>>> {
+        let actor = actor
+            .map(|name| {
+                HouseId::from_name(name)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown house {name:?}")))
+            })
+            .transpose()?;
+        let features = observation::encode_state(&self.game.state, &self.game.data, actor);
+        Ok(numpy::PyArray1::from_vec(py, features).unbind())
+    }
+
+    /// One feature row per candidate action, row-aligned with `actions`.
+    ///
+    /// The row format is `encode_action_into`'s: callers pass actions built by
+    /// [`PyGame::action`], so an action from the Python facade encodes exactly
+    /// as the engine would encode its own.
+    fn encode_actions(
+        &self,
+        py: Python<'_>,
+        actions: Vec<PyRef<'_, PyAction>>,
+        actor: Option<&str>,
+    ) -> PyResult<Py<numpy::PyArray2<f32>>> {
+        let actor = actor
+            .map(|name| {
+                HouseId::from_name(name)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown house {name:?}")))
+            })
+            .transpose()?;
+        let rows = actions.len();
+        let mut matrix = vec![0.0f32; rows * observation::ACTION_DIM];
+        let mut cache = observation::RegionCache::new();
+        for (row, action) in actions.iter().enumerate() {
+            observation::encode_action_into(
+                &self.game.state,
+                &self.game.data,
+                &action.inner,
+                actor,
+                &mut matrix[row * observation::ACTION_DIM..(row + 1) * observation::ACTION_DIM],
+                &mut cache,
+            );
+        }
+        let array = numpy::ndarray::Array2::from_shape_vec((rows, observation::ACTION_DIM), matrix)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        Ok(array.into_pyarray(py).unbind())
+    }
+
     /// The whole position as plain Python data.
     ///
     /// This is the same structure the differential corpus records, so a Rust
@@ -674,8 +728,19 @@ impl PyGame {
                     .ok_or_else(|| PyValueError::new_err(format!("unknown order {key:?}")))
             })
             .transpose()?;
-        let card_id = match (house_id, card.as_deref()) {
-            (Some(house), Some(id)) => {
+        let card_id = match (kind, house_id, card.as_deref()) {
+            // A holders'-choice action stores a card id from the Westeros deck,
+            // with the literal "none" as the no-effect sentinel.
+            (ActionKind::WesterosChoice, _, Some("none")) => {
+                Some(CardId(agot_core::state::NONE_OPTION as u8))
+            }
+            (ActionKind::WesterosChoice, _, Some(id)) => {
+                let index = data.westeros.card_index(id).ok_or_else(|| {
+                    PyValueError::new_err(format!("unknown Westeros card {id:?}"))
+                })?;
+                Some(CardId(index as u8))
+            }
+            (_, Some(house), Some(id)) => {
                 Some(data.house_cards.card_index(house, id).ok_or_else(|| {
                     PyValueError::new_err(format!("{house} has no house card {id:?}"))
                 })?)
@@ -751,6 +816,7 @@ fn observation_dims() -> (usize, usize) {
 }
 
 #[pymodule]
+#[pyo3(name = "_core")]
 fn agot_core_ext(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(backend, module)?)?;
     module.add_function(wrap_pyfunction!(action_kinds, module)?)?;

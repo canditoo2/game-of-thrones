@@ -14,62 +14,58 @@ into the layer below it, which keeps the rules code testable and torch-free.
             └───────────────┬──────────────┘   └───────────────────────┘
                             │ drives
             ┌───────────────▼──────────────────────────────────────┐
-            │  engine/   map · state · actions · combat · game       │
-            │            house_cards · observation (features)        │
+            │  engine/   Game facade · state view · actions · map    │
+            └───────────────┬──────────────────────────────────────┘
+                            │ calls
+            ┌───────────────▼──────────────────────────────────────┐
+            │  rust/crates/agot-core   rules · encoder · search      │
+            │  rust/crates/agot-py     PyO3 session + batch tiers    │
             └────────────────────────────────────────────────────────┘
-                            numpy only
+                            numpy only on the Python side
 ```
 
 ## The engine
 
-`engine/` is a plain, deterministic simulator with no ML dependency:
+The rules live in `rust/crates/agot-core`; Python owns the layer above it.
 
-* `map.py` loads the board from JSON and runs structural validation on every
-  import of the data (symmetry of adjacency, ports next to their host and sea,
-  unique home areas, ...).
-* `state.py` is a dataclass tree (`GameState` → `HouseState`, `RegionState`)
-  designed to be deep-copied cheaply, because MCTS clones it constantly.
-* `game.py` owns phase progression. `Game.step(action)` applies one player
-  decision and then **auto-advances** through every phase that needs no input,
-  stopping only when a player must decide (or the game ends). That keeps the
-  agent loop simple: ask for legal actions, pick one, repeat.
-* `GameState.orders_revealed` tracks hidden information: Order tokens are face
-  down during Planning and the Raven step and revealed when the Action Phase
-  begins. `observation.py` masks the identity of another house's hidden order
-  (its presence stays visible). MCTS still searches the true state; a PIMC root
-  determinisation is the follow-up.
-* `combat.py` resolves battles from two *explicit* unit pools. Keeping the
-  attacker's and defender's units separate is essential: casualty removal has to
-  know whose units are whose. Support is fed in as explicit per-area
-  declarations (`support_from_choices`); `resolve_battle` also accepts the old
-  self-directed derivation when no declarations are supplied.
-* `house_cards.py` applies each House card's special ability around a battle.
-  `resolve_battle` is kept free of board mutation: it *records* deferred effects
-  (Order removals, Influence moves, card swaps) on a `BattleContext`, and
-  `resolve_and_apply` commits them and runs the post-combat abilities.
+Rust:
 
-`Game.clone()` is the backbone of search. It shallow-copies the state's region
-dict and gives the clone a fresh RNG seeded from the parent, so a cloned game is
-independent. Regions are shared between a state and the states cloned from it
-until someone writes one: the engine fetches a region to mutate with
-`GameState.mut(region_id)`, which takes a private copy on the first write (see
-the copy-on-write note in `state.py`). Cloning also drops the *source's* record of
-which regions it had taken private, because those objects are shared again from
-that moment — both sides re-copy on their next write. A step writes about six of
-the 58 regions, so this costs a fraction of copying the board per node. Two tests
-pin the invariant, one per direction: stepping a clone must not touch the source,
-and stepping the source must not touch a clone already taken. The pending-effect
-dicts (`wildling_attack`, `westeros_choice`, `pending_battle`, `pending_march`)
-are rebuilt structurally rather than with `copy.deepcopy`, and the copy is handed
-a memo that rebinds any back-reference to the state: a resolved battle's
-`BattleResult` carries a context whose `state` is read *and written* by the
-post-combat House-card abilities, so it has to point at the clone. A
-clone does not re-run the phase machine: the source position is already settled
-and advancing would move the Action Phase turn-order cursor.
+* `map.rs` loads the board from JSON (the files remain in `src/agot/data`) and
+  validates adjacency symmetry, ports and home areas.
+* `state.rs` owns the board *by value* (`State::clone` is a structural copy; the
+  old copy-on-write machinery is gone), and `setup.rs` deals the opening.
+* `game.rs`, `phases.rs` and `action_phase.rs` own phase progression.
+  `Game::step` applies one player decision and **auto-advances** through every
+  phase that needs no input, stopping only when a player must decide. Legal
+  actions are non-empty only then.
+* `combat.rs` resolves battles from two *explicit* unit pools (casualty removal
+  must know whose units are whose), with support fed in as per-area
+  declarations. `house_cards.rs` implements all 42 abilities; the pure part
+  records deferred effects on a `BattleContext`, and the apply step commits
+  them.
+* `hidden.rs` resamples face-down Orders and secret bids for PIMC;
+  `observation.rs` is the encoder; `search.rs` is PUCT search with a pluggable
+  evaluator and PIMC aggregation.
+* `agot-py` is a thin binding in two tiers: a **session tier** (`Game`,
+  `legal_actions`, `step`, `observe`, `encode_state`, `encode_actions`,
+  `determinize`) and a **batch tier** (`selfplay`) that runs whole games in Rust
+  and calls the network once per leaf batch.
+
+Python:
+
+* `engine/game.py` is the facade: `GameConfig` and `Game = RustGame`.
+* `engine/rust.py` presents the objects the rest of the package expects: Python
+  `Action` dataclasses, a `state` whose regions/houses have attribute access,
+  the static map, `clone`/`step`/`observe`. The view caches its snapshot per
+  step and invalidates it on `step`, so reading a position is cheap and cannot
+  go stale.
+* `engine/observation.py` keeps the layout constants and forwards encoding to
+  the extension (one call per leaf); `engine/hidden.py` forwards determinization.
+* `engine/map.py` loads the static board data the facade and the agents read.
 
 ## Observation encoding
 
-`engine/observation.py` is the bridge to the network. It defines:
+`engine/observation.py` keeps the layout and forwards to `observation.rs`:
 
 * `encode_state(game) -> (97,)` — per-house blocks (castles, power, supply,
   track positions, unit counts, cards in hand) plus a global block (round,
@@ -127,9 +123,9 @@ many leaves in one pass. It concatenates every leaf's candidates into a single
 flat tensor rather than padding them up to the widest action set in the batch —
 on real batches that padding made the action and scorer trunks do 2.5× the rows
 they needed — and normalises each leaf's own slice with `segment_softmax`, so a
-leaf's distribution cannot depend on what else shares its batch. Encoding shares
-one region-block memo across the leaves, keyed on region object identity, since
-the leaves are usually the same position seen through several hidden worlds.
+leaf's distribution cannot depend on what else shares its batch. Each leaf's
+input comes from one call to the Rust encoder; there is no Python-side memo to
+go stale.
 
 Training (in `training/trainer.py`) minimises
 
@@ -157,10 +153,12 @@ penalty) grind the policy parameters to zero.
 
 ## Testing strategy
 
-The rules, combat, hidden-information and encoder gates have moved into the Rust
-crate; the Python suite covers the layer above the engine (agents, training,
+The rules, combat, hidden-information and encoder gates live in the Rust crate;
+the Python suite covers the layer above the engine (facade, agents, training,
 CLI). The retired Python copies of the rules/combat/encoder tests were ported
-one-for-one first, so no audit entry lost its regression.
+one-for-one first, so no audit entry lost its regression. The differential
+fixture and encoder golden vectors are frozen pins: they were recorded from the
+Python reference before it was deleted, and are never regenerated by hand.
 
 Rust (`cd rust && cargo test --release`):
 
@@ -181,8 +179,8 @@ Rust (`cd rust && cargo test --release`):
   tokens, secret bids, pool bookkeeping, seeding) and PIMC search/decide.
 * `src/observation.rs` and `tests/encoder_parity.rs` — encoder layout, hidden
   orders, slot initialisation, bounded actions, and bit-exact golden vectors.
-* `tests/engine_parity.rs` — complete games replayed against the Python
-  reference fingerprint for fingerprint.
+* `tests/engine_parity.rs` — complete games replayed against the frozen
+  reference fingerprints, field for field.
 
 Python:
 
@@ -196,5 +194,6 @@ Python:
   policy-head health checks (candidates scored differently, every parameter
   receiving gradient, cross-entropy reaching a learnable target's entropy).
   Skipped automatically when torch is absent.
-* `test_rust_engine.py` — the extension's acceptance gate (both engines play
-  identical games, the encoder agrees bit for bit through the binding).
+* `test_rust_engine.py` — the extension's acceptance gate: actions, stepping,
+  snapshots, the position builder, the encoder wrapper, the batch self-play
+  driver and the training-loop adapter.

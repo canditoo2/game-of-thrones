@@ -35,32 +35,31 @@ A Game of Thrones is an unusually awkward fit for textbook AlphaZero:
 ## Layout
 
 ```
+rust/crates/agot-core/   rules engine, observation encoder and PUCT search
+rust/crates/agot-py/     the abi3 Python extension (agot._core)
 src/agot/
-  engine/        pure-Python, numpy-only rules engine
-    map.py         board loading and structural validation
-    state.py       mutable game state (unit pools, tracks, supply)
-    actions.py     the action record and its kinds
-    combat.py      battle resolution and retreat
-    house_cards.py House card ability effects
-    game.py        setup, legal actions, phase progression, victory
-    observation.py state and per-action feature encoding
+  engine/        Python facade: Game/GameConfig, the state view, actions and map data
   agents/        policies: random baseline, greedy heuristic, PUCT MCTS
   nn/            the policy/value network (needs PyTorch)
   training/      self-play, replay buffer, trainer, evaluation
   cli.py         command-line entry point
-tests/           map, engine, combat, observation, agents, training, network
+tests/           engine facade, map, agents, training, network and the extension
 docs/            architecture, methods, roadmap and the rulebook fidelity audit
 ```
 
-The **rules engine depends only on `numpy`**. PyTorch is an optional extra
-(`.[rl]`), so the engine can be simulated and tested on a machine without it.
+The engine and search are Rust; the Python layer needs only `numpy` (PyTorch is
+the optional `.[rl]` extra). The build produces one abi3 extension, so a wheel
+built once works on Python 3.10 and later.
 
 ## Install
+
+Building from source needs a Rust toolchain (1.75 or newer); installing a
+published `agot` wheel does not.
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate          # Windows
-pip install -e ".[dev]"         # engine + tests + linter
+pip install -e ".[dev]"         # builds the Rust extension + tests + linter
 pip install -e ".[rl]"          # optional: adds PyTorch
 ```
 
@@ -128,7 +127,9 @@ while not game.is_terminal():
 print(game.summary())
 ```
 
-Run the tests with `pytest -q` and the linter with `ruff check src tests`.
+Run the Python layer with `pytest -q`, the engine, search and encoder gates with
+`cargo test --release` from `rust/`, and the linter with
+`ruff check src tests`.
 
 ## Run it on Google Colab
 
