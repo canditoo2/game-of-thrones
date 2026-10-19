@@ -1,0 +1,326 @@
+"""A Python-shaped view over the Rust engine.
+
+``agot.engine`` is still the Python implementation, and this module is the
+bridge the cutover is built on: it drives the extension's session tier but
+presents the same objects the rest of the package already expects — ``Action``
+dataclasses, a ``state`` whose regions and houses have attribute access, the
+static ``map``.
+
+Why a view rather than a rewrite of the call sites: everything from the CLI to
+``GreedyPolicy`` reads a position as ``game.state.regions[rid].controller`` and
+friends, and the tests do the same. Rebuilding those shapes here — from the
+Rust engine's own ``snapshot()`` — means a call site can move to the Rust engine
+without changing a line, which is what makes the cutover incremental instead of
+a big-bang change.
+
+Reading is complete; **writing is not**: a test that *builds* a position still
+needs the Python engine (or the extension's ``set_region``/``set_house``
+builder, which this module does not wrap yet). That is the remaining piece of
+the cutover, and it is deliberately not faked here.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from agot.engine.actions import Action, ActionKind
+from agot.engine.enums import OrderType, Phase, Track, UnitType
+from agot.engine.game import GameConfig
+from agot.engine.map import load_map
+
+MODULE = "agot_core_ext"
+
+
+def core():
+    """The extension module, or ``None`` when it is not installed."""
+    try:
+        import agot_core_ext  # noqa: PLC0415 - deliberately lazy
+    except ImportError:  # pragma: no cover - depends on the environment
+        return None
+    return agot_core_ext
+
+
+def available() -> bool:
+    """Whether the Rust engine can be used here."""
+    return core() is not None
+
+
+def _units(raw: dict[str, int]) -> dict[UnitType, int]:
+    """The snapshot's name-keyed counts as the enum-keyed mapping Python uses."""
+    return {
+        UnitType(name): count
+        for name, count in raw.items()
+        if count
+    }
+
+
+@dataclass
+class RegionView:
+    """One region, with the fields the rest of the package reads."""
+
+    region_id: str
+    controller: str | None = None
+    owner: str | None = None
+    units: dict[UnitType, int] = field(default_factory=dict)
+    routed: dict[UnitType, int] = field(default_factory=dict)
+    neutral_force: int = 0
+    garrison: int = 0
+    mustering_points: int = 0
+    influence_token: str | None = None
+    order: str | None = None
+    order_house: str | None = None
+
+    def total(self, *, include_routed: bool = True) -> int:
+        total = sum(self.units.values())
+        if include_routed:
+            total += sum(self.routed.values())
+        return total
+
+    def is_empty(self) -> bool:
+        return self.total(include_routed=False) == 0
+
+    def contains_house(self, house_id: str) -> bool:
+        return self.controller == house_id and not self.is_empty()
+
+    @property
+    def order_type(self) -> OrderType | None:
+        if self.order is None:
+            return None
+        from agot.engine.enums import ORDERS_BY_KEY
+
+        return ORDERS_BY_KEY[self.order].order_type
+
+
+@dataclass
+class HouseView:
+    """One house, with the fields the rest of the package reads."""
+
+    house_id: str
+    power: int = 0
+    supply_level: int = 0
+    orders_available: list[str] = field(default_factory=list)
+    orders_placed: list[str] = field(default_factory=list)
+    house_cards_available: list[str] = field(default_factory=list)
+    house_cards_used: list[str] = field(default_factory=list)
+    blade_used: bool = False
+    passed: bool = False
+    eliminated: bool = False
+
+    def stars_placed(self) -> int:
+        from agot.engine.enums import ORDERS_BY_KEY
+
+        return sum(1 for key in self.orders_placed if ORDERS_BY_KEY[key].starred)
+
+    def supply_limit(self) -> tuple[int, ...]:
+        from agot.engine.enums import SUPPLY_LIMITS
+
+        return SUPPLY_LIMITS[max(0, min(self.supply_level, len(SUPPLY_LIMITS) - 1))]
+
+
+class StateView:
+    """A position, rebuilt from the Rust engine's ``snapshot()``.
+
+    Rebuilt on every access rather than cached: the Rust state is the truth, and
+    a stale cache is exactly the class of bug the port removed.
+    """
+
+    def __init__(self, game: RustGame) -> None:
+        self._game = game
+
+    def _data(self) -> dict:
+        return self._game.snapshot()
+
+    @property
+    def round(self) -> int:
+        return self._data()["round"]
+
+    @property
+    def phase(self) -> Phase:
+        return Phase(self._data()["phase"])
+
+    @property
+    def active_house(self) -> str | None:
+        return self._data()["active_house"]
+
+    @property
+    def winner(self) -> str | None:
+        return self._data()["winner"]
+
+    @property
+    def regions(self) -> dict[str, RegionView]:
+        raw = self._data()["regions"]
+        # The snapshot arrives as a JSON object, whose keys are sorted; the
+        # Python engine iterates regions in *map* order, and call sites depend on
+        # it (`controlled_regions`, the planning order, the encoder's own order).
+        # Rebuilding in map order keeps the view faithful.
+        map_order = [region_id for region_id in self._game.map.regions if region_id in raw]
+        return {
+            region_id: RegionView(
+                region_id=region_id,
+                controller=raw[region_id]["controller"],
+                owner=raw[region_id]["owner"],
+                units=_units(raw[region_id]["units"]),
+                routed=_units(raw[region_id]["routed"]),
+                neutral_force=raw[region_id]["neutral_force"],
+                garrison=raw[region_id]["garrison"],
+                mustering_points=raw[region_id]["mustering_points"],
+                influence_token=raw[region_id]["influence_token"],
+                order=raw[region_id]["order"],
+                order_house=raw[region_id]["order_house"],
+            )
+            for region_id in map_order
+        }
+
+    @property
+    def houses(self) -> dict[str, HouseView]:
+        raw = self._data()["houses"]
+        return {
+            house_id: HouseView(
+                house_id=house_id,
+                power=entry["power"],
+                supply_level=entry["supply_level"],
+                orders_available=list(entry["orders_available"]),
+                orders_placed=list(entry["orders_placed"]),
+                house_cards_available=list(entry["cards_available"]),
+                house_cards_used=list(entry["cards_used"]),
+                blade_used=entry["blade_used"],
+                passed=entry["passed"],
+                eliminated=entry["eliminated"],
+            )
+            for house_id, entry in raw.items()
+        }
+
+    @property
+    def tracks(self) -> dict[Track, list[str]]:
+        raw = self._data()["tracks"]
+        return {Track(name): list(order) for name, order in raw.items()}
+
+    def track_position(self, house_id: str, track: Track) -> int:
+        order = self.tracks[track]
+        return order.index(house_id) + 1 if house_id in order else 0
+
+    def controlled_regions(self, house_id: str) -> list[str]:
+        return [
+            region_id
+            for region_id, region in self.regions.items()
+            if region.controller == house_id
+        ]
+
+    def castle_count(self, house_id: str) -> int:
+        fortifications = set(self._data()["fortifications"])
+        return sum(
+            1
+            for region_id in fortifications
+            if self.regions[region_id].controller == house_id
+        )
+
+
+class RustGame:
+    """The Rust engine behind the Python engine's interface.
+
+    Only the session surface is wrapped: enough for the CLI, the demo and a
+    policy that reads the board. Building positions and running self-play go
+    through the extension's own APIs (`set_region`, `selfplay`).
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.map = load_map()
+
+    @classmethod
+    def new(cls, config: GameConfig | None = None) -> RustGame:
+        config = config or GameConfig()
+        extension = core()
+        if extension is None:  # pragma: no cover - depends on the environment
+            raise RuntimeError(f"{MODULE} is not installed")
+        inner = extension.Game.new(
+            houses=list(config.houses),
+            seed=config.seed or 0,
+            max_rounds=config.max_rounds,
+            victory_castles=config.victory_castles,
+            use_westeros_decks=config.use_westeros_decks,
+        )
+        return cls(inner)
+
+    @property
+    def config(self) -> GameConfig:
+        return GameConfig()
+
+    @property
+    def state(self) -> StateView:
+        return StateView(self)
+
+    def snapshot(self) -> dict:
+        return self._inner.snapshot()
+
+    def clone(self) -> RustGame:
+        return RustGame(self._inner.clone())
+
+    def is_terminal(self) -> bool:
+        return self._inner.is_terminal()
+
+    def current_player(self) -> str | None:
+        return self._inner.current_player()
+
+    def winner(self) -> str | None:
+        return self._inner.winner()
+
+    def legal_actions(self) -> list[Action]:
+        """The engine's actions, as the Python ``Action`` dataclass.
+
+        Converting rather than wrapping keeps `action in game.legal_actions()`,
+        `str(action)` and the policy code working unchanged.
+        """
+        return [
+            Action(
+                kind=ActionKind(action.kind),
+                house=action.house,
+                region=action.region,
+                target=action.target,
+                order=action.order,
+                card=action.card,
+                unit=action.unit,
+                side=action.side,
+                amount=action.amount,
+                units=action.units,
+                establish=action.establish,
+            )
+            for action in self._inner.legal_actions()
+        ]
+
+    def step(self, action: Action) -> None:
+        """Apply a Python ``Action`` by matching it against the engine's own.
+
+        Matching on the canonical fields rather than rebuilding a Rust action
+        keeps this honest: an action the engine did not offer cannot be played.
+        """
+        for candidate in self._inner.legal_actions():
+            if (
+                candidate.kind == action.kind.value
+                and candidate.house == action.house
+                and candidate.region == action.region
+                and candidate.target == action.target
+                and candidate.order == action.order
+                and candidate.card == action.card
+                and candidate.unit == action.unit
+                and candidate.side == action.side
+                and candidate.amount == action.amount
+                and (None if candidate.units is None else list(candidate.units))
+                == (None if action.units is None else list(action.units))
+                and candidate.establish == action.establish
+            ):
+                self._inner.step(candidate)
+                return
+        raise ValueError(f"{action} is not a legal action in this position")
+
+    def observe(self):
+        """The network input, as the ``Observation`` dataclass the trainer uses."""
+        from agot.engine.observation import Observation
+
+        actor, state, matrix = self._inner.observe()
+        return Observation(
+            actor=actor or "",
+            actions=tuple(self.legal_actions()),
+            state_features=state,
+            action_features=matrix,
+        )

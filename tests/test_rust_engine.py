@@ -21,6 +21,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from agot.engine.actions import Action, ActionKind
 from agot.engine.game import Game, GameConfig
 from agot.engine.observation import HOUSE_ORDER
 
@@ -288,6 +289,85 @@ def test_position_builder_builds_actions_the_engine_accepts():
     assert game.is_terminal()
 
 
+def test_rust_game_views_match_the_python_engine():
+    """The Python-shaped view must be faithful, field by field.
+
+    This is what lets a call site move to the Rust engine without changing a
+    line: the same Action objects, the same `state.regions[rid].controller`,
+    `state.houses[h].power` and `state.tracks[Track]` reads.
+    """
+    from agot.engine import rust
+
+    rust_game = rust.RustGame.new(GameConfig(seed=7, use_westeros_decks=False))
+    python_game = Game.new(GameConfig(seed=7, use_westeros_decks=False))
+
+    for step in range(50):
+        assert rust_game.legal_actions() == python_game.legal_actions()
+
+        rust_state, python_state = rust_game.state, python_game.state
+        assert rust_state.round == python_state.round
+        assert rust_state.phase is python_state.phase
+        assert rust_state.active_house == python_state.active_house
+        assert rust_state.winner == python_state.winner
+        assert rust_state.tracks == {
+            track: list(python_state.tracks[track]) for track in python_state.tracks
+        }
+
+        rust_regions = rust_state.regions
+        for region_id, python_region in python_state.regions.items():
+            view = rust_regions[region_id]
+            assert view.controller == python_region.controller
+            assert view.owner == python_region.owner
+            assert view.order == python_region.order
+            assert view.order_house == python_region.order_house
+            assert view.units == {
+                unit: count for unit, count in python_region.units.items() if count
+            }
+            assert view.routed == {
+                unit: count for unit, count in python_region.routed.items() if count
+            }
+            assert view.total() == python_region.total()
+            assert view.total(include_routed=False) == python_region.total(
+                include_routed=False
+            )
+            assert view.is_empty() == python_region.is_empty()
+
+        rust_houses = rust_state.houses
+        for house_id, python_house in python_state.houses.items():
+            view = rust_houses[house_id]
+            assert view.power == python_house.power
+            assert view.supply_level == python_house.supply_level
+            assert view.orders_placed == python_house.orders_placed
+            assert view.orders_available == python_house.orders_available
+            assert view.house_cards_available == python_house.house_cards_available
+            assert view.blade_used == python_house.blade_used
+
+        # A policy can read the board through the view: the greedy score helper
+        # uses exactly these calls.
+        assert rust_state.controlled_regions("stark") == python_state.controlled_regions(
+            "stark"
+        )
+
+        if rust_game.is_terminal():
+            break
+        index = (step * 3 + 1) % len(rust_game.legal_actions())
+        rust_game.step(rust_game.legal_actions()[index])
+        python_game.step(python_game.legal_actions()[index])
+
+
+def test_rust_game_rejects_an_action_the_engine_did_not_offer():
+    from agot.engine import rust
+
+    game = rust.RustGame.new(GameConfig(seed=1, use_westeros_decks=False))
+    bogus = Action(
+        kind=ActionKind.PASS,
+        house="tyrell",
+        region="winterfell",
+    )
+    with pytest.raises(ValueError):
+        game.step(bogus)
+
+
 def test_observe_on_a_terminal_position_is_empty_not_an_error():
     game = core.Game.new(seed=1, use_westeros_decks=False)
     while not game.is_terminal():
@@ -352,7 +432,7 @@ def test_selfplay_returns_packed_examples():
         assert abs(float(row.sum()) - 1.0) < 1e-5
         assert offsets[index + 1] - offsets[index] >= 1
     assert set(np.unique(outcomes)).issubset({-1.0, 0.0, 1.0})
-    for winner, steps_taken in zip(winners, steps):
+    for winner, steps_taken in zip(winners, steps, strict=True):
         assert winner in {"baratheon", "lannister", "stark", "greyjoy", "tyrell", "martell"}
         assert steps_taken > 10
         assert 1 <= outcomes.shape[1]
