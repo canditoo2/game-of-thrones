@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyType;
+use pyo3::types::{PyDict, PyType};
 
 use numpy::IntoPyArray;
 
@@ -39,6 +39,66 @@ fn backend() -> &'static str {
 
 fn engine_error(error: EngineError) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
+}
+
+// -- field parsing for the position builder ------------------------------
+
+fn optional_house(value: &Bound<'_, PyAny>) -> PyResult<Option<HouseId>> {
+    match value.extract::<Option<String>>()? {
+        Some(name) => Ok(Some(HouseId::from_name(&name).ok_or_else(|| {
+            PyValueError::new_err(format!("unknown house {name:?}"))
+        })?)),
+        None => Ok(None),
+    }
+}
+
+fn optional_order(value: &Bound<'_, PyAny>) -> PyResult<Option<agot_core::enums::OrderKey>> {
+    match value.extract::<Option<String>>()? {
+        Some(key) => Ok(Some(agot_core::enums::OrderKey::from_name(&key).ok_or_else(
+            || PyValueError::new_err(format!("unknown order {key:?}")),
+        )?)),
+        None => Ok(None),
+    }
+}
+
+/// `{"footman": 2, "ship": 1}` to a count per unit slot.
+fn parse_units(value: &Bound<'_, PyAny>) -> PyResult<[u8; 4]> {
+    let dict = value.cast::<PyDict>()?;
+    let mut out = [0u8; 4];
+    for (key, count) in dict.iter() {
+        let name: String = key.extract()?;
+        let unit = UnitType::from_name(&name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown unit {name:?}")))?;
+        out[unit.index()] = count.extract()?;
+    }
+    Ok(out)
+}
+
+fn parse_orders(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<smallvec::SmallVec<[agot_core::enums::OrderKey; 15]>> {
+    let keys: Vec<String> = value.extract()?;
+    keys.iter()
+        .map(|key| {
+            agot_core::enums::OrderKey::from_name(key)
+                .ok_or_else(|| PyValueError::new_err(format!("unknown order {key:?}")))
+        })
+        .collect()
+}
+
+fn parse_cards(
+    value: &Bound<'_, PyAny>,
+    house: HouseId,
+    data: &DataSet,
+) -> PyResult<smallvec::SmallVec<[agot_core::enums::CardId; 7]>> {
+    let ids: Vec<String> = value.extract()?;
+    ids.iter()
+        .map(|id| {
+            data.house_cards.card_index(house, id).ok_or_else(|| {
+                PyValueError::new_err(format!("{house} has no house card {id:?}"))
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +383,205 @@ impl PyGame {
         let json = py.import("json")?;
         Ok(json.call_method1("loads", (text,))?.into())
     }
+
+    // -- building positions ----------------------------------------------
+    //
+    // The engine tests set up specific positions before exercising a rule, and
+    // the Python engine let them do that by writing fields directly. These are
+    // the same writes, named: enough to build a position, no more. They are
+    // deliberately not a general view tier — a test that needs to *read* a
+    // position uses `snapshot()`.
+
+    /// `game.set_region("winterfell", controller="stark", units={"footman": 1})`.
+    #[pyo3(signature = (region_id, **fields))]
+    fn set_region(&mut self, region_id: &str, fields: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let region = self
+            .game
+            .data
+            .map
+            .lookup(region_id)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown region {region_id:?}")))?;
+        let Some(fields) = fields else {
+            return Ok(());
+        };
+        for (key, value) in fields.iter() {
+            let key: String = key.extract()?;
+            match key.as_str() {
+                "controller" => {
+                    self.game.state.region_mut(region).controller = optional_house(&value)?
+                }
+                "owner" => self.game.state.region_mut(region).owner = optional_house(&value)?,
+                "influence_token" => {
+                    self.game.state.region_mut(region).influence_token = optional_house(&value)?
+                }
+                "order_house" => {
+                    self.game.state.region_mut(region).order_house = optional_house(&value)?
+                }
+                "units" => self.game.state.region_mut(region).units = parse_units(&value)?,
+                "routed" => self.game.state.region_mut(region).routed = parse_units(&value)?,
+                "order" => {
+                    self.game.state.region_mut(region).order = optional_order(&value)?;
+                }
+                "garrison" => self.game.state.region_mut(region).garrison = value.extract()?,
+                "neutral_force" => {
+                    self.game.state.region_mut(region).neutral_force = value.extract()?
+                }
+                "mustering_points" => {
+                    self.game.state.region_mut(region).mustering_points = value.extract()?
+                }
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown region field {other:?}"
+                    )))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `game.set_house("stark", power=3, supply_level=1)`.
+    #[pyo3(signature = (house, **fields))]
+    fn set_house(&mut self, house: &str, fields: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let house = HouseId::from_name(house)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown house {house:?}")))?;
+        let Some(fields) = fields else {
+            return Ok(());
+        };
+        for (key, value) in fields.iter() {
+            let key: String = key.extract()?;
+            let state = self
+                .game
+                .state
+                .house_mut(house)
+                .ok_or_else(|| PyValueError::new_err(format!("{house} is not in this game")))?;
+            match key.as_str() {
+                "power" => state.power = value.extract()?,
+                "supply_level" => state.supply_level = value.extract()?,
+                "orders_available" => {
+                    state.orders_available = parse_orders(&value)?;
+                }
+                "orders_placed" => state.orders_placed = parse_orders(&value)?,
+                "house_cards_available" => {
+                    state.house_cards_available = parse_cards(&value, house, &self.game.data)?;
+                }
+                "house_cards_used" => {
+                    state.house_cards_used = parse_cards(&value, house, &self.game.data)?;
+                }
+                "blade_used" => state.blade_used = value.extract()?,
+                "passed" => state.passed = value.extract()?,
+                "eliminated" => state.eliminated = value.extract()?,
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown house field {other:?}"
+                    )))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `game.set_track("iron_throne", ["stark", "greyjoy", ...])`.
+    fn set_track(&mut self, track: &str, houses: Vec<String>) -> PyResult<()> {
+        let track = agot_core::enums::Track::from_name(track)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown track {track:?}")))?;
+        let order = houses
+            .iter()
+            .map(|name| {
+                HouseId::from_name(name)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown house {name:?}")))
+            })
+            .collect::<PyResult<smallvec::SmallVec<[HouseId; 6]>>>()?;
+        self.game.state.tracks[track.index()] = order;
+        Ok(())
+    }
+
+    /// Declare a winner, as the engine does when the victory condition is met.
+    fn set_winner(&mut self, house: &str) -> PyResult<()> {
+        let house = HouseId::from_name(house)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown house {house:?}")))?;
+        self.game.state.set_winner(house);
+        Ok(())
+    }
+
+    /// Build an action from names: `game.action("place_order", region="winterfell", order="march")`.
+    #[pyo3(signature = (kind, *, house=None, region=None, target=None, order=None, card=None, unit=None, side=None, amount=None, units=None, establish=false))]
+    #[allow(clippy::too_many_arguments)]
+    fn action(
+        &self,
+        kind: &str,
+        house: Option<String>,
+        region: Option<String>,
+        target: Option<String>,
+        order: Option<String>,
+        card: Option<String>,
+        unit: Option<String>,
+        side: Option<String>,
+        amount: Option<u8>,
+        units: Option<(u8, u8, u8, u8)>,
+        establish: bool,
+    ) -> PyResult<PyAction> {
+        let data = &self.game.data;
+        let kind = ActionKind::from_name(kind)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown action kind {kind:?}")))?;
+        let house_id = house
+            .as_deref()
+            .map(|name| {
+                HouseId::from_name(name)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown house {name:?}")))
+            })
+            .transpose()?;
+        let resolve = |id: &str| {
+            data.map
+                .lookup(id)
+                .ok_or_else(|| PyValueError::new_err(format!("unknown region {id:?}")))
+        };
+        let region_id = region.as_deref().map(resolve).transpose()?;
+        let target_id = target.as_deref().map(resolve).transpose()?;
+        let order_key = order
+            .as_deref()
+            .map(|key| {
+                agot_core::enums::OrderKey::from_name(key)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown order {key:?}")))
+            })
+            .transpose()?;
+        let card_id = match (house_id, card.as_deref()) {
+            (Some(house), Some(id)) => Some(data.house_cards.card_index(house, id).ok_or_else(
+                || PyValueError::new_err(format!("{house} has no house card {id:?}")),
+            )?),
+            _ => None,
+        };
+        let unit_id = unit
+            .as_deref()
+            .map(|name| {
+                UnitType::from_name(name)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown unit {name:?}")))
+            })
+            .transpose()?;
+        let side_id = side
+            .as_deref()
+            .map(|name| {
+                Side::from_name(name)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown side {name:?}")))
+            })
+            .transpose()?;
+
+        Ok(PyAction::new(
+            agot_core::action::Action {
+                kind,
+                house: house_id,
+                region: region_id,
+                target: target_id,
+                order: order_key,
+                card: card_id,
+                unit: unit_id,
+                side: side_id,
+                amount,
+                units: units.map(|counts| [counts.0, counts.1, counts.2, counts.3]),
+                establish,
+            },
+            Arc::clone(&self.game.data),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -331,8 +590,7 @@ impl PyGame {
 
 /// The kind names the encoder and the CLI use, exposed for introspection.
 #[pyfunction]
-fn action_kinds() -> Vec<&'static str> {
-    ActionKind::ALL
+fn action_kinds() -> Vec<&'static str> {    ActionKind::ALL
         .into_iter()
         .map(|kind| kind.as_str())
         .collect()

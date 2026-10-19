@@ -225,6 +225,69 @@ def test_rust_snapshot_matches_the_python_position():
         python.step(python.legal_actions()[index])
 
 
+def test_position_builder_writes_through_to_the_engine():
+    """Building a position must change what the engine then does.
+
+    The Python engine's tests set up positions by writing state fields directly;
+    these named writes are the same thing. The assertion is behavioural on
+    purpose: the legal-action list must follow the edit, not just the snapshot.
+    """
+    game = core.Game.new(seed=1, use_westeros_decks=False)
+    targets = {
+        action.region for action in game.legal_actions() if action.kind == "place_order"
+    }
+    assert targets, "the opening position must offer orders"
+    target = sorted(targets)[0]
+
+    # Emptying an area removes it from the areas that still need an order; a
+    # garrison alone never needs one.
+    game.set_region(target, units={})
+    after = {
+        action.region for action in game.legal_actions() if action.kind == "place_order"
+    }
+    assert target not in after
+
+    # Putting a unit back makes the engine ask for an order there again.
+    game.set_region(target, units={"footman": 1})
+    restored = {
+        action.region for action in game.legal_actions() if action.kind == "place_order"
+    }
+    assert target in restored
+
+    # And the engine still runs on the edited position: placing an order there
+    # puts the token on the board.
+    action = next(
+        candidate
+        for candidate in game.legal_actions()
+        if candidate.kind == "place_order" and candidate.region == target
+    )
+    game.step(action)
+    assert game.snapshot()["regions"][target]["order"] is not None
+
+
+def test_position_builder_builds_actions_the_engine_accepts():
+    game = core.Game.new(seed=1, use_westeros_decks=False)
+    house = game.current_player()
+    produced = game.legal_actions()[0]
+    assert produced.kind == "place_order"
+
+    # An action built from names is indistinguishable from one the engine made.
+    built = game.action(
+        "place_order", house=house, region=produced.region, order=produced.order
+    )
+    assert built == produced
+    assert built in game.legal_actions()
+
+    game.set_house(house, power=7, blade_used=True)
+    snapshot = game.snapshot()
+    assert snapshot["houses"][house]["power"] == 7
+    assert snapshot["houses"][house]["blade_used"] is True
+
+    game.set_winner(house)
+    assert game.snapshot()["winner"] == house
+    assert game.is_terminal()
+
+
 def test_observe_on_a_terminal_position_is_empty_not_an_error():
     game = core.Game.new(seed=1, use_westeros_decks=False)
     while not game.is_terminal():
