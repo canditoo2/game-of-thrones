@@ -2648,3 +2648,40 @@ class Game:
                 house: self.state.houses[house].power for house in self.state.houses
             },
         }
+
+
+# ---------------------------------------------------------------------------
+# Engine selection
+# ---------------------------------------------------------------------------
+
+
+def _select_backend() -> str:
+    """Which implementation this module's ``Game`` resolves to.
+
+    ``AGOT_ENGINE=rust`` swaps in the Rust engine when the extension is
+    installed. The Python implementation stays the default until the cutover is
+    finished, because the tests that *build* positions by writing state fields
+    still need it: the Rust engine has the read views and the named builder, not
+    the writable view tier.
+
+    This is the seam the cutover closes. Everything that imports ``Game`` from
+    here -- the CLI, the agents, the training loop, the tests -- follows this
+    choice without knowing about it.
+    """
+    import os
+
+    if os.environ.get("AGOT_ENGINE", "python").strip().lower() != "rust":
+        return "python"
+    try:
+        from agot.engine import rust
+    except ImportError:  # pragma: no cover - depends on the environment
+        return "python"
+    if not rust.available():  # pragma: no cover - depends on the environment
+        return "python"
+    globals()["Game"] = rust.RustGame
+    return "rust"
+
+
+#: ``"rust"`` when ``Game`` is the Rust engine, ``"python"`` otherwise. Logged by
+#: the CLI and by training runs so a result can be attributed to an engine.
+BACKEND = _select_backend()
