@@ -129,6 +129,10 @@ pub fn selfplay<'py>(
     let determinizations: u32 = spec_or(spec, "determinizations", 1)?.max(1);
     let batch_games: usize = spec_or(spec, "batch_games", 1)?.max(1);
     let seed: u64 = spec_or(spec, "seed", 0)?;
+    // Optional explicit per-game seeds. Without them the driver keeps the old
+    // `seed + index` derivation, which is only correct when one worker sees a
+    // contiguous run of games.
+    let seeds: Vec<u64> = spec_or(spec, "seeds", Vec::new())?;
     let temperature: f64 = spec_or(spec, "temperature", 1.0)?;
     let temperature_rounds: u8 = spec_or(spec, "temperature_rounds", 3)?;
     let final_temperature: f64 = spec_or(spec, "final_temperature", 0.25)?;
@@ -188,13 +192,15 @@ pub fn selfplay<'py>(
     let mut finished: Vec<FinishedGame> = Vec::with_capacity(games);
     for start in (0..games).step_by(batch_games) {
         let chunk: Vec<usize> = (start..(start + batch_games).min(games)).collect();
+        let game_seed =
+            |index: usize| -> u64 { seeds.get(index).copied().unwrap_or(seed + index as u64) };
         let mut configs = Vec::with_capacity(chunk.len());
         for index in &chunk {
             configs.push(GameConfig {
                 houses: house_list.clone(),
                 max_rounds,
                 victory_castles,
-                seed: seed + *index as u64,
+                seed: game_seed(*index),
                 use_westeros_decks,
             });
         }
@@ -210,7 +216,7 @@ pub fn selfplay<'py>(
         // One searcher per game, so PIMC worlds and noise stay independent.
         let mut searchers: Vec<Mcts<UniformEvaluator>> = chunk
             .iter()
-            .map(|index| Mcts::with_seed(UniformEvaluator, seed + *index as u64 * 101))
+            .map(|index| Mcts::with_seed(UniformEvaluator, game_seed(*index)))
             .collect();
         let mut histories: Vec<Vec<Record>> = (0..chunk.len()).map(|_| Vec::new()).collect();
         let mut steps = vec![0u32; chunk.len()];
@@ -319,6 +325,9 @@ pub fn selfplay<'py>(
                 // int64 because the callback feeds this straight to torch's
                 // advanced indexing, exactly as `predict_many` does.
                 let mut leaf_index: Vec<i64> = Vec::new();
+                // One cache for the whole batch: each leaf clears it, which is
+                // far cheaper than allocating (and zeroing) 64 entries per leaf.
+                let mut cache = observation::RegionCache::new();
                 for (position, (slot, simulation)) in pending.iter().enumerate() {
                     if simulation.leaf.is_none() {
                         continue;
@@ -327,23 +336,26 @@ pub fn selfplay<'py>(
                     let game = searchers[*slot]
                         .leaf_game(simulation)
                         .ok_or_else(|| PyRuntimeError::new_err("a leaf without a position"))?;
-                    let mut cache = observation::RegionCache::new();
-                    leaf_states.extend_from_slice(&observation::encode_state(
+                    cache.clear();
+                    let state_start = leaf_states.len();
+                    leaf_states.resize(state_start + STATE_DIM, 0.0);
+                    observation::encode_state_into(
                         &game.state,
                         &data,
                         None,
-                    ));
+                        &mut leaf_states[state_start..],
+                    );
                     for action in &simulation.actions {
-                        let mut buf = vec![0.0f32; ACTION_DIM];
+                        let start = leaf_actions.len();
+                        leaf_actions.resize(start + ACTION_DIM, 0.0);
                         observation::encode_action_into(
                             &game.state,
                             &data,
                             action,
                             None,
-                            &mut buf,
+                            &mut leaf_actions[start..],
                             &mut cache,
                         );
-                        leaf_actions.extend_from_slice(&buf);
                         leaf_index.push(row as i64);
                     }
                     leaves.push(position);
@@ -419,9 +431,9 @@ pub fn selfplay<'py>(
                     }
                 }
 
-                for (slot, simulation) in pending {
+                for ((slot, simulation), evaluation) in pending.into_iter().zip(evaluations) {
                     searchers[slot]
-                        .finish_simulation(simulation, evaluations.remove(0))
+                        .finish_simulation(simulation, evaluation)
                         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
                 }
             }

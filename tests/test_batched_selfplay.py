@@ -51,6 +51,42 @@ def test_batched_selfplay_produces_one_record_per_game() -> None:
             assert example.policy.sum() > 0
 
 
+def test_worker_chunking_keeps_every_game_seed() -> None:
+    """Round-robin chunks must not replay a neighbour's seed.
+
+    The Rust driver used to derive ``seed..seed+n-1`` from the first config in
+    a chunk, so two workers could overlap and some planned seeds were never
+    played. Explicit per-game seeds are the invariant this test pins.
+    """
+    from agot.training.rust_engine import game_seeds
+
+    configs = [GameConfig(seed=1000 + index) for index in range(8)]
+    expected = game_seeds(configs, 0)
+    assert len(set(expected)) == len(configs)
+
+    for workers in (2, 3, 5):
+        chunks = [configs[index::workers] for index in range(workers)]
+        played = [
+            seed
+            for chunk in chunks
+            if chunk
+            for seed in game_seeds(chunk, 0)
+        ]
+        assert sorted(played) == sorted(expected)
+        assert len(set(played)) == len(configs)
+
+
+def test_automatic_worker_count_fills_the_batch() -> None:
+    from agot.training.parallel import SelfPlayPlan, worker_count
+
+    plan = SelfPlayPlan(games=48, batch_games=4)
+    automatic = worker_count(plan, 48)
+    assert automatic <= 12, "more workers than full batches only slows the run"
+    # An explicit --workers is an override, not a suggestion.
+    explicit = SelfPlayPlan(games=48, batch_games=4, workers=21)
+    assert worker_count(explicit, 48) == 21
+
+
 def test_batched_selfplay_matches_single_game_example_count() -> None:
     """A pure-self-play batched game records roughly what play_game records."""
     config = GameConfig(seed=4, max_rounds=2)

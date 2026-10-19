@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 import webbrowser
 from pathlib import Path
 
 from agot.agents import MCTS, GreedyPolicy, RandomPolicy
 from agot.engine.game import Game, GameConfig
-from agot.training.selfplay import play_game
 
 #: Loaded networks, keyed by checkpoint path. A gauntlet builds a fresh policy
 #: per seat per game, so the checkpoint is loaded once and the model shared.
@@ -95,6 +95,10 @@ def _policy_factory(name: str, **options):
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
+    # Imported here, not at module scope: `agot.training` eagerly imports the
+    # torch trainer, and a demo/gauntlet must not pay a 2 s torch import.
+    from agot.training.selfplay import play_game
+
     config = GameConfig(seed=args.seed, max_rounds=args.max_rounds)
     factory = _policy_factory(
         args.policy,
@@ -247,12 +251,19 @@ def _run_training(args: argparse.Namespace) -> int:
     from agot.training.replay import ReplayBuffer
     from agot.training.trainer import TrainConfig, Trainer
 
-    if args.train_threads > 0:
+    train_threads = args.train_threads
+    if train_threads is None:
+        try:
+            usable = len(os.sched_getaffinity(0))
+        except AttributeError:
+            usable = os.cpu_count() or 4
         # Small mini-batches are faster on a few threads than on every core; the
         # self-play workers are separate processes with one thread each.
+        train_threads = max(1, min(8, usable))
+    if train_threads > 0:
         import torch
 
-        torch.set_num_threads(args.train_threads)
+        torch.set_num_threads(train_threads)
 
     config = GameConfig(seed=args.seed, max_rounds=args.max_rounds)
     model = (
@@ -634,10 +645,11 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--train-threads",
         type=int,
-        default=4,
+        default=None,
         help=(
-            "torch threads in the training process; small batches are faster "
-            "with a handful of threads than with every core (0 = torch default)"
+            "torch threads in the training process; defaults to min(8, usable "
+            "CPUs). Small batches are faster with a handful of threads than "
+            "with every core (0 = torch default)"
         ),
     )
     train.add_argument(

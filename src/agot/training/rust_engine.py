@@ -66,6 +66,20 @@ def leaf_evaluator(model):
     return evaluate
 
 
+def game_seeds(configs, fallback: int) -> list[int]:
+    """The explicit seed for every game in a request.
+
+    The driver derives ``seed + index`` when it has no list, which is wrong as
+    soon as a caller splits games across workers: each worker only sees its
+    first config's seed and replays neighbours. Passing the seeds explicitly
+    keeps every game distinct regardless of how the chunk was formed.
+    """
+    return [
+        config.seed if config.seed is not None else fallback + index
+        for index, config in enumerate(configs)
+    ]
+
+
 def spec_for(plan: SelfPlayPlan, base_config: GameConfig | None = None) -> dict:
     """Translate a :class:`SelfPlayPlan` into the driver's spec mapping."""
     base = base_config or GameConfig()
@@ -75,6 +89,7 @@ def spec_for(plan: SelfPlayPlan, base_config: GameConfig | None = None) -> dict:
         "determinizations": plan.determinizations,
         "batch_games": max(1, plan.batch_games),
         "seed": plan.seed,
+        "seeds": [plan.seed + index for index in range(plan.games)],
         "temperature": plan.temperature,
         "temperature_rounds": plan.temperature_rounds,
         "final_temperature": plan.final_temperature,
@@ -221,6 +236,7 @@ def try_batched_self_play(
         "determinizations": determinizations,
         "batch_games": max(1, batch_games),
         "seed": first.seed if first.seed is not None else seed,
+        "seeds": game_seeds(configs, seed),
         "temperature": temperature,
         "temperature_rounds": schedule[0][0] if schedule else 3,
         "final_temperature": schedule[-1][1] if schedule else temperature,

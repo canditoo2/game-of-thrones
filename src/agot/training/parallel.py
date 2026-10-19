@@ -1,9 +1,9 @@
 """Parallel self-play across CPU processes.
 
-The rules engine and the observation encoder are pure Python, and the pointer
-net is small, so on a many-core CPU the largest throughput win comes from
-running whole games in separate processes: each core gets its own interpreter
-and its own pending forward passes instead of sharing one.
+The rules engine, search and encoder are Rust, and the pointer net is small, so
+on a many-core CPU the largest throughput win comes from running whole games in
+separate processes: each core gets its own interpreter and its own pending
+forward passes instead of sharing one.
 
 A worker rebuilds the network from a state dict — once via a pool initializer for
 a short-lived pool, or per task for a long-lived one (see :func:`create_executor`,
@@ -103,15 +103,26 @@ def _scripted_seats(
 
 def _play_chunk(configs: list[GameConfig], options: dict) -> list[GameRecord]:
     evaluator = _WORKER["evaluator"]
-    rng = random.Random(options["seed"])
     batch = options["batch_games"]
     records: list[GameRecord] = []
     for start in range(0, len(configs), batch):
         chunk = configs[start : start + batch]
         opponents = None
         if options["opponent_rate"] > 0:
+            # Seed the scripted-seat draw from the game, not the worker: with
+            # one shared stream every worker scripted the same seats in the
+            # same pattern, which correlated the data across processes.
             opponents = [
-                _scripted_seats(config, options, rng) for config in chunk
+                _scripted_seats(
+                    config,
+                    options,
+                    random.Random(
+                        config.seed
+                        if config.seed is not None
+                        else options["seed"] + start + offset
+                    ),
+                )
+                for offset, config in enumerate(chunk)
             ]
         records.extend(
             batched_self_play(
@@ -172,10 +183,21 @@ def _usable_cpus() -> int:
 
 
 def worker_count(plan: SelfPlayPlan, games: int | None = None) -> int:
-    """How many processes :func:`parallel_self_play` would use."""
+    """How many processes :func:`parallel_self_play` would use.
+
+    The automatic count is capped so every worker can fill ``batch_games``:
+    with 48 games and batches of 4, 12 workers is the point where the batch is
+    full, and going to 21 only shrinks each batch and slows the run down.
+    An explicit ``plan.workers`` is honoured as an override.
+    """
     total = plan.games if games is None else games
-    workers = plan.workers or max(1, _usable_cpus() - 1)
-    return max(1, min(workers, max(1, total)))
+    if plan.workers:
+        return max(1, min(plan.workers, max(1, total)))
+    automatic = max(1, _usable_cpus() - 1)
+    batch = max(1, plan.batch_games)
+    # At least one worker, even when there are fewer games than a batch.
+    fill = max(1, total // batch)
+    return max(1, min(automatic, fill, total))
 
 
 def create_executor(workers: int) -> ProcessPoolExecutor:

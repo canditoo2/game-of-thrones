@@ -10,6 +10,18 @@ from agot.cli import _policy_factory, main
 from agot.engine.game import Game, GameConfig
 
 
+def test_importing_the_cli_does_not_load_torch() -> None:
+    """Demo/evaluate must start without paying the training stack's import."""
+    import subprocess
+    import sys
+
+    output = subprocess.check_output(
+        [sys.executable, "-c", "import sys, agot.cli; print('torch' in sys.modules)"],
+        text=True,
+    )
+    assert output.strip() == "False"
+
+
 def test_net_policy_without_a_checkpoint_is_rejected() -> None:
     """A bare ``net`` has no weights to load, so it fails with a message."""
     with pytest.raises(SystemExit):

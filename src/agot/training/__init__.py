@@ -1,7 +1,8 @@
 """Self-play data generation, replay storage and evaluation.
 
-The neural trainer is imported only if PyTorch is available, so the data and
-evaluation tooling works on a torch-free machine.
+The neural trainer is imported lazily: the data and evaluation tooling (and
+the CLI's demo/evaluate commands) must work on a torch-free machine and must
+not pay a multi-second torch import when they do not train.
 """
 
 from agot.training.evaluate import MatchResult, evaluate_match, seat_policies
@@ -19,9 +20,17 @@ __all__ = [
     "self_play",
 ]
 
-try:  # pragma: no cover - depends on the optional torch extra
-    from agot.training.trainer import TrainConfig, Trainer, TrainStats
+_TRAINER_NAMES = {"TrainConfig", "TrainStats", "Trainer"}
 
-    __all__ += ["TrainConfig", "TrainStats", "Trainer"]
-except ImportError:  # torch is not installed
-    pass
+
+def __getattr__(name: str):
+    """Load the trainer only when a caller actually asks for it."""
+    if name in _TRAINER_NAMES:
+        from agot.training.trainer import TrainConfig, Trainer, TrainStats
+
+        return {
+            "TrainConfig": TrainConfig,
+            "TrainStats": TrainStats,
+            "Trainer": Trainer,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

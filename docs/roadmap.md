@@ -478,3 +478,22 @@ they should be fixed before expecting a strong agent.
     across the facade, agents, training loop, NN, CLI and the extension.
 
     **The Rust port is complete.**
+
+    A post-cutover performance and correctness pass followed an audit of the
+    Rust and Python halves. The important fix was in parallel self-play:
+    workers split games round-robin but the Rust driver derived `seed + index`
+    from each chunk's first config, so workers replayed neighbouring seeds and
+    never played others; the spec now carries an explicit per-game seed list,
+    and the scripted-seat RNG is seeded per game. The search node stores its
+    position behind a box, so pending children no longer reserve ~3.2 KB each
+    (pinned by a size assertion; the opening-tree benchmark is neutral, the
+    memory per pending node is not), and materialization no longer clones the
+    parent state twice. The batch driver reuses one region cache and encodes
+    straight into the output buffers, the automatic worker count is capped so
+    every worker can fill `--batch-games`, `--train-threads` defaults to
+    `min(8, usable CPUs)`, and the CLI/training package imports torch lazily
+    (`import agot.cli` 2.2 s → 0.3 s; `agot demo --policy greedy` 3.3 s → 0.6 s).
+    The remaining audit items are the big ones: net evaluation still uses
+    Python MCTS (the Rust driver can take it over), training still pads action
+    batches instead of using `forward_packed`, and the Action/snapshot round
+    trips on the Python side are still there.

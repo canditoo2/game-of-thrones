@@ -241,7 +241,12 @@ struct Node {
     data: Arc<DataSet>,
     config: GameConfig,
     /// The position, or `None` while the node is still pending.
-    state: Option<State>,
+    ///
+    /// Boxed deliberately: most nodes are pending children created by an
+    /// expansion and never visited, and an inline `State` is ~3.2 KB. At 45
+    /// candidates per expansion that padding dominated the search's memory
+    /// traffic (a 128-simulation decision wrote ~19 MB of never-read state).
+    state: Option<Box<State>>,
     /// Stream of the node's own game; a child forks from it when it is stepped.
     rng: Rng,
     /// `(parent, action)` until the node is first stepped into.
@@ -271,7 +276,7 @@ impl Node {
         Node {
             data: Arc::clone(&game.data),
             config: game.config.clone(),
-            state: Some(game.state.clone()),
+            state: Some(Box::new(game.state.clone())),
             rng: source.fork(),
             pending: None,
             action: None,
@@ -293,14 +298,14 @@ impl Node {
 
 /// Puts a moved-out position back when it goes out of scope.
 struct RestoreGame<'a> {
-    slot: &'a mut Option<State>,
+    slot: &'a mut Option<Box<State>>,
     game: Option<Game>,
 }
 
 impl Drop for RestoreGame<'_> {
     fn drop(&mut self) {
         if let Some(game) = self.game.take() {
-            *self.slot = Some(game.state);
+            *self.slot = Some(Box::new(game.state));
         }
     }
 }
@@ -314,7 +319,10 @@ fn with_node_game<R>(nodes: &mut [Node], index: u32, body: impl FnOnce(&Game) ->
     let node = &mut nodes[index as usize];
     let game = Game {
         data: Arc::clone(&node.data),
-        state: node
+        // Move the state out of its box: `with_node_game` hands out a `Game`,
+        // which owns a plain `State`. The guard re-boxes it on the way out, so
+        // only materialized nodes ever pay this allocation.
+        state: *node
             .state
             .take()
             .expect("a node must be materialized before it is used"),
@@ -718,7 +726,7 @@ impl<E: Evaluator> Mcts<E> {
         let node = &self.nodes[leaf as usize];
         Some(Game {
             data: Arc::clone(&node.data),
-            state: node.state.clone()?,
+            state: node.state.as_deref()?.clone(),
             config: node.config.clone(),
             rng: node.rng.clone(),
         })
@@ -761,19 +769,22 @@ impl<E: Evaluator> Mcts<E> {
         let Some((parent, action)) = self.nodes[index as usize].pending else {
             return Ok(());
         };
-        let parent_game = {
+        // One direct child game: Python does `parent_game.clone(); step`, but
+        // the intermediate clone is redundant here because the child owns its
+        // own state as soon as it exists.
+        let mut child_game = {
             let parent = &self.nodes[parent as usize];
             Game {
                 data: Arc::clone(&parent.data),
                 state: parent
                     .state
-                    .clone()
-                    .expect("a pending child's parent is materialized"),
+                    .as_deref()
+                    .expect("a pending child's parent is materialized")
+                    .clone(),
                 config: parent.config.clone(),
                 rng: parent.rng.clone(),
             }
         };
-        let mut child_game = parent_game.clone();
         match child_game.step(action) {
             // The action was applied and the engine then stopped at a phase that
             // has not been ported yet: the position is the best the port can
@@ -782,7 +793,7 @@ impl<E: Evaluator> Mcts<E> {
             Err(error) => return Err(error),
         }
         let node = &mut self.nodes[index as usize];
-        node.state = Some(child_game.state);
+        node.state = Some(Box::new(child_game.state));
         node.rng = child_game.rng;
         node.pending = None;
         Ok(())
@@ -792,7 +803,7 @@ impl<E: Evaluator> Mcts<E> {
     fn state_of(&self, index: u32) -> &State {
         self.nodes[index as usize]
             .state
-            .as_ref()
+            .as_deref()
             .expect("a node must be materialized before it is used")
     }
 
@@ -947,7 +958,7 @@ impl Default for Mcts<UniformEvaluator> {
 #[cfg(test)]
 impl<E: Evaluator> Mcts<E> {
     fn node_state(&self, index: u32) -> Option<&State> {
-        self.nodes[index as usize].state.as_ref()
+        self.nodes[index as usize].state.as_deref()
     }
 
     fn child_indices(&self, index: u32) -> Vec<u32> {
@@ -1000,6 +1011,18 @@ mod tests {
 
     fn opening(seed: u64) -> Game {
         Game::new(data(), GameConfig::with_seed(seed)).expect("game must start")
+    }
+
+    #[test]
+    fn a_node_does_not_inline_the_whole_board() {
+        // Pending children are ~97% of an expansion's nodes; the board must be
+        // behind the box or the arena writes megabytes it never reads.
+        assert!(
+            std::mem::size_of::<Node>() < std::mem::size_of::<State>() / 4,
+            "Node is {} bytes, State is {}",
+            std::mem::size_of::<Node>(),
+            std::mem::size_of::<State>()
+        );
     }
 
     #[test]
