@@ -73,7 +73,10 @@ fn scheduled_temperature(schedule: &[(u8, f64)], round: u8) -> f64 {
             return *temperature;
         }
     }
-    schedule.last().map(|(_, temperature)| *temperature).unwrap_or(1.0)
+    schedule
+        .last()
+        .map(|(_, temperature)| *temperature)
+        .unwrap_or(1.0)
 }
 
 /// Per-leaf softmax over a flat logit vector, one segment per leaf.
@@ -288,14 +291,10 @@ pub fn selfplay<'py>(
                     let mask = vec![1.0f32; total];
                     let mask_array = PyArray1::from_vec(py, mask).unbind();
 
-                    let reply = evaluator.call1(
-                        py,
-                        (state_array, action_array, index_array, mask_array),
-                    )?;
-                    let (logits, values): (
-                        PyReadonlyArray1<f32>,
-                        PyReadonlyArray2<f32>,
-                    ) = reply.extract(py)?;
+                    let reply = evaluator
+                        .call1(py, (state_array, action_array, index_array, mask_array))?;
+                    let (logits, values): (PyReadonlyArray1<f32>, PyReadonlyArray2<f32>) =
+                        reply.extract(py)?;
                     let logits = logits.as_slice()?;
                     let values = values.as_slice()?;
                     if logits.len() != total {
@@ -316,7 +315,10 @@ pub fn selfplay<'py>(
                     let mut bounds = Vec::with_capacity(rows + 1);
                     bounds.push(0usize);
                     for position in &leaves {
-                        bounds.push(bounds.last().copied().unwrap_or(0) + pending[*position].1.actions.len());
+                        bounds.push(
+                            bounds.last().copied().unwrap_or(0)
+                                + pending[*position].1.actions.len(),
+                        );
                     }
                     for (row, position) in leaves.iter().enumerate() {
                         let mut value = [0.0f64; N_HOUSES];
@@ -354,12 +356,8 @@ pub fn selfplay<'py>(
                     .pick(&result, Some(temperature))
                     .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
-                let observation = observation::observe(
-                    &states[*slot].state,
-                    &data,
-                    &result.actions,
-                    observer,
-                );
+                let observation =
+                    observation::observe(&states[*slot].state, &data, &result.actions, observer);
                 histories[*slot].push(Record {
                     state: observation.state_features,
                     actions: observation.action_features,
@@ -412,7 +410,11 @@ pub fn selfplay<'py>(
             if !present[slot] {
                 continue;
             }
-            *entry = if Some(house) == game.winner { 1.0 } else { -1.0 };
+            *entry = if Some(house) == game.winner {
+                1.0
+            } else {
+                -1.0
+            };
         }
         for record in &game.examples {
             states_flat.extend_from_slice(&record.state);

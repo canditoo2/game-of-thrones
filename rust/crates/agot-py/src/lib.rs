@@ -54,9 +54,10 @@ fn optional_house(value: &Bound<'_, PyAny>) -> PyResult<Option<HouseId>> {
 
 fn optional_order(value: &Bound<'_, PyAny>) -> PyResult<Option<agot_core::enums::OrderKey>> {
     match value.extract::<Option<String>>()? {
-        Some(key) => Ok(Some(agot_core::enums::OrderKey::from_name(&key).ok_or_else(
-            || PyValueError::new_err(format!("unknown order {key:?}")),
-        )?)),
+        Some(key) => Ok(Some(
+            agot_core::enums::OrderKey::from_name(&key)
+                .ok_or_else(|| PyValueError::new_err(format!("unknown order {key:?}")))?,
+        )),
         None => Ok(None),
     }
 }
@@ -94,9 +95,9 @@ fn parse_cards(
     let ids: Vec<String> = value.extract()?;
     ids.iter()
         .map(|id| {
-            data.house_cards.card_index(house, id).ok_or_else(|| {
-                PyValueError::new_err(format!("{house} has no house card {id:?}"))
-            })
+            data.house_cards
+                .card_index(house, id)
+                .ok_or_else(|| PyValueError::new_err(format!("{house} has no house card {id:?}")))
         })
         .collect()
 }
@@ -136,16 +137,12 @@ impl PyAction {
 
     #[getter]
     fn region(&self) -> Option<&str> {
-        self.inner
-            .region
-            .map(|region| self.data.map.id_of(region))
+        self.inner.region.map(|region| self.data.map.id_of(region))
     }
 
     #[getter]
     fn target(&self) -> Option<&str> {
-        self.inner
-            .target
-            .map(|target| self.data.map.id_of(target))
+        self.inner.target.map(|target| self.data.map.id_of(target))
     }
 
     #[getter]
@@ -342,10 +339,13 @@ impl PyGame {
     fn observe(
         &self,
         py: Python<'_>,
-    ) -> PyResult<(Option<&'static str>, Py<numpy::PyArray1<f32>>, Py<numpy::PyArray2<f32>>)> {
+    ) -> PyResult<(
+        Option<&'static str>,
+        Py<numpy::PyArray1<f32>>,
+        Py<numpy::PyArray2<f32>>,
+    )> {
         let actions = self.game.legal_actions();
-        let observation =
-            observation::observe(&self.game.state, &self.game.data, &actions, None);
+        let observation = observation::observe(&self.game.state, &self.game.data, &actions, None);
         let rows = observation.len();
         let actor = observation.actor.map(|house| house.name());
 
@@ -367,8 +367,7 @@ impl PyGame {
     /// which is what the engine tests need in order to read a position without
     /// caring which implementation produced it.
     fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let value =
-            agot_core::fingerprint::state_fingerprint(&self.game.state, &self.game.data);
+        let value = agot_core::fingerprint::state_fingerprint(&self.game.state, &self.game.data);
         let text = serde_json::to_string(&value)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         let json = py.import("json")?;
@@ -545,9 +544,11 @@ impl PyGame {
             })
             .transpose()?;
         let card_id = match (house_id, card.as_deref()) {
-            (Some(house), Some(id)) => Some(data.house_cards.card_index(house, id).ok_or_else(
-                || PyValueError::new_err(format!("{house} has no house card {id:?}")),
-            )?),
+            (Some(house), Some(id)) => {
+                Some(data.house_cards.card_index(house, id).ok_or_else(|| {
+                    PyValueError::new_err(format!("{house} has no house card {id:?}"))
+                })?)
+            }
             _ => None,
         };
         let unit_id = unit
@@ -590,7 +591,8 @@ impl PyGame {
 
 /// The kind names the encoder and the CLI use, exposed for introspection.
 #[pyfunction]
-fn action_kinds() -> Vec<&'static str> {    ActionKind::ALL
+fn action_kinds() -> Vec<&'static str> {
+    ActionKind::ALL
         .into_iter()
         .map(|kind| kind.as_str())
         .collect()

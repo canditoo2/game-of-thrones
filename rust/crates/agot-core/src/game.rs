@@ -785,7 +785,11 @@ impl Game {
         Ok(())
     }
 
-    fn apply_raven_deck(&mut self, action: Action, to_bottom: bool) -> Result<(), EngineError> {
+    pub(crate) fn apply_raven_deck(
+        &mut self,
+        action: Action,
+        to_bottom: bool,
+    ) -> Result<(), EngineError> {
         let house = action
             .house
             .ok_or_else(|| EngineError::IllegalAction("raven_deck without a house".into()))?;

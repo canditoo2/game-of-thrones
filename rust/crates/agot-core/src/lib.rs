@@ -26,6 +26,8 @@ pub mod map;
 pub mod observation;
 pub mod phases;
 pub mod rng;
+#[cfg(test)]
+mod rules_fixes;
 pub mod search;
 pub mod setup;
 pub mod state;
