@@ -22,6 +22,15 @@ machine — this PC is the build-and-verify machine.
   (module-level `importorskip`), plus a few individual cases in `test_batched_selfplay` and
   `test_report`. CI (`.github/workflows/ci.yml`) runs the numpy-only suite on Python 3.10/3.12
   plus an allowed-to-fail torch job; the local venv is Python 3.14 — don't assume CI parity.
+- Rust core (engine port in progress, `rust/`): run from `rust/` with the stable
+  `x86_64-pc-windows-gnu` toolchain (not on `PATH`; use `%USERPROFILE%\.cargo\bin\cargo`).
+  `cargo test --release`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo bench --bench clone_step`. `tools\dump_fixture.py` regenerates the differential
+  fixture the parity tests replay — regenerate it from Python, never hand-edit it. The
+  other generators/debug aids: `tools\dump_encoder_golden.py` (bit-exact encoder vectors),
+  `tools\debug_parity.py` (print the reference position at a decision),
+  `tools\debug_step.py` (print the actions around a decision),
+  `tools\diff_state.py` (diff a Rust dump against a Python one).
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 
@@ -29,6 +38,11 @@ machine — this PC is the build-and-verify machine.
 
 - Layering: `engine/` is numpy-only and must stay importable without torch; never import torch
   from `engine/` or `agents/`.
+- The Rust port (`rust/crates/agot-core`) is the future home of the engine, search and encoder.
+  `agot-core` must never depend on torch or PyO3 (the Python binding is a separate crate), and
+  it must not reach for the network. While the port runs, the Python engine is the reference
+  oracle: ported behaviour is pinned by the differential fixture, and a disagreement is a bug in
+  the Rust side (or in the fixture's generator) — never something to fix by editing the fixture.
 - Copy-on-write regions: every write to a `RegionState` must go through `GameState.mut(id)`;
   direct writes silently corrupt clones and search. `tests/test_clone_isolation.py` pins this —
   run it after any state-mutation change.

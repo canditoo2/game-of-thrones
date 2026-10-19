@@ -1,0 +1,16 @@
+[package]
+name = "agot-core"
+description = "Rules engine, MCTS and observation encoder for A Game of Thrones: The Board Game (2nd Edition)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+smallvec = { workspace = true }
+
+[[bench]]
+name = "clone_step"
+harness = false

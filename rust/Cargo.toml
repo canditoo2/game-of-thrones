@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/agot-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+
+# A release profile tuned for the engine: one codegen unit and thin LTO.
+# The port is judged on search throughput, so the bench must run optimised.
+# `panic` is deliberately left as `unwind`: the Python extension layer turns a
+# Rust panic into a Python exception, and `panic = "abort"` would kill the
+# interpreter instead.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

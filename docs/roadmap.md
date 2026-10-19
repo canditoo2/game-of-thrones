@@ -357,3 +357,52 @@ they should be fixed before expecting a strong agent.
     browser tab (which reloads itself) then follows a live run; the module is pure
     standard library, so it works on a torch-free machine. Still to do: a registry
     of named runs (round-robin evaluation now takes explicit checkpoint paths).
+
+## Rust engine port
+
+20. **Move the engine, search and encoder to Rust.** *(in progress)* The engine
+    is the binding constraint on training throughput: profiling neural self-play
+    on this machine puts ~61% of wall time in the Python engine, search and
+    observation encoder, and only ~39% in the torch matmuls. The port targets
+    that 61% with a Rust core (`rust/crates/agot-core`) driven from Python through
+    a thin extension module, while the training loop keeps owning the network.
+
+    Design: the board is owned by value (a `State` clone is a memcpy), which
+    deletes the copy-on-write machinery, `_owned` bookkeeping and the
+    deepcopy-with-memo fallback that the Python engine needs — the alias bugs
+    those exist to prevent cannot be expressed. Pending effects are enums rather
+    than `dict[str, Any]`, and the per-node log is off during search.
+
+    Validation: `tools/dump_fixture.py` records action scripts and full state
+    fingerprints from the Python engine, and `tests/planning_parity.rs` replays
+    them against Rust, comparing the acting house, the canonical legal-action list
+    at every decision and the whole position at the end. Mismatches name the
+    scenario, the decision index and the first differing field. Ported so far:
+    data loading and validation, the opening position, the Planning Phase and the
+    Messenger Raven step.
+
+    Measured (`cargo bench --bench clone_step`, release, this machine): `State`
+    clone 364 ns against Python's 5 900 ns (16×), `Game` clone 432 ns against
+    12 000 ns (28×), planning-phase legal actions 364 ns for 45 candidates, and
+    clone-plus-step — the MCTS inner loop — 539 ns against ~14 000 ns (26×).
+
+    Verified: the whole rules engine, the observation encoder and MCTS are ported
+    and green. `tests/engine_parity.rs` replays five complete games (905
+    decisions) recorded from the Python engine and compares the acting house, the
+    canonical legal-action list and the full position at every step, with zero
+    mismatches; `tests/encoder_parity.rs` compares 1 914 state and action vectors
+    bit for bit; `tests/combat_semantics.rs` and `tests/search_semantics.rs` pin
+    the battle rules and the search's semantic gates.
+
+    Two reference-engine defects were found and fixed by the port, both
+    reproducibility bugs rather than rule bugs: `GameMap.neighbours_of` returned a
+    `frozenset`, so the *order* of the legal actions a Raid offers (and of the
+    greedy baseline's tie-breaks) depended on the interpreter's string-hash seed
+    and changed from process to process; and the corpus is recorded with the
+    Westeros decks off, because the two engines shuffle differently and nothing
+    may be drawn if the games are to stay comparable move for move.
+
+    Remaining: the PyO3 extension module, the Python-side integration (the
+    `agot.engine` shim, batched self-play over a leaf-evaluation callback, the CLI
+    and the gauntlet on the Rust engine), packaging/CI, and the cutover that
+    deletes the Python engine.

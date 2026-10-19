@@ -41,5 +41,8 @@ tensorboard/
 .DS_Store
 Thumbs.db
 
+# Rust
+rust/target/
+
 # Local reference material (copyrighted rulebook scans; not redistributed)
 Rulebook/
