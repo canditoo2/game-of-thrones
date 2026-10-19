@@ -28,6 +28,8 @@ use agot_core::map::DataSet;
 use agot_core::observation;
 use agot_core::setup::GameConfig;
 
+mod selfplay;
+
 /// Which engine implementation is loaded. Logged by training runs so a run's
 /// timings can be attributed to the right backend.
 #[pyfunction]
@@ -348,6 +350,8 @@ fn agot_core_ext(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(action_kinds, module)?)?;
     module.add_function(wrap_pyfunction!(vocabulary, module)?)?;
     module.add_function(wrap_pyfunction!(observation_dims, module)?)?;
+    module.add_function(wrap_pyfunction!(selfplay::selfplay, module)?)?;
+    module.add_function(wrap_pyfunction!(selfplay::game_outcome, module)?)?;
     module.add_class::<PyAction>()?;
     module.add_class::<PyGame>()?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;

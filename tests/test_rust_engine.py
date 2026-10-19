@@ -18,6 +18,7 @@ Python engine out: the same assertions run against whichever implementation
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from agot.engine.game import Game, GameConfig
@@ -135,8 +136,6 @@ def test_observation_is_bit_exact_with_the_python_encoder():
     trained on, so the two encoders have to agree to the last bit — not
     approximately.
     """
-    import numpy as np
-
     from agot.engine.observation import ACTION_DIM, STATE_DIM, observe
 
     assert core.observation_dims() == (STATE_DIM, ACTION_DIM)
@@ -169,3 +168,100 @@ def test_observe_on_a_terminal_position_is_empty_not_an_error():
     _, state, matrix = game.observe()
     assert state.shape == (97,)
     assert matrix.shape == (0, 141)
+
+
+# ---------------------------------------------------------------------------
+# Batched self-play
+# ---------------------------------------------------------------------------
+
+
+def uniform_evaluator(calls):
+    """A network-free stand-in: uniform logits, neutral values."""
+
+    def evaluate(state, actions, index, mask):
+        calls.append((int(state.shape[0]), int(actions.shape[0])))
+        return (
+            np.zeros(actions.shape[0], dtype=np.float32),
+            np.zeros((state.shape[0], 6), dtype=np.float32),
+        )
+
+    return evaluate
+
+
+SPEC = {
+    "games": 4,
+    "simulations": 8,
+    "determinizations": 1,
+    "batch_games": 2,
+    "seed": 1,
+    "temperature": 1.0,
+    "temperature_rounds": 3,
+    "final_temperature": 0.25,
+    "max_rounds": 3,
+    "use_westeros_decks": False,
+}
+
+
+def test_selfplay_returns_packed_examples():
+    calls: list = []
+    states, actions, offsets, policy, players, outcomes, winners, steps, rounds = (
+        core.selfplay(SPEC, uniform_evaluator(calls))
+    )
+
+    assert states.shape[1] == 97
+    assert actions.shape[1] == 141
+    assert offsets[0] == 0
+    assert offsets[-1] == actions.shape[0] == policy.shape[0]
+    assert states.shape[0] == players.shape[0] == outcomes.shape[0] == len(offsets) - 1
+    assert len(winners) == len(steps) == len(rounds) == SPEC["games"]
+
+    # Every recorded target is a distribution, and every outcome is a terminal
+    # reward: +1 for the winner, -1 for the losers, 0 for absent houses.
+    for index in range(len(offsets) - 1):
+        row = policy[offsets[index] : offsets[index + 1]]
+        assert abs(float(row.sum()) - 1.0) < 1e-5
+        assert offsets[index + 1] - offsets[index] >= 1
+    assert set(np.unique(outcomes)).issubset({-1.0, 0.0, 1.0})
+    for winner, steps_taken in zip(winners, steps):
+        assert winner in {"baratheon", "lannister", "stark", "greyjoy", "tyrell", "martell"}
+        assert steps_taken > 10
+        assert 1 <= outcomes.shape[1]
+
+
+def test_selfplay_batches_the_network_calls():
+    """The point of the batch tier: many leaves per call, not one per decision."""
+    calls: list = []
+    core.selfplay(SPEC, uniform_evaluator(calls))
+    assert calls, "the evaluator must be called"
+
+    # A call carries at most one leaf per game in the batch, and the tail of a
+    # search phase can carry fewer (some simulations end at a terminal).
+    assert all(1 <= leaves <= SPEC["batch_games"] for leaves, _ in calls), calls[:5]
+    average = sum(leaves for leaves, _ in calls) / len(calls)
+    assert average > SPEC["batch_games"] * 0.8, average
+    # Every leaf's candidates are scored in the same call, so a leaf is never
+    # charged the padding of its neighbours.
+    assert all(rows >= leaves for leaves, rows in calls)
+
+
+def test_selfplay_is_deterministic_for_a_seed():
+    first = core.selfplay(SPEC, uniform_evaluator([]))
+    second = core.selfplay(SPEC, uniform_evaluator([]))
+    assert first[6] == second[6]  # winners
+    assert first[7] == second[7]  # steps
+    assert np.array_equal(first[0], second[0])
+    assert np.array_equal(first[3], second[3])
+
+
+def test_selfplay_respects_pimc_determinizations():
+    """Two worlds per decision must still produce one target per decision."""
+    calls: list = []
+    spec = dict(SPEC, games=2, batch_games=2, determinizations=2, simulations=8)
+    states, actions, offsets, policy, players, outcomes, winners, steps, rounds = (
+        core.selfplay(spec, uniform_evaluator(calls))
+    )
+    assert len(winners) == 2
+    assert offsets[-1] == actions.shape[0]
+    # Both worlds of a decision are searched before the move is chosen, so the
+    # number of leaves scored exceeds the number of decisions.
+    assert sum(leaves for leaves, _ in calls) > states.shape[0]
