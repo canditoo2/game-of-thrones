@@ -76,6 +76,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Before clippy: PyO3's build script probes the interpreter.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -98,10 +104,17 @@ jobs:
         working-directory: rust
         run: cargo test --release
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
+      - name: Build and inspect the wheel
+        run: |
+          pip wheel . --no-deps --wheel-dir dist
+          python - <<'PY'
+          import glob, zipfile
+          path = glob.glob("dist/agot-*.whl")[0]
+          names = zipfile.ZipFile(path).namelist()
+          assert any(name.startswith("agot/_core") for name in names), names
+          assert "agot/data/map_base_6p.json" in names, names
+          print("wheel ok:", path, len(names), "files")
+          PY
 
       - name: Install the package (builds the extension)
         run: |

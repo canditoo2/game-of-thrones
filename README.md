@@ -134,12 +134,14 @@ Run the Python layer with `pytest -q`, the engine, search and encoder gates with
 ## Run it on Google Colab
 
 [`colab/agot-colab.ipynb`](colab/agot-colab.ipynb) is a ready-to-run notebook:
-it clones this repository, installs the package, runs the smoke gate and then
-launches a resumable training run whose checkpoints are written to Google
-Drive, so a disconnected runtime continues from the last iteration. A CPU
-runtime is fine — the search is CPU-bound, so a GPU adds little. Open it in
-Colab (upload the file, or *File → Open notebook → GitHub*) and run the cells
-top to bottom.
+it clones this repository, mounts Drive, builds (or reuses) the abi3 wheel and
+then launches a resumable training run whose checkpoints are written to Google
+Drive, so a disconnected runtime continues from the last iteration. The wheel
+is cached per commit, so a reconnected session installs it in seconds instead
+of rebuilding Rust; the first session for a new commit takes a couple of
+minutes. A CPU runtime is fine — the search is CPU-bound, so a GPU adds little.
+Open it in Colab (upload the file, or *File → Open notebook → GitHub*) and run
+the cells top to bottom.
 
 The repository is private, so add a fine-grained read-only token as a Colab
 secret named `GITHUB_TOKEN` (🔑 panel in the left sidebar) before running the

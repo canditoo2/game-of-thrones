@@ -77,7 +77,8 @@ machine — this PC is the build-and-verify machine.
 - **Do not start training runs on this machine unless the user asks** (user directive): it is
   CPU-only (no CUDA), and heavy runs belong on a separate machine. Prepare/verify here, run there.
   For Google Colab, start from `colab/agot-colab.ipynb` (private-repo token as a Colab secret
-  `GITHUB_TOKEN`; checkpoints on Drive; the launch cell auto-resumes).
+  `GITHUB_TOKEN`; checkpoints on Drive; the install cell caches the abi3 wheel on Drive per
+  commit; the launch cell auto-resumes).
 - `checkpoints/run1` and `run2` are **void**: trained with the old broken policy head (policy loss
   flat at ~2.0 = uniform over candidates). Don't resume them; the loader refuses them.
 - A run writes `agot.pt` (weights), `agot.state.pt` (iteration/best-eval/optimizer for
