@@ -77,7 +77,7 @@ fn scheduled_temperature(schedule: &[(u8, f64)], round: u8) -> f64 {
 }
 
 /// Per-leaf softmax over a flat logit vector, one segment per leaf.
-fn segment_softmax(logits: &[f32], index: &[u32], rows: usize) -> Vec<f32> {
+fn segment_softmax(logits: &[f32], index: &[i64], rows: usize) -> Vec<f32> {
     let mut maxima = vec![f32::NEG_INFINITY; rows];
     for (slot, row) in index.iter().enumerate() {
         let row = *row as usize;
@@ -229,7 +229,9 @@ pub fn selfplay<'py>(
                 let mut leaves: Vec<usize> = Vec::new();
                 let mut leaf_states: Vec<f32> = Vec::new();
                 let mut leaf_actions: Vec<f32> = Vec::new();
-                let mut leaf_index: Vec<u32> = Vec::new();
+                // int64 because the callback feeds this straight to torch's
+                // advanced indexing, exactly as `predict_many` does.
+                let mut leaf_index: Vec<i64> = Vec::new();
                 for (position, (slot, simulation)) in pending.iter().enumerate() {
                     if simulation.leaf.is_none() {
                         continue;
@@ -255,7 +257,7 @@ pub fn selfplay<'py>(
                             &mut cache,
                         );
                         leaf_actions.extend_from_slice(&buf);
-                        leaf_index.push(row as u32);
+                        leaf_index.push(row as i64);
                     }
                     leaves.push(position);
                 }

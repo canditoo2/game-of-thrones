@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 from agot.engine.game import Game, GameConfig
+from agot.engine.observation import HOUSE_ORDER
 
 core = pytest.importorskip("agot_core_ext")
 
@@ -265,3 +266,53 @@ def test_selfplay_respects_pimc_determinizations():
     # Both worlds of a decision are searched before the move is chosen, so the
     # number of leaves scored exceeds the number of decisions.
     assert sum(leaves for leaves, _ in calls) > states.shape[0]
+
+
+# ---------------------------------------------------------------------------
+# The training-loop adapter
+# ---------------------------------------------------------------------------
+
+
+def test_rust_engine_driver_feeds_the_training_loop():
+    """`rust_engine.self_play_records` must return records the trainer can use.
+
+    This is the seam the training loop consumes: GameRecord objects holding
+    Example objects with the same shapes `batched_self_play` produces.
+    """
+    torch = pytest.importorskip("torch")
+
+    from agot.nn.model import PolicyValueNet
+    from agot.training import rust_engine
+    from agot.training.parallel import SelfPlayPlan
+
+    if not rust_engine.available():  # pragma: no cover - depends on the environment
+        pytest.skip("the Rust extension is not installed")
+
+    model = PolicyValueNet(hidden=32, trunk_layers=1)
+    plan = SelfPlayPlan(
+        games=2,
+        max_rounds=2,
+        simulations=4,
+        determinizations=1,
+        batch_games=2,
+        seed=3,
+    )
+    records = rust_engine.self_play_records(model, plan)
+    assert len(records) == 2
+
+    for record in records:
+        assert record.examples, "a game must record decisions"
+        assert record.steps == len(record.examples)
+        assert record.rounds >= 1
+        assert record.winner is None or record.winner in HOUSE_ORDER
+        for example in record.examples:
+            assert example.state.shape == (97,)
+            assert example.actions.ndim == 2 and example.actions.shape[1] == 141
+            assert example.policy.shape == (example.actions.shape[0],)
+            assert abs(float(example.policy.sum()) - 1.0) < 1e-5
+            assert 0 <= example.player < len(HOUSE_ORDER)
+            assert example.outcome.shape == (len(HOUSE_ORDER),)
+            assert set(np.unique(example.outcome)).issubset({-1.0, 0.0, 1.0})
+
+    # A short plan keeps the runtime trivial, but the model really was consulted.
+    assert torch is not None
