@@ -62,8 +62,10 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,rl]"
+          # CPU torch first: installing ".[dev,rl]" without it can pull the
+          # default CUDA wheel, which this job would then replace.
           pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
 
       - name: Test (RL)
         run: pytest -q --no-header
