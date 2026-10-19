@@ -190,7 +190,7 @@ These are real deviations from the physical game. They are tracked in
   an ability (which Footman to upgrade, which Order to remove, which alternate
   card to play, which retreat area to pick) are auto-resolved with
   deterministic defaults; see
-  [`engine/house_cards.py`](src/agot/engine/house_cards.py).
+  [`house_cards.rs`](rust/crates/agot-core/src/house_cards.rs).
 * **Siege Engines** contribute their printed strength 4 only when attacking (or
   supporting an attack against) an area containing a Castle or Stronghold.
 * **Neutral forces** (King's Landing 5, The Eyrie 6) defend with their printed
