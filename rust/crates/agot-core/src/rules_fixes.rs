@@ -471,3 +471,72 @@ fn terrain_of_the_regions_these_tests_use() {
     let _: Option<&State> = None;
     let _ = ActionKind::March;
 }
+
+// ---------------------------------------------------------------------------
+// Data the rules depend on
+// ---------------------------------------------------------------------------
+
+/// Python: `test_stark_starts_with_one_supply`.
+///
+/// Stark begins one Supply level behind everyone else: a printed starting
+/// position, not a rule the engine applies.
+#[test]
+fn stark_starts_with_one_supply() {
+    let game = game(0);
+    assert_eq!(game.state.house(HouseId(2)).unwrap().supply_level, 1);
+    for house in HouseId::ALL
+        .into_iter()
+        .filter(|house| *house != HouseId(2))
+    {
+        assert_eq!(
+            game.state.house(house).unwrap().supply_level,
+            2,
+            "{house} starts at supply 2"
+        );
+    }
+}
+
+/// Python: `test_every_house_card_ability_is_implemented`.
+///
+/// Every ability named in the card data must have an implementation, or a card
+/// would silently do nothing in battle.
+#[test]
+fn every_house_card_ability_is_implemented() {
+    let data = data();
+    for house in HouseId::ALL {
+        for card in data.house_cards.deck(house) {
+            if card.ability.is_empty() || card.ability == "none" {
+                continue;
+            }
+            assert!(
+                crate::house_cards::IMPLEMENTED_ABILITIES.contains(&card.ability.as_str()),
+                "{}: ability {:?} is declared in the data but not implemented",
+                card.id,
+                card.ability
+            );
+        }
+    }
+}
+
+/// Python: `test_martell_deck_matches_the_reference_sheet`.
+#[test]
+fn martell_deck_matches_the_reference_sheet() {
+    let data = data();
+    let deck = data.house_cards.deck(HouseId(5));
+    let card = |id: &str| {
+        deck.iter()
+            .find(|card| card.id == id)
+            .unwrap_or_else(|| panic!("Martell has no card {id}"))
+    };
+    assert_eq!(card("the_red_viper").strength, 4);
+    assert_eq!(card("the_red_viper").swords, 2);
+    assert_eq!(card("the_red_viper").forts, 1);
+    assert_eq!(card("areo_hotah").strength, 3);
+    assert_eq!(card("obara_sand").strength, 2);
+    assert_eq!(card("darkstar").strength, 2);
+    assert_eq!(card("nymeria_sand").strength, 1);
+    assert_eq!(card("arianne_martell").strength, 1);
+    assert_eq!(card("doran_martell").strength, 0);
+    assert!(deck.iter().all(|card| card.id != "ellaria_sand"));
+    assert_eq!(deck.len(), 7);
+}
