@@ -41,6 +41,14 @@ fn engine_error(error: EngineError) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
 }
 
+/// JSON value to Python data, the same round-trip the snapshot uses.
+fn to_python(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
+    let text =
+        serde_json::to_string(value).map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let json = py.import("json")?;
+    Ok(json.call_method1("loads", (text,))?.unbind())
+}
+
 // -- field parsing for the position builder ------------------------------
 
 fn optional_house(value: &Bound<'_, PyAny>) -> PyResult<Option<HouseId>> {
@@ -152,6 +160,16 @@ impl PyAction {
 
     #[getter]
     fn card(&self) -> Option<&str> {
+        // A holders'-choice action stores a *Westeros* card index in the same
+        // field; resolve it against that deck instead of the house deck. The
+        // out-of-range sentinel is the "no effect" option.
+        if self.inner.kind == ActionKind::WesterosChoice {
+            let card = self.inner.card?;
+            if card.0 == u8::MAX {
+                return Some("none");
+            }
+            return Some(self.data.westeros.card_id(card.0 as u16));
+        }
         match (self.inner.house, self.inner.card) {
             (Some(house), Some(card)) => Some(self.data.house_cards.card(house, card).id.as_str()),
             _ => None,
@@ -313,6 +331,16 @@ impl PyGame {
     }
 
     #[getter]
+    fn max_rounds(&self) -> u8 {
+        self.game.state.max_rounds
+    }
+
+    #[getter]
+    fn victory_castles(&self) -> u8 {
+        self.game.state.victory_castles
+    }
+
+    #[getter]
     fn phase(&self) -> &'static str {
         self.game.state.phase.as_str()
     }
@@ -336,6 +364,9 @@ impl PyGame {
     /// row-aligned with [`PyGame::legal_actions`]. A terminal position yields an
     /// empty matrix rather than raising, because the caller is already looping on
     /// `is_terminal`.
+    ///
+    /// The return type is the point of the method, so the tuple is spelled out.
+    #[allow(clippy::type_complexity)]
     fn observe(
         &self,
         py: Python<'_>,
@@ -372,6 +403,75 @@ impl PyGame {
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         let json = py.import("json")?;
         Ok(json.call_method1("loads", (text,))?.unbind())
+    }
+
+    /// The parked battle, as the dict the Python engine keeps.
+    ///
+    /// The fingerprint only records whether a battle is pending; a caller that
+    /// scores support or reads the two sides needs the contents, so they are
+    /// serialized here rather than in the fixture format.
+    fn pending_battle(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let Some(battle) = self.game.state.pending_battle.as_ref() else {
+            return Ok(py.None());
+        };
+        let units = |counts: &[u8; 4]| {
+            let mut map = serde_json::Map::new();
+            for unit in agot_core::enums::UnitType::ALL {
+                map.insert(
+                    unit.as_str().to_string(),
+                    serde_json::json!(counts[unit.index()]),
+                );
+            }
+            serde_json::Value::Object(map)
+        };
+        let value = serde_json::json!({
+            "region": self.game.data.map.id_of(battle.region),
+            "attacker": battle.attacker.name(),
+            "defender": battle.defender.map(|house| house.name()),
+            "neutral": battle.neutral,
+            "origin": battle.origin.map(|region| self.game.data.map.id_of(region)),
+            "stage": format!("{:?}", battle.stage),
+            "attacker_units": units(&battle.attacker_units),
+            "defender_units": units(&battle.defender_units),
+            "attacker_card": battle.attacker_card.map(|card| {
+                self.game.data.house_cards.card(battle.attacker, card).id.as_str()
+            }),
+            "defender_card": match (battle.defender, battle.defender_card) {
+                (Some(house), Some(card)) => {
+                    Some(self.game.data.house_cards.card(house, card).id.as_str())
+                }
+                _ => None,
+            },
+            "blade_done": battle.blade_done,
+            "attacker_blade": battle.attacker_blade,
+            "defender_blade": battle.defender_blade,
+            "casualties_remaining": battle.casualties_remaining,
+        });
+        to_python(py, &value)
+    }
+
+    /// The Wildling attack in progress, as the dict the Python engine keeps.
+    fn wildling_attack(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let Some(attack) = self.game.state.wildling_attack.as_ref() else {
+            return Ok(py.None());
+        };
+        let bids: serde_json::Map<String, serde_json::Value> = attack
+            .bids
+            .iter()
+            .map(|(house, amount)| (house.name().to_string(), serde_json::json!(amount)))
+            .collect();
+        let value = serde_json::json!({
+            "strength": attack.strength,
+            "bids": bids,
+            "excluded": attack
+                .excluded
+                .iter()
+                .map(|house| house.name())
+                .collect::<Vec<_>>(),
+            "card": attack.card.map(|card| self.game.data.wildlings.card_id(card)),
+            "return_phase": attack.return_phase.as_str(),
+        });
+        to_python(py, &value)
     }
 
     /// Compact description of the position, as in the Python engine.
@@ -494,12 +594,24 @@ impl PyGame {
         Ok(())
     }
 
-    /// Declare a winner, as the engine does when the victory condition is met.
-    fn set_winner(&mut self, house: &str) -> PyResult<()> {
-        let house = HouseId::from_name(house)
-            .ok_or_else(|| PyValueError::new_err(format!("unknown house {house:?}")))?;
-        self.game.state.set_winner(house);
+    /// Declare a winner (`None` clears it), as the engine does when the victory
+    /// condition is met. The clearing form exists for tests that build a
+    /// finished position and then look again.
+    fn set_winner(&mut self, house: Option<&str>) -> PyResult<()> {
+        match house {
+            Some(name) => {
+                let house = HouseId::from_name(name)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown house {name:?}")))?;
+                self.game.state.set_winner(house);
+            }
+            None => self.game.state.winner = None,
+        }
         Ok(())
+    }
+
+    /// The trace log, empty while it is switched off (search).
+    fn log(&self) -> Vec<String> {
+        self.game.state.log.clone().unwrap_or_default()
     }
 
     /// Build an action from names: `game.action("place_order", region="winterfell", order="march")`.

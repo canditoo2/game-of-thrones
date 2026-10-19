@@ -374,12 +374,10 @@ they should be fixed before expecting a strong agent.
     than `dict[str, Any]`, and the per-node log is off during search.
 
     Validation: `tools/dump_fixture.py` records action scripts and full state
-    fingerprints from the Python engine, and `tests/planning_parity.rs` replays
-    them against Rust, comparing the acting house, the canonical legal-action list
-    at every decision and the whole position at the end. Mismatches name the
-    scenario, the decision index and the first differing field. Ported so far:
-    data loading and validation, the opening position, the Planning Phase and the
-    Messenger Raven step.
+    fingerprints from the Python engine, and the parity tests replay them against
+    Rust, comparing the acting house, the canonical legal-action list at every
+    decision and the whole position at the end. Mismatches name the scenario, the
+    decision index and the first differing field.
 
     Measured (`cargo bench --bench clone_step`, release, this machine): `State`
     clone 364 ns against Python's 5 900 ns (16×), `Game` clone 432 ns against
@@ -414,7 +412,33 @@ they should be fixed before expecting a strong agent.
     Westeros decks off, because the two engines shuffle differently and nothing
     may be drawn if the games are to stay comparable move for move.
 
-    Remaining: resolving `agot.engine` itself to the extension, which needs a
-    view tier over the Rust state (the existing tests build positions by mutating
-    `state.regions[...]` directly), then the maturin packaging switch, the CI job
-    and the Colab wheel cell, and finally deleting the Python engine.
+    The rule-fidelity audit moved with the engine: every regression in
+    `tests/test_rules_fixes.py` now has a Rust counterpart in
+    `crates/agot-core/src/rules_fixes.rs` (53 tests, named after the Python
+    originals so `docs/rulebook-audit.md` still tracks across the port). Porting
+    them found two Rust-side defects the parity corpus had never exercised: the
+    "Preemptive Raid" second Wildling attack was applied to an attack struct
+    that resolution had already taken out of the state, so the card silently did
+    nothing; and a holders'-choice card's `"none"` option was dropped while the
+    option list was parsed, leaving the holder unable to decline. Both are
+    fixed, and `none` is carried as an out-of-range card id so the observation
+    encoder still sets its "a card field is present" marker exactly as Python
+    does.
+
+    The read views over the Rust position were extended while the regressions
+    were ported: the state exposes the pieces the rest of the package reads
+    (`orders_revealed`, `fortifications`, `action_step`, the pending dicts, the
+    Wildling attack, `max_rounds`/`victory_castles`, a settable `winner` and the
+    log), `RustGame` keeps the `GameConfig` it was built with, and the session
+    tier grew `pending_battle`, `wildling_attack`, `log` and `max_rounds` /
+    `victory_castles` getters. With the ported regressions landed,
+    `AGOT_ENGINE=rust` plays a full greedy demo to a winner; the remaining
+    failures are the tests that build positions by writing into
+    `state.regions[...]` (they need the same builder the extension already has,
+    wired into the view) and the PIMC path, which still resamples hidden state in
+    Python (`hidden.py` writes through `state.mut`).
+
+    Remaining: finishing the write tier over the Rust state so the Python tests
+    that mutate a position can run against the extension, then the maturin
+    packaging switch, changing the default engine, and finally deleting the
+    Python engine.

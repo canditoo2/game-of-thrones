@@ -122,6 +122,13 @@ bidder is broken by **Iron Throne position** rather than asking the holder.
 ## How to re-verify
 
 The data is fully verified against the physical components. Everything can be
-re-checked by running `pytest -q` (the map validator and the
-`test_rules_fixes.py` regression suite) and by comparing
-`src/agot/data/*.json` against the sources listed at the top of this file.
+re-checked by running `pytest -q` (the map validator and the rule-fix
+regressions) and by comparing `src/agot/data/*.json` against the sources listed
+at the top of this file.
+
+The rule-fix regression suite now lives in Rust as well: every test in
+`tests/test_rules_fixes.py` has a counterpart in
+`crates/agot-core/src/rules_fixes.rs`, named after its Python original, and the
+Rust file is the one that follows the engine across the port. Running
+`cargo test --release` from `rust/` exercises the whole audit trail; the Python
+file stays until the Python engine is deleted.

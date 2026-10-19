@@ -80,9 +80,16 @@ impl Game {
                     .map(|list| {
                         list.iter()
                             .filter_map(|value| {
-                                value
-                                    .as_str()
-                                    .and_then(|id| self.data.westeros.card_index(id))
+                                value.as_str().and_then(|id| {
+                                    // "none" is a real option (the holder may
+                                    // choose no effect); it has no card row in
+                                    // the data, so it gets the sentinel.
+                                    if id == "none" {
+                                        Some(crate::state::NONE_OPTION)
+                                    } else {
+                                        self.data.westeros.card_index(id)
+                                    }
+                                })
                             })
                             .collect()
                     })
@@ -222,7 +229,10 @@ impl Game {
         let picked = action
             .card
             .map(|card| card.0 as u16)
-            .filter(|card| choice.options.contains(card));
+            .filter(|card| choice.options.contains(card))
+            // The "none" option is carried as a sentinel, exactly like the
+            // Python action's literal `card="none"`.
+            .filter(|card| *card != crate::state::NONE_OPTION);
         let card_name = self.data.westeros.card(choice.card)["name"]
             .as_str()
             .unwrap_or("card")
@@ -948,7 +958,7 @@ impl Game {
 
     /// Compare the Night's Watch and Wildling strengths, then the card.
     pub(crate) fn resolve_wildling_attack(&mut self) -> Result<(), EngineError> {
-        let Some(attack) = self.state.wildling_attack.take() else {
+        let Some(mut attack) = self.state.wildling_attack.take() else {
             self.state.phase = Phase::Westeros;
             return Ok(());
         };
@@ -996,7 +1006,9 @@ impl Game {
                 .copied()
                 .filter(|house| Some(*house) != chosen)
                 .collect();
-            self.apply_wildling_effect(&spec, chosen, &others, &attack)?;
+            // The effect may amend *this* attack (Preemptive Raid adds a second
+            // one); Python mutates the resolved card's local dict the same way.
+            self.apply_wildling_effect(&spec, chosen, &others, &mut attack)?;
             self.state.wildling_discard.push(card_id);
             let name = card["name"].as_str().unwrap_or("card").to_string();
             let effect = spec["effect"].as_str().unwrap_or("nothing").to_string();
@@ -1057,7 +1069,7 @@ impl Game {
         spec: &serde_json::Value,
         chosen: Option<HouseId>,
         others: &[HouseId],
-        attack: &WildlingAttack,
+        attack: &mut WildlingAttack,
     ) -> Result<(), EngineError> {
         let effect = spec["effect"].as_str().unwrap_or("nothing");
         let Some(chosen) = chosen else {
@@ -1147,10 +1159,8 @@ impl Game {
             }
             "second_attack" => {
                 let strength = spec["strength"].as_u64().unwrap_or(6) as u8;
-                if let Some(state) = self.state.wildling_attack.as_mut() {
-                    state.second_attack = Some(SmallVec::from_slice(&[chosen]));
-                    state.second_strength = strength;
-                }
+                attack.second_attack = Some(SmallVec::from_slice(&[chosen]));
+                attack.second_strength = strength;
             }
             "refund_bid" => {
                 let refund = attack.bid_of(chosen).unwrap_or(0);

@@ -10,7 +10,7 @@ machine — this PC is the build-and-verify machine.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
-- Tests: `.venv\Scripts\python -m pytest -q` (172 tests). When piped in PowerShell the final
+- Tests: `.venv\Scripts\python -m pytest -q` (215 tests). When piped in PowerShell the final
   summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`
 - Lint: `.venv\Scripts\ruff check src tests` (line-length 100, py310 target).
@@ -42,7 +42,10 @@ machine — this PC is the build-and-verify machine.
   `agot.training.rust_engine` adapts it, `selfplay.batched_self_play` takes that path whenever
   it can (falling back to the Python driver for scripted opponent seats) and records which ran
   in `selfplay.LAST_BACKEND`. The rules engine itself (`agot.engine`) is still the Python one:
-  switching it over needs a view tier over the Rust state and is the remaining cutover step.
+  `AGOT_ENGINE=rust` swaps in `agot.engine.rust`, whose read views are complete and whose
+  rule-fix regressions live in `crates/agot-core/src/rules_fixes.rs`; the remaining cutover
+  work is the *write* tier over the Rust state (tests that build a position), the packaging
+  switch, and deleting the Python engine.
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 

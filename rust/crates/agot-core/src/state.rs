@@ -317,6 +317,14 @@ impl WildlingAttack {
     }
 }
 
+/// The "no effect" option of a holders'-choice Westeros card.
+///
+/// The option list in `westeros.json` can contain the literal `"none"`, which
+/// has no card row. Actions carry it as an out-of-range [`crate::enums::CardId`]
+/// so the encoder still sets the "a card field is present" marker, matching the
+/// Python action's string `"none"`.
+pub const NONE_OPTION: u16 = u16::MAX;
+
 /// Set while a holders'-choice Westeros card waits for its holder to pick.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WesterosChoice {

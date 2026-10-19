@@ -445,7 +445,7 @@ pub fn selfplay<'py>(
         steps.into_pyobject(py)?.unbind().into_any(),
         rounds.into_pyobject(py)?.unbind().into_any(),
     ];
-    Ok(PyTuple::new(py, items)?)
+    PyTuple::new(py, items)
 }
 
 /// Which canonical houses take part, inferred from the recorded examples.

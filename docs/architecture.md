@@ -175,7 +175,10 @@ penalty) grind the policy parameters to zero.
   mustering, the Messenger Raven, the Valyrian Steel Blade, neutral forces,
   Wildling icon ordering, Wildling bidding and card effects, the end-of-game
   tiebreakers, House Stark's starting Supply, the three holders'-choice Westeros
-  cards, and a representative ability for every House-card mechanic.
+  cards, and a representative ability for every House-card mechanic. The same
+  regressions exist in Rust (`crates/agot-core/src/rules_fixes.rs`, one test per
+  Python original) and the Rust copy is the one that will outlive the Python
+  engine.
 * `test_observation.py` — fixed dimensions, determinism, one-hot blocks.
 * `test_agents.py` — every policy returns actions aligned with its targets.
 * `test_training.py` — examples are labelled, replay round-trips, matches run.

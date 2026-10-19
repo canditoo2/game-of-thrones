@@ -280,7 +280,19 @@ pub fn state_fingerprint(state: &State, data: &DataSet) -> Value {
             Some(choice) => json!({
                 "card": data.westeros.card_id(choice.card),
                 "holder": choice.holder.name(),
-                "options": choice.options.iter().map(|card| data.westeros.card_id(*card)).collect::<Vec<_>>(),
+                "options": choice
+                    .options
+                    .iter()
+                    .map(|card| {
+                        // The "no effect" option has no card row; Python keeps
+                        // the literal string, so the fingerprint must too.
+                        if *card == crate::state::NONE_OPTION {
+                            "none".to_string()
+                        } else {
+                            data.westeros.card_id(*card).to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>(),
             }),
             None => Value::Null,
         },

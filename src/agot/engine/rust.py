@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from agot.engine.actions import Action, ActionKind
-from agot.engine.enums import OrderType, Phase, Track, UnitType
+from agot.engine.enums import ActionStep, OrderType, Phase, Track, UnitType
 from agot.engine.game import GameConfig
 from agot.engine.map import load_map
 
@@ -139,12 +139,106 @@ class StateView:
         return Phase(self._data()["phase"])
 
     @property
+    def action_step(self) -> ActionStep:
+        return ActionStep(self._data()["action_step"])
+
+    @property
     def active_house(self) -> str | None:
         return self._data()["active_house"]
 
     @property
+    def action_house_last(self) -> str | None:
+        return self._data()["action_house_last"]
+
+    @property
+    def raven_used(self) -> bool:
+        return self._data()["raven_used"]
+
+    @property
+    def return_phase(self) -> Phase | None:
+        raw = self._data()["return_phase"]
+        return Phase(raw) if raw is not None else None
+
+    @property
+    def order_restrictions(self) -> list[str]:
+        return list(self._data()["order_restrictions"])
+
+    @property
+    def bid_tracks(self) -> list[Track]:
+        return [Track(name) for name in self._data()["bid_tracks"]]
+
+    @property
+    def pending_bids(self) -> dict[str, int]:
+        return dict(self._data()["pending_bids"])
+
+    @property
+    def pending_planning(self) -> list[str]:
+        return list(self._data()["pending_planning"])
+
+    @property
+    def pending_westeros(self) -> list[str] | None:
+        raw = self._data()["pending_westeros"]
+        return None if raw is None else list(raw)
+
+    @property
+    def pending_march(self) -> dict | None:
+        return self._data()["pending_march"]
+
+    @property
+    def pending_battle(self) -> dict | None:
+        return self._game._inner.pending_battle()
+
+    @property
+    def westeros_choice(self) -> dict | None:
+        return self._data()["westeros_choice"]
+
+    @property
+    def wildling_threat(self) -> int:
+        return self._data()["wildling_threat"]
+
+    @property
+    def wildling_attack(self) -> dict | None:
+        return self._game._inner.wildling_attack()
+
+    def raven_holder(self) -> str | None:
+        order = self.tracks[Track.KINGS_COURT]
+        return order[0] if order else None
+
+    def blade_holder(self) -> str | None:
+        order = self.tracks[Track.FIEFDOMS]
+        return order[0] if order else None
+
+    @property
     def winner(self) -> str | None:
         return self._data()["winner"]
+
+    @winner.setter
+    def winner(self, house: str | None) -> None:
+        self._game._inner.set_winner(house)
+
+    @property
+    def fortifications(self) -> frozenset[str]:
+        return frozenset(self._data()["fortifications"])
+
+    @property
+    def max_rounds(self) -> int:
+        return self._game._inner.max_rounds
+
+    @property
+    def victory_castles(self) -> int:
+        return self._game._inner.victory_castles
+
+    @property
+    def orders_revealed(self) -> bool:
+        # The Rust engine tracks the same rule with the same phases: orders are
+        # secret only while they are being assigned and swapped.
+        return self.phase not in (Phase.PLANNING, Phase.RAVEN)
+
+    @property
+    def log(self) -> list[str]:
+        # The Rust log is off during search; a session that was asked for one
+        # (the CLI's demo) reads it here.
+        return list(self._game._inner.log())
 
     @property
     def regions(self) -> dict[str, RegionView]:
@@ -214,6 +308,37 @@ class StateView:
             if self.regions[region_id].controller == house_id
         )
 
+    def star_allowance(self, house_id: str) -> int:
+        from agot.engine.enums import STAR_ALLOWANCE_BY_COURT_POSITION
+
+        position = self.track_position(house_id, Track.KINGS_COURT)
+        if position == 0:
+            return 0
+        index = min(position - 1, len(STAR_ALLOWANCE_BY_COURT_POSITION) - 1)
+        return STAR_ALLOWANCE_BY_COURT_POSITION[index]
+
+    def within_supply(self, house_id: str) -> bool:
+        """Whether the house's armies fit its Supply track position.
+
+        A lone unit is not an army and stays exempt; routed units still count.
+        """
+        house = self.houses.get(house_id)
+        if house is None:
+            return True
+        sizes = sorted(
+            (
+                self.regions[region_id].total(include_routed=True)
+                for region_id in self.controlled_regions(house_id)
+            ),
+            reverse=True,
+        )
+        sizes = [size for size in sizes if size >= 2]
+        limits = house.supply_limit()
+        return all(
+            index < len(limits) and size <= limits[index]
+            for index, size in enumerate(sizes)
+        )
+
 
 class RustGame:
     """The Rust engine behind the Python engine's interface.
@@ -223,8 +348,9 @@ class RustGame:
     through the extension's own APIs (`set_region`, `selfplay`).
     """
 
-    def __init__(self, inner) -> None:
+    def __init__(self, inner, config: GameConfig | None = None) -> None:
         self._inner = inner
+        self._config = config or GameConfig()
         self.map = load_map()
 
     @classmethod
@@ -240,11 +366,11 @@ class RustGame:
             victory_castles=config.victory_castles,
             use_westeros_decks=config.use_westeros_decks,
         )
-        return cls(inner)
+        return cls(inner, config)
 
     @property
     def config(self) -> GameConfig:
-        return GameConfig()
+        return self._config
 
     @property
     def state(self) -> StateView:
@@ -254,7 +380,7 @@ class RustGame:
         return self._inner.snapshot()
 
     def clone(self) -> RustGame:
-        return RustGame(self._inner.clone())
+        return RustGame(self._inner.clone(), self._config)
 
     def is_terminal(self) -> bool:
         return self._inner.is_terminal()

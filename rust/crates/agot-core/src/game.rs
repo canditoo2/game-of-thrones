@@ -190,7 +190,10 @@ impl Game {
     // ==================================================================
 
     /// Resolves every phase that needs no player input.
-    fn advance(&mut self) -> Result<(), EngineError> {
+    ///
+    /// `pub(crate)` so the rule-fix regressions can mirror Python's `_advance`
+    /// when a test sets a phase up directly instead of playing into it.
+    pub(crate) fn advance(&mut self) -> Result<(), EngineError> {
         for _ in 0..500 {
             if self.state.phase == Phase::GameOver {
                 self.state.active_house = None;
@@ -747,7 +750,7 @@ impl Game {
         actions
     }
 
-    fn apply_raven_swap(&mut self, action: Action) -> Result<(), EngineError> {
+    pub(crate) fn apply_raven_swap(&mut self, action: Action) -> Result<(), EngineError> {
         let house = action
             .house
             .ok_or_else(|| EngineError::IllegalAction("raven_swap without a house".into()))?;
