@@ -102,6 +102,14 @@ class ReplayBuffer:
     def __len__(self) -> int:
         return self._size
 
+    def __getitem__(self, index: int) -> Example:
+        """One example as views, without building the whole list."""
+        if index < 0:
+            index += self._size
+        if not 0 <= index < self._size:
+            raise IndexError(index)
+        return self._example(index)
+
     def add(self, example: Example) -> None:
         if self._size >= self.capacity:
             self._drop_oldest()

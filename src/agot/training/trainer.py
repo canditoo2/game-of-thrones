@@ -10,6 +10,7 @@ The training objective is the AlphaZero one, generalised to six players:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -240,7 +241,7 @@ class Trainer:
         if "rng" in state:
             self.rng.bit_generator.state = state["rng"]
 
-    def train_epoch(self, examples: list[Example]) -> TrainStats:
+    def train_epoch(self, examples: Sequence[Example]) -> TrainStats:
         if not examples:
             return TrainStats()
         self.model.train()
@@ -296,8 +297,13 @@ class Trainer:
         *,
         callback=None,
     ) -> list[dict]:
-        """Train for ``epochs`` passes over the current buffer contents."""
-        examples = buffer.all()
+        """Train for ``epochs`` passes over the current buffer contents.
+
+        The buffer itself is indexed: it implements ``__len__``/``__getitem__``
+        over its arrays, so an epoch no longer materialises every example as an
+        object before touching it.
+        """
+        examples = buffer
         history: list[dict] = []
         for epoch in range(epochs if epochs is not None else self.config.epochs):
             stats = self.train_epoch(examples)
