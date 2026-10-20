@@ -1,0 +1,4 @@
+# Recorded differential/encoder data: test fixtures, not source. Excluding them
+# from Linguist keeps the repository language bar about the code.
+rust/crates/agot-core/tests/data/engine_fixture.json linguist-generated=true
+rust/crates/agot-core/tests/data/encoder_golden.json linguist-generated=true
