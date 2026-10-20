@@ -209,6 +209,19 @@ they should be fixed before expecting a strong agent.
     separately, so they would prune to different action sets, and aggregating the
     roots then silently drops whichever action another world kept. It needs one
     shared top-K computed before the worlds diverge.
+
+    A first short test run (50 iterations, 32 games each, 128 sims / 2
+    determinizations, hidden 128, ~23 minutes on this machine) cleared the
+    old failure signature: policy loss fell 2.0085 → 0.6256 and value loss
+    0.432 → 0.092. The eval-selected best checkpoint (iteration 10) then won
+    **52/100** against the mixed random+greedy field (Wilson 95% 42.3-61.5%),
+    where the greedy baseline wins 26/100 (18.4-35.4%) and a random candidate
+    7/100. The final checkpoint at iteration 50 won only 28/100 (20.1-37.5%),
+    so this small run improved sharply and then degraded; the best-checkpoint
+    selection caught it, but the long run needs its own early-stopping/eval
+    protocol. This is a pipeline signal, not yet a strength result over
+    hundreds of games against a dedicated greedy field.
+
 14. **Search efficiency.** *(done)* `GameState.clone` no longer uses
     `copy.deepcopy` (a hand-written structural copy, ~8× faster), the state
     encoding is single-pass, and static region/card features are cached. MCTS
