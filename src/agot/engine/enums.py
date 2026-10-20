@@ -23,51 +23,6 @@ class UnitType(str, Enum):
     SHIP = "ship"
 
 
-@dataclass(frozen=True)
-class UnitStats:
-    """Printed properties of a unit type.
-
-    ``combat_strength`` is what the unit adds to a battle. ``is_land`` marks
-    whether the unit may occupy land regions (ships may not).
-    """
-
-    combat_strength: int
-    is_land: bool
-
-
-#: Printed unit statistics.
-#:
-#: Combat strengths (footman 1, knight 2, ship 1) match the rulebook, which
-#: explicitly contrasts a Knight's Combat Strength of 2 with the fact that it
-#: still counts as a single casualty.
-#:
-#: A Siege Engine's printed Combat Strength is 4, but it only applies when the
-#: engine is attacking (or supporting an attack against) an area containing a
-#: Castle or Stronghold; otherwise it contributes 0. Use
-#: :func:`agot.engine.combat.units_strength` with ``siege_active`` to get the
-#: context-dependent value.
-UNIT_STATS: dict[UnitType, UnitStats] = {
-    UnitType.FOOTMAN: UnitStats(combat_strength=1, is_land=True),
-    UnitType.KNIGHT: UnitStats(combat_strength=2, is_land=True),
-    UnitType.SIEGE: UnitStats(combat_strength=4, is_land=True),
-    UnitType.SHIP: UnitStats(combat_strength=1, is_land=False),
-}
-
-#: Strength printed on every House's Garrison token.
-GARRISON_STRENGTH: int = 2
-
-#: Mustering point cost to recruit one unit. Upgrading a Footman to a Knight or
-#: Siege Engine costs 1 point instead (see :mod:`agot.engine.game`).
-MUSTER_COST: dict[UnitType, int] = {
-    UnitType.FOOTMAN: 1,
-    UnitType.KNIGHT: 2,
-    UnitType.SIEGE: 2,
-    UnitType.SHIP: 1,
-}
-
-LAND_UNITS: tuple[UnitType, ...] = (UnitType.FOOTMAN, UnitType.KNIGHT, UnitType.SIEGE)
-
-
 class OrderType(str, Enum):
     """The five order kinds."""
 

@@ -16,7 +16,8 @@ how much it matters for learning a strong agent. It doubles as the project plan.
   order is offered to its owner in Iron Throne order, and owners may back either
   side or refuse. A player may never support an opponent against their own
   units, and Support orders are not consumed by a battle.
-* All 42 House cards' special abilities (see `engine/house_cards.py`); the
+* All 42 House cards' special abilities (see
+  `rust/crates/agot-core/src/house_cards.rs`); the
   player sub-choices inside an ability are auto-resolved with documented
   deterministic defaults.
 * Supply recalculation and enforcement, including on marches.
@@ -148,7 +149,8 @@ they should be fixed before expecting a strong agent.
    do not run the phase machine.
 
 4. **House-card abilities.** *(done)* All 42 cards' text effects are modelled
-   in `engine/house_cards.py`: passive strength/icon modifiers, immediate
+   in `rust/crates/agot-core/src/house_cards.rs`: passive strength/icon
+   modifiers, immediate
    destruction/Order/track effects, and post-combat effects. Where a card lets
    its owner choose (which Footman, which Order, which alternate card, which
    retreat), the engine picks a deterministic default; the exact defaults are

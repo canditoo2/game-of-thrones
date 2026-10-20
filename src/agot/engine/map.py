@@ -163,10 +163,6 @@ class GameMap:
                 return port_id
         return None
 
-    def controlled_castle_count(self, region_ids) -> int:
-        """Number of castle/stronghold regions in ``region_ids``."""
-        return sum(1 for rid in region_ids if self.regions[rid].is_fortification)
-
     # -- validation ------------------------------------------------------
 
     def validate(self) -> None:
@@ -268,36 +264,3 @@ class HouseCardData:
 @lru_cache(maxsize=1)
 def load_house_cards() -> HouseCardData:
     return HouseCardData(load_json("house_cards.json"))
-
-
-class WesterosData:
-    """The three Westeros decks and their effects."""
-
-    def __init__(self, raw: dict[str, Any]) -> None:
-        self.raw = raw
-        self.cards: dict[str, dict[str, Any]] = raw["cards"]
-        self.composition: dict[str, list[str]] = raw["composition"]
-
-    def deck_names(self) -> tuple[str, ...]:
-        return tuple(self.composition)
-
-
-@lru_cache(maxsize=1)
-def load_westeros() -> WesterosData:
-    return WesterosData(load_json("westeros.json"))
-
-
-class WildlingData:
-    """The Wildling deck and track configuration."""
-
-    def __init__(self, raw: dict[str, Any]) -> None:
-        self.raw = raw
-        self.track_max: int = raw["track_max"]
-        self.start_threat: int = raw["start_threat"]
-        self.cards: dict[str, dict[str, Any]] = raw["cards"]
-        self.deck: list[str] = raw["deck"]
-
-
-@lru_cache(maxsize=1)
-def load_wildlings() -> WildlingData:
-    return WildlingData(load_json("wildlings.json"))

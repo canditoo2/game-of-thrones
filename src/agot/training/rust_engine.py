@@ -40,11 +40,6 @@ def core():
     return _core
 
 
-def available() -> bool:
-    """Whether the Rust engine can be used here."""
-    return core() is not None
-
-
 def leaf_evaluator(model):
     """Adapt a :class:`PolicyValueNet` to the driver's callback protocol.
 

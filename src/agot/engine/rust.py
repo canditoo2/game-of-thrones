@@ -37,11 +37,6 @@ def core():
     return _core
 
 
-def available() -> bool:
-    """Whether the Rust engine can be used here."""
-    return core() is not None
-
-
 def _units(raw: dict[str, int]) -> dict[UnitType, int]:
     """The snapshot's name-keyed counts as the enum-keyed mapping Python uses."""
     return {
