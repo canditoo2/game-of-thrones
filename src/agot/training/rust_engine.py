@@ -136,9 +136,11 @@ def _unpack(result, games: int) -> list[GameRecord]:
                 Example(
                     state=states[offset],
                     actions=actions[start:end],
-                    policy=policy[start:end].astype(np.float32),
+                    # Already float32: a view avoids a copy per example and the
+                    # packed arrays are kept alive by the other views anyway.
+                    policy=np.asarray(policy[start:end], dtype=np.float32),
                     player=int(players[offset]),
-                    outcome=outcomes[offset].astype(np.float32),
+                    outcome=np.asarray(outcomes[offset], dtype=np.float32),
                 )
             )
         cursor += int(taken)
