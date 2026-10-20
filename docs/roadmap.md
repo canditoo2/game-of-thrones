@@ -512,7 +512,8 @@ they should be fixed before expecting a strong agent.
     serialize/`json.loads` pair, and `predict_actions` no longer builds an
     all-ones mask. The replay buffer is now a structure of arrays — dense
     position/player/outcome rows plus one concatenated action matrix, one
-    policy vector and an offset table; `all`/`sample` return views and old
+    policy vector and an offset table; `all`/`sample` return views, the trainer
+    indexes the buffer directly instead of materialising a list, and old
     object-array files still load. The Rust driver also takes multiple
     evaluators plus a per-seat model map, so net-vs-net matches and the
     round-robin league run natively (each leaf batch is grouped by its seat's
