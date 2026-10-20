@@ -49,6 +49,30 @@ struct FinishedGame {
     rounds: u8,
 }
 
+/// The leaves of one batch that belong to the same evaluator.
+///
+/// A game may mix models by seat (net-vs-net evaluation); each model gets its
+/// own callback instead of every leaf going through one shared model.
+struct LeafGroup {
+    model: usize,
+    positions: Vec<usize>,
+    states: Vec<f32>,
+    actions: Vec<f32>,
+    index: Vec<i64>,
+}
+
+impl LeafGroup {
+    fn new(model: usize) -> LeafGroup {
+        LeafGroup {
+            model,
+            positions: Vec::new(),
+            states: Vec::new(),
+            actions: Vec::new(),
+            index: Vec::new(),
+        }
+    }
+}
+
 fn spec_value<'py, T>(spec: &Bound<'py, PyDict>, key: &str) -> PyResult<Option<T>>
 where
     T: for<'a> FromPyObject<'a, 'py, Error = PyErr>,
@@ -117,13 +141,28 @@ fn array2(py: Python<'_>, rows: usize, cols: usize, flat: Vec<f32>) -> PyResult<
 /// required when `spec["record_opponents"]` is true. Search seats remain fully
 /// native; only the scripted seat's own decisions cross the boundary.
 #[pyfunction]
-#[pyo3(signature = (spec, evaluator, scripted_decider=None))]
+#[pyo3(signature = (spec, evaluator, scripted_decider=None, extra_evaluators=None))]
 pub fn selfplay<'py>(
     py: Python<'py>,
     spec: &Bound<'py, PyDict>,
     evaluator: Py<PyAny>,
     scripted_decider: Option<Py<PyAny>>,
+    extra_evaluators: Option<Vec<Py<PyAny>>>,
 ) -> PyResult<Bound<'py, PyTuple>> {
+    let mut evaluators: Vec<Py<PyAny>> = Vec::with_capacity(
+        1 + extra_evaluators
+            .as_ref()
+            .map(|extra| extra.len())
+            .unwrap_or(0),
+    );
+    evaluators.push(evaluator);
+    if let Some(extra) = extra_evaluators {
+        evaluators.extend(extra);
+    }
+    // Optional per-game, per-house model index. Absent means every search seat
+    // uses evaluator 0, which is the normal self-play request.
+    let seat_models: Vec<Vec<Option<usize>>> = spec_or(spec, "seat_models", Vec::new())?;
+
     let games: usize = spec_or(spec, "games", 1)?;
     let simulations: u32 = spec_or(spec, "simulations", 32)?;
     let determinizations: u32 = spec_or(spec, "determinizations", 1)?.max(1);
@@ -318,50 +357,67 @@ pub fn selfplay<'py>(
                     }
                 }
 
-                // Encode every leaf that needs a network score.
-                let mut leaves: Vec<usize> = Vec::new();
-                let mut leaf_states: Vec<f32> = Vec::new();
-                let mut leaf_actions: Vec<f32> = Vec::new();
-                // int64 because the callback feeds this straight to torch's
-                // advanced indexing, exactly as `predict_many` does.
-                let mut leaf_index: Vec<i64> = Vec::new();
+                // Encode every leaf, grouped by the model that owns its seat.
                 // One cache for the whole batch: each leaf clears it, which is
                 // far cheaper than allocating (and zeroing) 64 entries per leaf.
                 let mut cache = observation::RegionCache::new();
+                let mut groups: Vec<LeafGroup> = Vec::new();
                 for (position, (slot, simulation)) in pending.iter().enumerate() {
                     if simulation.leaf.is_none() {
                         continue;
                     }
-                    let row = leaves.len();
                     let game = searchers[*slot]
                         .leaf_game(simulation)
                         .ok_or_else(|| PyRuntimeError::new_err("a leaf without a position"))?;
+                    let house = game.current_player().ok_or_else(|| {
+                        PyRuntimeError::new_err("a search leaf without an acting house")
+                    })?;
+                    let model = seat_models
+                        .get(start + slot)
+                        .and_then(|models| models.get(house.index()))
+                        .copied()
+                        .flatten()
+                        .unwrap_or(0);
+                    if model >= evaluators.len() {
+                        return Err(PyValueError::new_err(format!(
+                            "seat model {model} is out of range for {} evaluators",
+                            evaluators.len()
+                        )));
+                    }
+                    let group_index = match groups.iter().position(|group| group.model == model) {
+                        Some(index) => index,
+                        None => {
+                            groups.push(LeafGroup::new(model));
+                            groups.len() - 1
+                        }
+                    };
+                    let group = &mut groups[group_index];
+                    let row = group.positions.len();
                     cache.clear();
-                    let state_start = leaf_states.len();
-                    leaf_states.resize(state_start + STATE_DIM, 0.0);
+                    let state_start = group.states.len();
+                    group.states.resize(state_start + STATE_DIM, 0.0);
                     observation::encode_state_into(
                         &game.state,
                         &data,
                         None,
-                        &mut leaf_states[state_start..],
+                        &mut group.states[state_start..],
                     );
                     for action in &simulation.actions {
-                        let start = leaf_actions.len();
-                        leaf_actions.resize(start + ACTION_DIM, 0.0);
+                        let action_start = group.actions.len();
+                        group.actions.resize(action_start + ACTION_DIM, 0.0);
                         observation::encode_action_into(
                             &game.state,
                             &data,
                             action,
                             None,
-                            &mut leaf_actions[start..],
+                            &mut group.actions[action_start..],
                             &mut cache,
                         );
-                        leaf_index.push(row as i64);
+                        group.index.push(row as i64);
                     }
-                    leaves.push(position);
+                    group.positions.push(position);
                 }
 
-                // One callback for the whole batch.
                 let mut evaluations: Vec<Option<Evaluation>> = pending
                     .iter()
                     .map(|(_, simulation)| {
@@ -376,18 +432,21 @@ pub fn selfplay<'py>(
                     })
                     .collect();
 
-                if !leaves.is_empty() {
-                    let rows = leaves.len();
-                    let total = leaf_index.len();
-                    let state_array = array2(py, rows, STATE_DIM, leaf_states)?;
-                    let action_array = array2(py, total, ACTION_DIM, leaf_actions)?;
-                    let index_array = numpy::ndarray::Array1::from_vec(leaf_index.clone())
+                for group in groups {
+                    let rows = group.positions.len();
+                    if rows == 0 {
+                        continue;
+                    }
+                    let total = group.index.len();
+                    let state_array = array2(py, rows, STATE_DIM, group.states)?;
+                    let action_array = array2(py, total, ACTION_DIM, group.actions)?;
+                    let index_array = numpy::ndarray::Array1::from_vec(group.index.clone())
                         .into_pyarray(py)
                         .unbind();
                     let mask = vec![1.0f32; total];
                     let mask_array = PyArray1::from_vec(py, mask).unbind();
 
-                    let reply = evaluator
+                    let reply = evaluators[group.model]
                         .call1(py, (state_array, action_array, index_array, mask_array))?;
                     let (logits, values): (PyReadonlyArray1<f32>, PyReadonlyArray2<f32>) =
                         reply.extract(py)?;
@@ -405,18 +464,18 @@ pub fn selfplay<'py>(
                             values.len()
                         )));
                     }
-                    let priors = segment_softmax(logits, &leaf_index, rows);
+                    let priors = segment_softmax(logits, &group.index, rows);
 
                     // Scatter each leaf's slice back to its simulation.
                     let mut bounds = Vec::with_capacity(rows + 1);
                     bounds.push(0usize);
-                    for position in &leaves {
+                    for position in &group.positions {
                         bounds.push(
                             bounds.last().copied().unwrap_or(0)
                                 + pending[*position].1.actions.len(),
                         );
                     }
-                    for (row, position) in leaves.iter().enumerate() {
+                    for (row, position) in group.positions.iter().enumerate() {
                         let mut value = [0.0f64; N_HOUSES];
                         for (slot, entry) in value.iter_mut().enumerate() {
                             *entry = values[row * N_HOUSES + slot] as f64;

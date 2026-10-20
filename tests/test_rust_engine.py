@@ -458,6 +458,44 @@ def test_selfplay_respects_pimc_determinizations():
 # ---------------------------------------------------------------------------
 
 
+def test_two_networks_and_anchors_play_on_the_rust_driver():
+    """The driver splits a leaf batch by seat model, including scripted seats."""
+    pytest.importorskip("torch")
+
+    from agot.agents import RandomPolicy
+    from agot.nn.model import PolicyValueNet
+    from agot.training.evaluate import evaluate_models_match, evaluate_models_vs_field
+
+    candidate = PolicyValueNet(hidden=8, trunk_layers=1)
+    opponent = PolicyValueNet(hidden=8, trunk_layers=1)
+    config = GameConfig(seed=12, max_rounds=1)
+
+    match = evaluate_models_match(
+        candidate,
+        opponent,
+        simulations=2,
+        games=2,
+        config=config,
+        seed=1,
+    )
+    assert match.games == 2
+    assert match.wins_a + match.wins_b == 2
+
+    field = evaluate_models_vs_field(
+        candidate,
+        {"checkpoint": opponent},
+        anchors={"random": lambda house, seed: RandomPolicy(seed)},
+        simulations=2,
+        games=2,
+        config=config,
+        seed=2,
+    )
+    assert field.games == 2
+    assert field.opponents == ["checkpoint", "random"]
+    assert 0 <= field.wins <= 2
+    assert field.average_steps > 0
+
+
 def test_net_vs_field_gauntlet_runs_on_the_rust_driver():
     """The evaluation fast path must play real games and aggregate them."""
     pytest.importorskip("torch")

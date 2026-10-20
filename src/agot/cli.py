@@ -123,6 +123,41 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
+    config = GameConfig(seed=args.seed, max_rounds=args.max_rounds)
+    if args.a.startswith("net:") and args.b.startswith("net:"):
+        from agot.training.evaluate import evaluate_models_match
+
+        result = evaluate_models_match(
+            _load_net(args.a.partition(":")[2]),
+            _load_net(args.b.partition(":")[2]),
+            simulations=args.simulations,
+            determinizations=args.determinizations,
+            games=args.games,
+            config=config,
+            seed=args.seed,
+        )
+        print(json.dumps({"a": args.a, "b": args.b, **result.as_dict()}, indent=2))
+        return 0
+
+    if args.a.startswith("net:") and args.b in ("random", "greedy"):
+        from agot.training.evaluate import evaluate_model_vs_factory
+
+        result = evaluate_model_vs_factory(
+            _load_net(args.a.partition(":")[2]),
+            _policy_factory(
+                args.b,
+                simulations=args.simulations,
+                determinizations=args.determinizations,
+            ),
+            simulations=args.simulations,
+            determinizations=args.determinizations,
+            games=args.games,
+            config=config,
+            seed=args.seed,
+        )
+        print(json.dumps({"a": args.a, "b": args.b, **result.as_dict()}, indent=2))
+        return 0
+
     from agot.training.evaluate import evaluate_match
 
     factory_a = _policy_factory(
@@ -131,13 +166,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     factory_b = _policy_factory(
         args.b, simulations=args.simulations, determinizations=args.determinizations
     )
-    result = evaluate_match(
-        factory_a,
-        factory_b,
-        games=args.games,
-        config=GameConfig(seed=args.seed, max_rounds=args.max_rounds),
-        seed=args.seed,
-    )
+    result = evaluate_match(factory_a, factory_b, games=args.games, config=config, seed=args.seed)
     print(json.dumps({"a": args.a, "b": args.b, **result.as_dict()}, indent=2))
     return 0
 
@@ -206,36 +235,34 @@ def cmd_round_robin(args: argparse.Namespace) -> int:
     robustness check (G2): a checkpoint that only beats one particular past
     version is not a strong agent.
     """
-    from agot.training.evaluate import evaluate_vs_field
+    from agot.training.evaluate import evaluate_models_vs_field
 
     checkpoints = list(args.checkpoints)
     if len(checkpoints) < 2:
         raise SystemExit("round-robin needs at least two checkpoints")
     anchors = [name for name in args.anchors.split(",") if name]
+    models = [_load_net(path) for path in checkpoints]
+    anchor_factories = {
+        anchor: _policy_factory(
+            anchor,
+            simulations=args.simulations,
+            determinizations=args.determinizations,
+        )
+        for anchor in anchors
+    }
     results = {}
     for index, candidate in enumerate(checkpoints):
         opponents = {
-            other: _policy_factory(
-                f"net:{other}",
-                simulations=args.simulations,
-                determinizations=args.determinizations,
-            )
+            other: models[other_index]
             for other_index, other in enumerate(checkpoints)
             if other_index != index
         }
-        for anchor in anchors:
-            opponents[anchor] = _policy_factory(
-                anchor,
-                simulations=args.simulations,
-                determinizations=args.determinizations,
-            )
-        result = evaluate_vs_field(
-            _policy_factory(
-                f"net:{candidate}",
-                simulations=args.simulations,
-                determinizations=args.determinizations,
-            ),
+        result = evaluate_models_vs_field(
+            models[index],
             opponents,
+            anchors=anchor_factories,
+            simulations=args.simulations,
+            determinizations=args.determinizations,
             games=args.games,
             config=GameConfig(seed=args.seed, max_rounds=args.max_rounds),
             seed=args.seed,

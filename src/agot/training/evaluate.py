@@ -182,6 +182,277 @@ def _game_config(
     )
 
 
+def _play_model_games(
+    models: list,
+    seat_models: list[list[int | None]],
+    scripted: list[dict[str, Policy]],
+    *,
+    simulations: int,
+    determinizations: int,
+    games: int,
+    config: GameConfig,
+    seed: int,
+    step_limit: int,
+    batch_games: int,
+) -> tuple[list[str | None], list[int]]:
+    """Play ``games`` with one model per search seat, plus optional scripted seats.
+
+    ``seat_models[game][house_index]`` selects the model for a search seat;
+    ``None`` means the seat is scripted and lives in ``scripted[game]``. The
+    driver groups each leaf batch by model, so two checkpoints can play each
+    other without falling back to Python MCTS.
+    """
+    from agot.engine.rust import RustGame
+    from agot.training import rust_engine
+
+    extension = rust_engine.core()
+    if extension is None:  # pragma: no cover - the extension is mandatory now
+        raise RuntimeError("the Rust extension is not installed")
+
+    houses = config.houses
+    evaluators = [rust_engine.leaf_evaluator(model) for model in models]
+
+    def decide(game_index: int, house: str, game_view):
+        policy = scripted[game_index][house]
+        view = RustGame(game_view)
+        action, _ = policy.decide(view)
+        try:
+            index = view.legal_actions().index(action)
+        except ValueError as error:  # pragma: no cover - defensive
+            raise RuntimeError(
+                f"scripted policy {policy.name!r} chose an action the engine "
+                "did not offer"
+            ) from error
+        return index, None
+
+    spec = {
+        "games": games,
+        "simulations": simulations,
+        "determinizations": max(1, determinizations),
+        "batch_games": max(1, min(batch_games, games)),
+        "seed": seed,
+        "seeds": [seed + index for index in range(games)],
+        "temperature": 0.0,
+        "temperature_rounds": 0,
+        "final_temperature": 0.0,
+        "max_rounds": config.max_rounds,
+        "victory_castles": config.victory_castles,
+        "use_westeros_decks": config.use_westeros_decks,
+        "houses": list(houses),
+        "step_limit": step_limit,
+        "scripted": [list(policies) for policies in scripted],
+        "seat_models": seat_models,
+        "record_opponents": False,
+    }
+    result = extension.selfplay(
+        spec,
+        evaluators[0],
+        decide if any(scripted) else None,
+        evaluators[1:],
+    )
+    return list(result[6]), [int(step) for step in result[7]]
+
+
+def evaluate_model_vs_factory(
+    model,
+    opponent_factory: PolicyFactory,
+    *,
+    simulations: int = 128,
+    determinizations: int = 1,
+    games: int = 10,
+    config: GameConfig | None = None,
+    seed: int = 0,
+    step_limit: int = DEFAULT_STEP_LIMIT,
+    batch_games: int = 4,
+) -> MatchResult:
+    """One network (three seats) against a scripted factory, on the Rust driver."""
+    base = config or GameConfig()
+    houses = base.houses
+    seat_models: list[list[int | None]] = []
+    scripted: list[dict[str, Policy]] = []
+    for game_index in range(games):
+        seats_a, _ = split_houses(houses, bool(game_index % 2))
+        row: list[int | None] = [None] * len(houses)
+        policies: dict[str, Policy] = {}
+        for index, house in enumerate(houses):
+            if house in seats_a:
+                row[index] = 0
+            else:
+                policies[house] = opponent_factory(
+                    house, seed + game_index * 7 + 1000 + index
+                )
+        seat_models.append(row)
+        scripted.append(policies)
+
+    winners, steps = _play_model_games(
+        [model],
+        seat_models,
+        scripted,
+        simulations=simulations,
+        determinizations=determinizations,
+        games=games,
+        config=base,
+        seed=seed,
+        step_limit=step_limit,
+        batch_games=batch_games,
+    )
+
+    result = MatchResult()
+    total_steps = 0
+    for game_index, winner in enumerate(winners):
+        seats_a, _ = split_houses(houses, bool(game_index % 2))
+        result.games += 1
+        total_steps += steps[game_index]
+        if winner in seats_a:
+            result.wins_a += 1
+        else:
+            result.wins_b += 1
+    result.win_rate_a = result.wins_a / max(1, result.games)
+    result.win_rate_b = result.wins_b / max(1, result.games)
+    result.average_steps = total_steps / max(1, result.games)
+    result.seats_of_a = sorted(split_houses(houses, False)[0])
+    return result
+
+
+def evaluate_models_match(
+    model_a,
+    model_b,
+    *,
+    simulations: int = 128,
+    determinizations: int = 1,
+    games: int = 10,
+    config: GameConfig | None = None,
+    seed: int = 0,
+    step_limit: int = DEFAULT_STEP_LIMIT,
+    batch_games: int = 4,
+) -> MatchResult:
+    """Two networks, three seats each, swapped each game, all on the Rust driver."""
+    base = config or GameConfig()
+    houses = base.houses
+    seat_models: list[list[int | None]] = []
+    scripted: list[dict[str, Policy]] = []
+    for game_index in range(games):
+        seats_a, _ = split_houses(houses, bool(game_index % 2))
+        seat_models.append(
+            [0 if house in seats_a else 1 for house in houses]
+        )
+        scripted.append({})
+    winners, steps = _play_model_games(
+        [model_a, model_b],
+        seat_models,
+        scripted,
+        simulations=simulations,
+        determinizations=determinizations,
+        games=games,
+        config=base,
+        seed=seed,
+        step_limit=step_limit,
+        batch_games=batch_games,
+    )
+
+    result = MatchResult()
+    total_steps = 0
+    for game_index, winner in enumerate(winners):
+        seats_a, _ = split_houses(houses, bool(game_index % 2))
+        result.games += 1
+        total_steps += steps[game_index]
+        if winner in seats_a:
+            result.wins_a += 1
+        else:
+            result.wins_b += 1
+    result.win_rate_a = result.wins_a / max(1, result.games)
+    result.win_rate_b = result.wins_b / max(1, result.games)
+    result.average_steps = total_steps / max(1, result.games)
+    result.seats_of_a = sorted(split_houses(houses, False)[0])
+    return result
+
+
+def evaluate_models_vs_field(
+    candidate_model,
+    opponent_models: dict[str, object],
+    *,
+    anchors: dict[str, PolicyFactory] | None = None,
+    simulations: int = 128,
+    determinizations: int = 1,
+    games: int = 60,
+    config: GameConfig | None = None,
+    seed: int = 0,
+    step_limit: int = DEFAULT_STEP_LIMIT,
+    batch_games: int = 4,
+) -> FieldResult:
+    """Single-seat win rate against net checkpoints and scripted anchors."""
+    base = config or GameConfig()
+    houses = base.houses
+    anchors = anchors or {}
+    field_names = list(opponent_models) + list(anchors)
+    if not field_names:
+        raise ValueError("evaluate_models_vs_field needs at least one opponent")
+
+    models = [candidate_model] + list(opponent_models.values())
+    model_index = {
+        name: index + 1 for index, name in enumerate(opponent_models)
+    }
+
+    seat_models: list[list[int | None]] = []
+    scripted: list[dict[str, Policy]] = []
+    for game_index in range(games):
+        candidate_seat = houses[game_index % len(houses)]
+        row: list[int | None] = [None] * len(houses)
+        row[houses.index(candidate_seat)] = 0
+        policies: dict[str, Policy] = {}
+        cursor = game_index
+        for seat, house in enumerate(houses):
+            if house == candidate_seat:
+                continue
+            name = field_names[cursor % len(field_names)]
+            cursor += 1
+            if name in model_index:
+                row[houses.index(house)] = model_index[name]
+            else:
+                policies[house] = anchors[name](
+                    house, seed + game_index * 17 + 500 + seat
+                )
+        seat_models.append(row)
+        scripted.append(policies)
+
+    winners, steps = _play_model_games(
+        models,
+        seat_models,
+        scripted,
+        simulations=simulations,
+        determinizations=determinizations,
+        games=games,
+        config=base,
+        seed=seed,
+        step_limit=step_limit,
+        batch_games=batch_games,
+    )
+
+    field = FieldResult(opponents=field_names)
+    seat_games = {house: 0 for house in houses}
+    seat_wins = {house: 0 for house in houses}
+    total_steps = 0
+    for game_index, winner in enumerate(winners):
+        candidate_seat = houses[game_index % len(houses)]
+        field.games += 1
+        total_steps += steps[game_index]
+        seat_games[candidate_seat] += 1
+        if winner == candidate_seat:
+            field.wins += 1
+            seat_wins[candidate_seat] += 1
+        elif winner is None:
+            field.draws += 1
+    field.win_rate = field.wins / max(1, field.games)
+    field.ci_low, field.ci_high = wilson_interval(field.wins, field.games)
+    field.average_steps = total_steps / max(1, field.games)
+    field.per_seat = {
+        house: seat_wins[house] / seat_games[house]
+        for house in houses
+        if seat_games[house]
+    }
+    return field
+
+
 def evaluate_net_vs_field(
     model,
     opponents: dict[str, PolicyFactory],

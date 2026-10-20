@@ -510,7 +510,15 @@ they should be fixed before expecting a strong agent.
     extension action handle so encoding never rebuilds a candidate, the snapshot
     converts its `serde_json` value straight to Python data instead of a
     serialize/`json.loads` pair, and `predict_actions` no longer builds an
-    all-ones mask. Remaining smaller items: the replay buffer still stores one
-    object per example rather than a structure of arrays, and Python MCTS
-    remains the path for non-net `evaluate`/`mcts` demos and round-robin
-    net-vs-net (the Rust driver has one evaluator).
+    all-ones mask. The replay buffer is now a structure of arrays — dense
+    position/player/outcome rows plus one concatenated action matrix, one
+    policy vector and an offset table; `all`/`sample` return views and old
+    object-array files still load. The Rust driver also takes multiple
+    evaluators plus a per-seat model map, so net-vs-net matches and the
+    round-robin league run natively (each leaf batch is grouped by its seat's
+    model), including scripted anchors.
+
+    Remaining: Python MCTS is still the path for `agot demo --policy mcts` /
+    `net:` (one game, not training) and for candidates that are not a single
+    `net:` policy in `evaluate`/`gauntlet`. Those are CLI conveniences rather
+    than training or evaluation hot paths.

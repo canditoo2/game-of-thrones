@@ -8,13 +8,39 @@ from agot.agents import RandomPolicy
 from agot.engine.game import GameConfig
 from agot.engine.observation import HOUSE_ORDER
 from agot.training.evaluate import evaluate_match, evaluate_vs_field, wilson_interval
-from agot.training.replay import ReplayBuffer
+from agot.training.replay import Example, ReplayBuffer
 from agot.training.selfplay import (
     DEFAULT_TEMPERATURE_SCHEDULE,
     play_game,
     scheduled_temperature,
     self_play,
 )
+
+
+def test_replay_buffer_is_structured_arrays_and_drops_the_oldest() -> None:
+    from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM
+
+    buffer = ReplayBuffer(capacity=4)
+    for player in range(6):
+        count = 2 + player
+        buffer.add(
+            Example(
+                state=np.full(STATE_DIM, player, dtype=np.float32),
+                actions=np.full((count, ACTION_DIM), player, dtype=np.float32),
+                policy=np.full(count, 1.0 / count, dtype=np.float32),
+                player=player,
+                outcome=np.zeros(N_HOUSES, dtype=np.float32),
+            )
+        )
+
+    assert len(buffer) == 4
+    examples = buffer.all()
+    # capacity 4 with a quarter-drop keeps the last four entries: 2,3,4,5.
+    assert [example.player for example in examples] == [2, 3, 4, 5]
+    assert all(example.actions.shape[1] == ACTION_DIM for example in examples)
+    assert all(example.state.shape == (STATE_DIM,) for example in examples)
+    # The examples are views into the buffer, not per-example allocations.
+    assert examples[0].actions.base is not None
 
 
 def test_temperature_schedule_sharpens_after_the_opening() -> None:
