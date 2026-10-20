@@ -148,8 +148,9 @@ class PolicyValueNet(nn.Module):
         action_tensor = torch.from_numpy(
             encode_actions(game, actions, game.state.active_house)
         ).unsqueeze(0)
-        mask = torch.ones((1, len(actions)), dtype=torch.float32)
-        logits, values = self.forward(state, action_tensor, mask)
+        # Every candidate is legal here, so no mask is needed; passing one would
+        # only make `forward` allocate a masked copy.
+        logits, values = self.forward(state, action_tensor)
         probs = torch.softmax(logits[0], dim=-1).cpu().numpy()
         return actions, probs.astype(np.float32), values[0].cpu().numpy()
 
@@ -237,6 +238,26 @@ class PolicyValueNet(nn.Module):
         model.load_state_dict(payload["state_dict"])
         model.eval()
         return model
+
+
+def segment_log_softmax(
+    logits: torch.Tensor, index: torch.Tensor, rows: int
+) -> torch.Tensor:
+    """Log-softmax of ``logits`` within each contiguous segment.
+
+    The packed training loss needs log-probabilities rather than the
+    probabilities :func:`segment_softmax` returns; taking ``log`` of the latter
+    would produce ``-inf`` for a zeroed target.
+    """
+    if logits.numel() == 0:
+        return logits
+    maximum = torch.full(
+        (rows,), float("-inf"), dtype=logits.dtype, device=logits.device
+    ).scatter_reduce(0, index, logits, reduce="amax")
+    shifted = logits - maximum[index]
+    total = torch.zeros(rows, dtype=logits.dtype, device=logits.device)
+    total = total.scatter_add(0, index, shifted.exp())
+    return shifted - total.clamp_min(1e-30).log()[index]
 
 
 def segment_softmax(

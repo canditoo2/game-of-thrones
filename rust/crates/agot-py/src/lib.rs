@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyType};
+use pyo3::types::{PyDict, PyList, PyType};
 
 use numpy::IntoPyArray;
 
@@ -41,12 +41,48 @@ fn engine_error(error: EngineError) -> PyErr {
     PyRuntimeError::new_err(error.to_string())
 }
 
-/// JSON value to Python data, the same round-trip the snapshot uses.
+/// A `serde_json` value as native Python data.
+///
+/// The snapshot used to travel as JSON text and be parsed by Python's `json`
+/// module, which cost a serialization and a parse on every step. The recursive
+/// conversion writes the same dicts/lists/ints/strings directly; numbers keep
+/// their integer-vs-float distinction, matching `json.loads`.
 fn to_python(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
-    let text =
-        serde_json::to_string(value).map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-    let json = py.import("json")?;
-    Ok(json.call_method1("loads", (text,))?.unbind())
+    use serde_json::Value;
+
+    Ok(match value {
+        Value::Null => py.None(),
+        Value::Bool(flag) => (*flag).into_pyobject(py)?.to_owned().unbind().into_any(),
+        Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                value.into_pyobject(py)?.unbind().into_any()
+            } else if let Some(value) = number.as_u64() {
+                value.into_pyobject(py)?.unbind().into_any()
+            } else {
+                number
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    .into_pyobject(py)?
+                    .unbind()
+                    .into_any()
+            }
+        }
+        Value::String(text) => text.as_str().into_pyobject(py)?.unbind().into_any(),
+        Value::Array(items) => {
+            let list = PyList::empty(py);
+            for item in items {
+                list.append(to_python(py, item)?)?;
+            }
+            list.unbind().into_any()
+        }
+        Value::Object(entries) => {
+            let dict = PyDict::new(py);
+            for (key, item) in entries {
+                dict.set_item(key, to_python(py, item)?)?;
+            }
+            dict.unbind().into_any()
+        }
+    })
 }
 
 // -- field parsing for the position builder ------------------------------

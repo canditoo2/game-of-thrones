@@ -9,7 +9,7 @@ games with large move spaces.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 
@@ -72,6 +72,10 @@ class Action:
     #: Whether a March action uses a Power token to keep control of the area
     #: it vacates.
     establish: bool = False
+    #: The extension's own action record when this object came from
+    #: ``Game.legal_actions``. Not part of equality or the hash: it is a
+    #: transport handle that lets the encoder skip rebuilding the action.
+    _handle: object | None = field(default=None, compare=False, repr=False)
 
     def __str__(self) -> str:  # pragma: no cover - debugging aid
         parts = [self.kind.value]

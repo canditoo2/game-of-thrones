@@ -452,6 +452,7 @@ class RustGame:
                 amount=action.amount,
                 units=action.units,
                 establish=action.establish,
+                _handle=action,
             )
             for action in self._inner.legal_actions()
         ]

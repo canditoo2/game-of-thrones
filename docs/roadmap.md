@@ -493,7 +493,24 @@ they should be fixed before expecting a strong agent.
     every worker can fill `--batch-games`, `--train-threads` defaults to
     `min(8, usable CPUs)`, and the CLI/training package imports torch lazily
     (`import agot.cli` 2.2 s → 0.3 s; `agot demo --policy greedy` 3.3 s → 0.6 s).
-    The remaining audit items are the big ones: net evaluation still uses
-    Python MCTS (the Rust driver can take it over), training still pads action
-    batches instead of using `forward_packed`, and the Action/snapshot round
-    trips on the Python side are still there.
+    A second pass took the big items. `evaluate_net_vs_field` plays the
+    training gauntlet on the Rust driver — the candidate seat is native search,
+    the five scripted seats call their policy once per decision — and the CLI
+    and periodic training evaluation use it (4 games at 16 sims / 2 rounds:
+    0.89 s → 0.16 s; the gap grows with the simulation budget). Training now
+    collates into an unpadded packed batch and uses `forward_packed` plus a
+    segment log-softmax: 1.45–1.63× on a synthetic variable-width set, more on
+    real self-play data where padding averaged ~9×. `Action` objects returned
+    by `legal_actions` carry the extension handle, so encoding no longer
+    rebuilds every candidate (the 2.2 s CLI import and 0.64 s greedy demo are
+    unchanged); `Example` uses slots, and evaluation/demo call `play_game(...,
+    record=False)` to skip observations they discard.
+
+    The last Python/Rust round trips also went: `legal_actions` attaches the
+    extension action handle so encoding never rebuilds a candidate, the snapshot
+    converts its `serde_json` value straight to Python data instead of a
+    serialize/`json.loads` pair, and `predict_actions` no longer builds an
+    all-ones mask. Remaining smaller items: the replay buffer still stores one
+    object per example rather than a structure of arrays, and Python MCTS
+    remains the path for non-net `evaluate`/`mcts` demos and round-robin
+    net-vs-net (the Rust driver has one evaluator).

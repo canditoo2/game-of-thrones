@@ -100,7 +100,9 @@ def evaluate_match(
         policies = seat_policies(
             factory_a, factory_b, houses, seed=seed + game_index * 7, swap=swap
         )
-        record = play_game(policies, game_config, step_limit=step_limit)
+        record = play_game(
+            policies, game_config, step_limit=step_limit, record=False
+        )
         seats_a, _ = split_houses(houses, swap)
         result.games += 1
         total_steps += record.steps
@@ -180,6 +182,120 @@ def _game_config(
     )
 
 
+def evaluate_net_vs_field(
+    model,
+    opponents: dict[str, PolicyFactory],
+    *,
+    simulations: int = 128,
+    determinizations: int = 1,
+    games: int = 60,
+    config: GameConfig | None = None,
+    seed: int = 0,
+    step_limit: int = DEFAULT_STEP_LIMIT,
+    batch_games: int = 4,
+) -> FieldResult:
+    """Single-seat win rate of a network against scripted opponents, in Rust.
+
+    The same protocol as :func:`evaluate_vs_field` (rotating candidate seat,
+    round-robin opponents, per-seat win rates), but every game is played by the
+    Rust driver: the candidate seat is searched and batched by the native
+    driver, and the other five seats call the scripted policy once per decision.
+    This turns a gauntlet from roughly two minutes per game of Python MCTS into
+    the native self-play speed.
+    """
+    from agot.engine.rust import RustGame
+    from agot.training import rust_engine
+
+    extension = rust_engine.core()
+    if extension is None:  # pragma: no cover - the extension is mandatory now
+        raise RuntimeError("the Rust extension is not installed")
+
+    base = config or GameConfig()
+    houses = base.houses
+    names = list(opponents)
+    if not names:
+        raise ValueError("evaluate_net_vs_field needs at least one opponent")
+
+    scripted: list[list[str]] = []
+    policies_by_game: list[dict[str, Policy]] = []
+    for game_index in range(games):
+        candidate_seat = houses[game_index % len(houses)]
+        policies: dict[str, Policy] = {}
+        opponent_cursor = game_index
+        for seat, house in enumerate(houses):
+            if house == candidate_seat:
+                continue
+            name = names[opponent_cursor % len(names)]
+            opponent_cursor += 1
+            policies[house] = opponents[name](
+                house, seed + game_index * 17 + 500 + seat
+            )
+        policies_by_game.append(policies)
+        scripted.append(list(policies))
+
+    def decide(game_index: int, house: str, game_view):
+        policy = policies_by_game[game_index][house]
+        view = RustGame(game_view)
+        action, _ = policy.decide(view)
+        try:
+            index = view.legal_actions().index(action)
+        except ValueError as error:  # pragma: no cover - defensive
+            raise RuntimeError(
+                f"scripted policy {policy.name!r} chose an action the engine "
+                "did not offer"
+            ) from error
+        return index, None
+
+    spec = {
+        "games": games,
+        "simulations": simulations,
+        "determinizations": max(1, determinizations),
+        "batch_games": max(1, min(batch_games, games)),
+        "seed": seed,
+        "seeds": [seed + index for index in range(games)],
+        "temperature": 0.0,
+        "temperature_rounds": 0,
+        "final_temperature": 0.0,
+        "max_rounds": base.max_rounds,
+        "victory_castles": base.victory_castles,
+        "use_westeros_decks": base.use_westeros_decks,
+        "houses": list(houses),
+        "step_limit": step_limit,
+        "scripted": scripted,
+        "record_opponents": False,
+    }
+    result = extension.selfplay(
+        spec, rust_engine.leaf_evaluator(model), decide
+    )
+    winners = list(result[6])
+    steps = list(result[7])
+
+    field = FieldResult(opponents=names)
+    seat_games: dict[str, int] = {house: 0 for house in houses}
+    seat_wins: dict[str, int] = {house: 0 for house in houses}
+    total_steps = 0
+    for game_index, winner in enumerate(winners):
+        candidate_seat = houses[game_index % len(houses)]
+        field.games += 1
+        total_steps += int(steps[game_index])
+        seat_games[candidate_seat] += 1
+        if winner == candidate_seat:
+            field.wins += 1
+            seat_wins[candidate_seat] += 1
+        elif winner is None:
+            field.draws += 1
+
+    field.win_rate = field.wins / max(1, field.games)
+    field.ci_low, field.ci_high = wilson_interval(field.wins, field.games)
+    field.average_steps = total_steps / max(1, field.games)
+    field.per_seat = {
+        house: seat_wins[house] / seat_games[house]
+        for house in houses
+        if seat_games[house]
+    }
+    return field
+
+
 def evaluate_vs_field(
     candidate_factory: PolicyFactory,
     opponents: dict[str, PolicyFactory],
@@ -223,7 +339,9 @@ def evaluate_vs_field(
                     house, seed + game_index * 17 + 500 + seat
                 )
 
-        record = play_game(policies, game_config, step_limit=step_limit)
+        record = play_game(
+            policies, game_config, step_limit=step_limit, record=False
+        )
         result.games += 1
         total_steps += record.steps
         seat_games[candidate_seat] += 1

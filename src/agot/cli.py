@@ -107,7 +107,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
     )
     policies = {house: factory(house, args.seed + i) for i, house in enumerate(config.houses)}
     started = time.time()
-    record = play_game(policies, config)
+    record = play_game(policies, config, record=False)
     elapsed = time.time() - started
     print(json.dumps(
         {
@@ -144,6 +144,35 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 
 def cmd_gauntlet(args: argparse.Namespace) -> int:
     """Measure one candidate's single-seat win rate against a field."""
+    names = [name for name in args.opponents.split(",") if name]
+    config = GameConfig(seed=args.seed, max_rounds=args.max_rounds)
+
+    # A saved network against scripted opponents is the training gauntlet and
+    # the common CLI case: run it on the Rust driver instead of Python MCTS.
+    if args.candidate.startswith("net:") and all(
+        name in ("random", "greedy") for name in names
+    ):
+        from agot.agents import GreedyPolicy, RandomPolicy
+        from agot.training.evaluate import evaluate_net_vs_field
+
+        model = _load_net(args.candidate.partition(":")[2])
+        factories = {}
+        if "random" in names:
+            factories["random"] = lambda house, seed: RandomPolicy(seed)
+        if "greedy" in names:
+            factories["greedy"] = lambda house, seed: GreedyPolicy(seed)
+        result = evaluate_net_vs_field(
+            model,
+            factories,
+            simulations=args.simulations,
+            determinizations=args.determinizations,
+            games=args.games,
+            config=config,
+            seed=args.seed,
+        )
+        print(json.dumps({"candidate": args.candidate, **result.as_dict()}, indent=2))
+        return 0
+
     from agot.training.evaluate import evaluate_vs_field
 
     candidate = _policy_factory(
@@ -155,14 +184,13 @@ def cmd_gauntlet(args: argparse.Namespace) -> int:
         name: _policy_factory(
             name, simulations=args.simulations, determinizations=args.determinizations
         )
-        for name in args.opponents.split(",")
-        if name
+        for name in names
     }
     result = evaluate_vs_field(
         candidate,
         opponents,
         games=args.games,
-        config=GameConfig(seed=args.seed, max_rounds=args.max_rounds),
+        config=config,
         seed=args.seed,
     )
     print(json.dumps({"candidate": args.candidate, **result.as_dict()}, indent=2))
@@ -383,33 +411,22 @@ def _run_training(args: argparse.Namespace) -> int:
 
 def _evaluate_model(model, config: GameConfig, args: argparse.Namespace):
     """Single-seat win rate of ``model`` against random and greedy opponents."""
-    from agot.agents import MCTS, GreedyPolicy, RandomPolicy
-    from agot.nn.model import NeuralEvaluator
-    from agot.training.evaluate import evaluate_vs_field
-
-    evaluator = NeuralEvaluator(model)
+    from agot.agents import GreedyPolicy, RandomPolicy
+    from agot.training.evaluate import evaluate_net_vs_field
 
     # The gauntlet must measure the agent that self-play actually searched as,
     # so it defaults to the training search budget rather than a cheaper one.
     # A mismatch silently reports a weaker policy than the one being trained.
     simulations = getattr(args, "eval_simulations", None) or args.simulations
-
-    def candidate(house: str, seed: int):
-        return MCTS(
-            evaluator,
-            simulations=simulations,
-            determinizations=args.determinizations,
-            temperature=0.0,
-            seed=seed,
-        )
-
     opponents = {
         "random": lambda house, seed: RandomPolicy(seed),
         "greedy": lambda house, seed: GreedyPolicy(seed),
     }
-    return evaluate_vs_field(
-        candidate,
+    return evaluate_net_vs_field(
+        model,
         opponents,
+        simulations=simulations,
+        determinizations=args.determinizations,
         games=args.eval_games,
         config=config,
         seed=args.seed + 999,

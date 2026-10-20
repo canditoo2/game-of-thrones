@@ -458,6 +458,34 @@ def test_selfplay_respects_pimc_determinizations():
 # ---------------------------------------------------------------------------
 
 
+def test_net_vs_field_gauntlet_runs_on_the_rust_driver():
+    """The evaluation fast path must play real games and aggregate them."""
+    pytest.importorskip("torch")
+
+    from agot.agents import GreedyPolicy, RandomPolicy
+    from agot.nn.model import PolicyValueNet
+    from agot.training.evaluate import evaluate_net_vs_field
+
+    model = PolicyValueNet(hidden=8, trunk_layers=1)
+    result = evaluate_net_vs_field(
+        model,
+        {
+            "random": lambda house, seed: RandomPolicy(seed),
+            "greedy": lambda house, seed: GreedyPolicy(seed),
+        },
+        simulations=2,
+        determinizations=1,
+        games=2,
+        config=GameConfig(seed=10, max_rounds=1),
+        seed=3,
+    )
+    assert result.games == 2
+    assert 0 <= result.wins <= 2
+    assert result.average_steps > 0
+    assert 0.0 <= result.ci_low <= result.win_rate <= result.ci_high <= 1.0
+    assert result.per_seat and set(result.per_seat) <= set(GameConfig().houses)
+
+
 def test_rust_engine_driver_feeds_the_training_loop():
     """`rust_engine.self_play_records` must return records the trainer can use.
 

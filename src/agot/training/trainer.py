@@ -17,7 +17,7 @@ import torch
 from torch import nn
 
 from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM
-from agot.nn.model import PolicyValueNet
+from agot.nn.model import PolicyValueNet, segment_log_softmax
 from agot.training.replay import Example, ReplayBuffer
 
 
@@ -34,6 +34,36 @@ class TrainConfig:
     weight_decay: float = 1e-4
     grad_clip: float = 1.0
     device: str = "cpu"
+
+
+@dataclass
+class PackedBatch:
+    """A collated mini-batch with no padding.
+
+    ``actions`` and ``policy`` hold the concatenated candidates of every
+    example; ``index[i]`` names the example row that candidate ``i`` belongs
+    to. The scorer and the policy loss run over exactly ``T = sum N_i`` rows
+    instead of ``B * max N_i``.
+    """
+
+    state: torch.Tensor
+    actions: torch.Tensor
+    index: torch.Tensor
+    policy: torch.Tensor
+    outcome: torch.Tensor
+    outcome_mask: torch.Tensor
+    rows: int
+
+    def to(self, device: str) -> PackedBatch:
+        return PackedBatch(
+            state=self.state.to(device),
+            actions=self.actions.to(device),
+            index=self.index.to(device),
+            policy=self.policy.to(device),
+            outcome=self.outcome.to(device),
+            outcome_mask=self.outcome_mask.to(device),
+            rows=self.rows,
+        )
 
 
 @dataclass
@@ -116,6 +146,42 @@ def collate(examples: list[Example]) -> Batch:
     return Batch(state, actions, mask, policy, outcome, outcome_mask)
 
 
+def collate_packed(examples: list[Example]) -> PackedBatch:
+    """Collate variable-length examples into the unpadded packed layout."""
+    size = len(examples)
+    counts = [len(example.actions) for example in examples]
+    total = sum(counts)
+    state = torch.zeros(size, STATE_DIM, dtype=torch.float32)
+    actions = torch.zeros(total, ACTION_DIM, dtype=torch.float32)
+    index = torch.empty(total, dtype=torch.int64)
+    policy = torch.zeros(total, dtype=torch.float32)
+    outcome = torch.zeros(size, N_HOUSES, dtype=torch.float32)
+    outcome_mask = torch.zeros(size, N_HOUSES, dtype=torch.float32)
+
+    cursor = 0
+    for row, example in enumerate(examples):
+        count = counts[row]
+        state[row] = torch.from_numpy(np.asarray(example.state, dtype=np.float32))
+        actions[cursor : cursor + count] = torch.from_numpy(
+            np.asarray(example.actions, dtype=np.float32)
+        )
+        index[cursor : cursor + count] = row
+        target = np.asarray(example.policy, dtype=np.float32)
+        total_target = target.sum()
+        if total_target > 0:
+            normalised = target / total_target
+        else:
+            normalised = np.full(count, 1.0 / count, dtype=np.float32)
+        policy[cursor : cursor + count] = torch.from_numpy(normalised)
+        outcome[row] = torch.from_numpy(np.asarray(example.outcome, dtype=np.float32))
+        outcome_mask[row] = torch.from_numpy(
+            (np.asarray(example.outcome) != 0).astype(np.float32)
+        )
+        cursor += count
+
+    return PackedBatch(state, actions, index, policy, outcome, outcome_mask, size)
+
+
 @dataclass
 class TrainStats:
     """Losses averaged over an epoch."""
@@ -186,7 +252,7 @@ class Trainer:
                 examples[int(index)]
                 for index in order[start : start + batch_size]
             ]
-            batch = collate(chunk).to(self.device)
+            batch = collate_packed(chunk).to(self.device)
             policy_loss, value_loss, total = self._step(batch)
             stats.batches += 1
             stats.policy_loss += policy_loss
@@ -194,10 +260,17 @@ class Trainer:
             stats.total_loss += total
         return stats
 
-    def _step(self, batch: Batch) -> tuple[float, float, float]:
-        logits, values = self.model(batch.state, batch.actions, batch.mask)
-        log_probs = torch.log_softmax(logits, dim=-1)
-        policy_loss = -(batch.policy * log_probs).sum(dim=-1).mean()
+    def _step(self, batch: Batch | PackedBatch) -> tuple[float, float, float]:
+        if isinstance(batch, PackedBatch):
+            logits, values = self.model.forward_packed(
+                batch.state, batch.actions, batch.index
+            )
+            log_probs = segment_log_softmax(logits, batch.index, batch.rows)
+            policy_loss = -(batch.policy * log_probs).sum() / batch.rows
+        else:
+            logits, values = self.model(batch.state, batch.actions, batch.mask)
+            log_probs = torch.log_softmax(logits, dim=-1)
+            policy_loss = -(batch.policy * log_probs).sum(dim=-1).mean()
 
         value_mask = batch.outcome_mask
         squared = (values - batch.outcome) ** 2

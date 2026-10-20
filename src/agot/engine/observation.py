@@ -113,9 +113,14 @@ def _inner(game: Game):
 def _rust_action(game: Game, action: Action):
     """The same action, in the extension's own representation.
 
-    This deliberately round-trips through the engine's action builder: an action
-    the engine would not recognise cannot be encoded by accident.
+    Actions returned by ``legal_actions`` already carry the extension record;
+    only hand-built actions pay the field-by-field rebuild. This deliberately
+    keeps the rebuild path: an action the engine would not recognise cannot be
+    encoded by accident.
     """
+    handle = getattr(action, "_handle", None)
+    if handle is not None:
+        return handle
     return _inner(game).action(
         action.kind.value,
         house=action.house,

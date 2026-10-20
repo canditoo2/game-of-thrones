@@ -62,8 +62,14 @@ def play_game(
     config: GameConfig | None = None,
     *,
     step_limit: int = DEFAULT_STEP_LIMIT,
+    record: bool = True,
 ) -> GameRecord:
-    """Play one game with ``policies`` (one per house) and record every decision."""
+    """Play one game with ``policies`` (one per house).
+
+    ``record=False`` skips the observation/encoding work for callers that only
+    need the winner and step count (evaluation, the demo). The decisions
+    themselves still run through the same policies.
+    """
     game = Game.new(config or GameConfig())
     records: list[tuple[Example, ...]] = []
     steps = 0
@@ -74,23 +80,24 @@ def play_game(
             break
         policy = policies[house]
         action, target = policy.decide(game)
-        observation = observe(game)
-        if len(observation.actions) != len(target):
-            raise RuntimeError(
-                f"policy {policy.name!r} returned {len(target)} targets for "
-                f"{len(observation.actions)} legal actions"
+        if record:
+            observation = observe(game)
+            if len(observation.actions) != len(target):
+                raise RuntimeError(
+                    f"policy {policy.name!r} returned {len(target)} targets for "
+                    f"{len(observation.actions)} legal actions"
+                )
+            records.append(
+                (
+                    Example(
+                        state=observation.state_features,
+                        actions=observation.action_features,
+                        policy=target.astype("float32"),
+                        player=HOUSE_ORDER.index(house),
+                        outcome=None,  # type: ignore[arg-type]  # filled in below
+                    ),
+                )
             )
-        records.append(
-            (
-                Example(
-                    state=observation.state_features,
-                    actions=observation.action_features,
-                    policy=target.astype("float32"),
-                    player=HOUSE_ORDER.index(house),
-                    outcome=None,  # type: ignore[arg-type]  # filled in below
-                ),
-            )
-        )
         game.step(action)
         steps += 1
 

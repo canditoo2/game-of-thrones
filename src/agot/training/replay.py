@@ -19,7 +19,7 @@ import numpy as np
 from agot.engine.observation import N_HOUSES
 
 
-@dataclass
+@dataclass(slots=True)
 class Example:
     """A single (state, actions, target, outcome) training tuple."""
 

@@ -12,7 +12,12 @@ from agot.engine.game import Game, GameConfig  # noqa: E402
 from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM  # noqa: E402
 from agot.nn.model import NeuralEvaluator, PolicyValueNet  # noqa: E402
 from agot.training.replay import Example  # noqa: E402
-from agot.training.trainer import TrainConfig, Trainer, collate  # noqa: E402
+from agot.training.trainer import (  # noqa: E402
+    TrainConfig,
+    Trainer,
+    collate,
+    collate_packed,
+)
 
 
 def test_forward_shapes_and_masking() -> None:
@@ -79,6 +84,59 @@ def test_neural_evaluator_drives_mcts() -> None:
     action, target = mcts.decide(game)
     assert action in game.legal_actions()
     assert target.shape == (len(game.legal_actions()),)
+
+
+def test_packed_batch_matches_the_padded_loss() -> None:
+    """The unpadded training layout must compute the same objective."""
+    from agot.nn.model import segment_log_softmax
+
+    torch.manual_seed(0)
+    model = PolicyValueNet(hidden=16)
+    model.eval()
+    base = _learnable_examples(size=4)[0]
+    examples = []
+    for count in (len(base.actions), len(base.actions) - 7, len(base.actions) - 13, 6):
+        target = np.asarray(base.policy[:count], dtype=np.float32)
+        examples.append(
+            Example(
+                state=base.state,
+                actions=base.actions[:count],
+                policy=target / target.sum(),
+                player=base.player,
+                outcome=base.outcome,
+            )
+        )
+
+    padded = collate(examples)
+    with torch.no_grad():
+        logits, values = model(padded.state, padded.actions, padded.mask)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        padded_policy = -(padded.policy * log_probs).sum(dim=-1).mean()
+        mask = padded.outcome_mask
+        padded_value = ((values - padded.outcome) ** 2 * mask).sum() / mask.sum()
+
+    packed = collate_packed(examples)
+    with torch.no_grad():
+        flat_logits, flat_values = model.forward_packed(
+            packed.state, packed.actions, packed.index
+        )
+        flat_log_probs = segment_log_softmax(
+            flat_logits, packed.index, packed.rows
+        )
+        packed_policy = -(packed.policy * flat_log_probs).sum() / packed.rows
+        mask = packed.outcome_mask
+        packed_value = ((flat_values - packed.outcome) ** 2 * mask).sum() / mask.sum()
+
+    assert packed.actions.shape[0] == sum(len(example.actions) for example in examples)
+    np.testing.assert_allclose(
+        float(padded_policy), float(packed_policy), rtol=1e-5, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        float(padded_value), float(packed_value), rtol=1e-5, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        values.numpy(), flat_values.numpy(), rtol=1e-5, atol=1e-6
+    )
 
 
 def test_batched_inference_agrees_with_one_leaf_at_a_time() -> None:
