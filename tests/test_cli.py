@@ -47,6 +47,29 @@ def test_net_policy_plays_a_legal_move(tmp_path) -> None:
     assert action in game.legal_actions()
 
 
+def test_play_command_can_quit_immediately(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "q")
+
+    code = main(
+        [
+            "play",
+            "--house",
+            "baratheon",
+            "--opponents",
+            "greedy",
+            "--max-rounds",
+            "1",
+            "--simulations",
+            "2",
+            "--determinizations",
+            "1",
+        ]
+    )
+
+    assert code == 0
+    assert "Game ended early" in capsys.readouterr().out
+
+
 def test_round_robin_runs_two_checkpoints(tmp_path, capsys) -> None:
     pytest.importorskip("torch")
     from agot.nn.model import PolicyValueNet

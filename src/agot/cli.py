@@ -6,6 +6,7 @@ Examples::
     agot evaluate --a random --b greedy --games 20
     agot gauntlet --candidate net:checkpoints/run3/agot-best.pt --opponents random
     agot round-robin --checkpoints checkpoints/run3/agot.pt checkpoints/run3/agot-best.pt
+    agot play --checkpoint checkpoints/run3/agot-best.pt --house stark
     agot train --iterations 100 --games 48 --workers 12 --checkpoint checkpoints/agot.pt
     agot report --checkpoint checkpoints/agot.pt --open
 
@@ -24,7 +25,7 @@ import webbrowser
 from pathlib import Path
 
 from agot.agents import MCTS, GreedyPolicy, RandomPolicy
-from agot.engine.game import Game, GameConfig
+from agot.engine.game import DEFAULT_HOUSES, Game, GameConfig
 
 #: Loaded networks, keyed by checkpoint path. A gauntlet builds a fresh policy
 #: per seat per game, so the checkpoint is loaded once and the model shared.
@@ -119,6 +120,26 @@ def cmd_demo(args: argparse.Namespace) -> int:
         },
         indent=2,
     ))
+    return 0
+
+
+def cmd_play(args: argparse.Namespace) -> int:
+    """Run one interactive game, optionally against a saved network."""
+    from agot.play import play_interactive
+
+    config = GameConfig(seed=args.seed, max_rounds=args.max_rounds)
+    try:
+        play_interactive(
+            args.checkpoint,
+            human_house=args.house,
+            opponents=args.opponents,
+            simulations=args.simulations,
+            determinizations=args.determinizations,
+            config=config,
+            seed=args.seed,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        raise SystemExit(str(error)) from None
     return 0
 
 
@@ -524,6 +545,41 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(demo)
     demo.add_argument("--policy", default="greedy", choices=["random", "greedy", "mcts"])
     demo.set_defaults(func=cmd_demo)
+
+    play = sub.add_parser(
+        "play",
+        help="play one interactive game, by default against a saved network",
+    )
+    play.add_argument(
+        "--checkpoint",
+        default="checkpoints/agot.pt",
+        help="a .pt file or a run directory (agot-best.pt preferred); used by net",
+    )
+    play.add_argument(
+        "--house",
+        default="stark",
+        choices=list(DEFAULT_HOUSES),
+        help="the house you play",
+    )
+    play.add_argument(
+        "--opponents",
+        default="net",
+        choices=("net", "greedy", "random"),
+        help="how the other five seats are played",
+    )
+    play.add_argument("--simulations", type=int, default=64)
+    play.add_argument(
+        "--determinizations",
+        type=int,
+        default=2,
+        help=(
+            "hidden worlds per AI move; 2 keeps your face-down orders and bids "
+            "hidden, while 1 is faster but lets the search see them"
+        ),
+    )
+    play.add_argument("--seed", type=int, default=0)
+    play.add_argument("--max-rounds", type=int, default=10)
+    play.set_defaults(func=cmd_play)
 
     evaluate = sub.add_parser("evaluate", help="play a head-to-head match")
     add_common(evaluate)

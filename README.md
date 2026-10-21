@@ -42,6 +42,7 @@ src/agot/
   agents/        policies: random baseline, greedy heuristic, PUCT MCTS
   nn/            the policy/value network (needs PyTorch)
   training/      self-play, replay buffer, trainer, evaluation
+  play.py        interactive human-versus-network game
   cli.py         command-line entry point
 tests/           engine facade, map, agents, training, network and the extension
 docs/            architecture, methods, roadmap and the rulebook fidelity audit
@@ -68,6 +69,13 @@ pip install -e ".[rl]"          # optional: adds PyTorch
 ```bash
 # Play one full game with the greedy baseline.
 agot demo --policy greedy --seed 1
+
+# Play interactively as Stark against a saved network. A run directory picks
+# agot-best.pt when it exists (otherwise agot.pt). The AI seats use 64 MCTS
+# simulations over two determinizations, so your face-down orders stay hidden;
+# --opponents greedy is the fast fallback and --simulations 128 matches the
+# training search budget.
+agot play --checkpoint checkpoints/run3 --house stark
 
 # Head-to-head over several games (random vs greedy).
 agot evaluate --a random --b greedy --games 20
@@ -124,7 +132,7 @@ while not game.is_terminal():
     house = game.current_player()
     action, _ = policies[house].decide(game)
     game.step(action)
-print(game.summary())
+print("winner:", game.winner())
 ```
 
 Run the Python layer with `pytest -q`, the engine, search and encoder gates with
@@ -141,7 +149,9 @@ is cached per commit, so a reconnected session installs it in seconds instead
 of rebuilding Rust; the first session for a new commit takes a couple of
 minutes. A CPU runtime is fine — the search is CPU-bound, so a GPU adds little.
 Open it in Colab (upload the file, or *File → Open notebook → GitHub*) and run
-the cells top to bottom.
+the cells top to bottom. After training, the "Play against the model" cell
+starts an interactive game against the best checkpoint; it can also be run in
+a separate runtime while a training session is still busy.
 
 The repository is private, so add a fine-grained read-only token as a Colab
 secret named `GITHUB_TOKEN` (🔑 panel in the left sidebar) before running the

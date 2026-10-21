@@ -5,20 +5,25 @@ rules engine, search and encoder (`rust/`) behind a thin Python facade, an optio
 scorer network (`nn/`) and the self-play training loop (`training/`). Everything is driven by
 the `agot` CLI.
 
-**Current direction (2026-10-09):** the pipeline was rebuilt after two void runs (below); the
-first credible training run (`run3`) has not happened yet. Heavy training is meant for a separate
-machine — this PC is the build-and-verify machine.
+**Current direction (2026-10-21):** `run3` is training on Colab (checkpoints under
+`/content/drive/MyDrive/agot/run3`); this PC remains the build-and-verify machine and must not
+start heavy runs unless asked. The pipeline was rebuilt after the two void runs (below), so
+watch the policy loss and the best-checkpoint eval rather than assuming the last checkpoint is
+strongest.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
-- Tests: `.venv\Scripts\python -m pytest -q` (92 tests; the rules/combat/encoder
+- Tests: `.venv\Scripts\python -m pytest -q` (103 tests; the rules/combat/encoder
   regressions live in Rust — see `cargo test --release` below). When piped in PowerShell
   the final summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`
 - Lint: `.venv\Scripts\ruff check src tests` (line-length 100, py310 target).
-- CLI: `.venv\Scripts\agot <demo|legal|evaluate|gauntlet|round-robin|train|report>`. One full
-  game is ~0.2 s: `agot demo --policy greedy --seed 1`. Gauntlet = single-seat win rate vs a
-  field; any policy argument accepts `net:<checkpoint>` (MCTS over that saved network), and
+- CLI: `.venv\Scripts\agot <demo|play|legal|evaluate|gauntlet|round-robin|train|report>`. One
+  full game is ~0.2 s: `agot demo --policy greedy --seed 1`. `agot play --checkpoint <dir|pt>
+  --house stark` starts an interactive human-versus-network game; AI seats default to 64
+  simulations over 2 determinizations (2 keeps face-down orders and bids hidden), and
+  `--opponents greedy` is the fast fallback. Gauntlet = single-seat win rate vs a field; any
+  policy argument accepts `net:<checkpoint>` (MCTS over that saved network), and
   `round-robin` builds a league table across checkpoints.
 - Most of the suite runs without torch: only `test_nn` and `test_checkpoint` skip entirely
   (module-level `importorskip`), plus a few individual cases in `test_batched_selfplay` and
