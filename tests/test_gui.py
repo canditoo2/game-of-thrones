@@ -10,6 +10,8 @@ from agot.engine.enums import UnitType  # noqa: E402
 from agot.engine.map import load_map  # noqa: E402
 from agot.gui import (  # noqa: E402
     AREAS,
+    BOARD_ANCHORS,
+    BOARD_CROP,
     AgotApp,
     GameSettings,
     order_badge,
@@ -22,6 +24,14 @@ def test_area_layout_covers_every_region_exactly_once() -> None:
 
     assert len(placed) == len(set(placed))
     assert set(placed) == set(load_map().regions)
+
+
+def test_board_image_anchors_cover_every_region() -> None:
+    left, top, right, bottom = BOARD_CROP
+    assert set(BOARD_ANCHORS) == set(load_map().regions)
+    for x, y in BOARD_ANCHORS.values():
+        assert left < x < right
+        assert top < y < bottom
 
 
 def test_order_badges_are_compact_and_recognisable() -> None:

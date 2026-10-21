@@ -13,7 +13,7 @@ strongest.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
-- Tests: `.venv\Scripts\python -m pytest -q` (109 tests; the rules/combat/encoder
+- Tests: `.venv\Scripts\python -m pytest -q` (110 tests; the rules/combat/encoder
   regressions live in Rust — see `cargo test --release` below). When piped in PowerShell
   the final summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`
@@ -21,7 +21,9 @@ strongest.
 - CLI: `.venv\Scripts\agot <demo|play|legal|evaluate|gauntlet|round-robin|train|report>`. One
   full game is ~0.2 s: `agot demo --policy greedy --seed 1`. `agot play --checkpoint <dir|pt>
   --house stark` opens the local Tkinter desktop game: the setup screen chooses the human
-  house, opponent and checkpoint, then the full board and action list are shown. AI seats
+  house, opponent and checkpoint, then the full board and action list are shown. When
+  `Rulebook/board.jpg` is present (Pillow installed), the game uses the local scan as the
+  board; otherwise it falls back to the schematic region board. AI seats
   default to 64 simulations over 2 determinizations (2 keeps face-down orders and bids
   hidden), and `--opponents greedy` is the fast fallback. Gauntlet = single-seat win rate vs
   a field; any policy argument accepts `net:<checkpoint>` (MCTS over that saved network), and
@@ -77,6 +79,9 @@ strongest.
   face-down orders and secret bids (PIMC); the encoder masks hidden orders. Known remaining
   leak: the first chooser's House card in a battle (revealed simultaneously in the physical
   game).
+- Rulebook scans are local reference material: `Rulebook/` is gitignored and must never be
+  committed or packaged. The desktop GUI reads `Rulebook/board.jpg` when it exists and
+  otherwise falls back to the schematic region board; do not commit derived board images.
 
 ## Training runs
 

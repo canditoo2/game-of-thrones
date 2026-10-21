@@ -202,6 +202,89 @@ TILE_H = 62
 TILE_GAP = 7
 BOARD_PAD = 16
 
+#: The local rulebook scan is copyrighted and lives in the gitignored
+#: ``Rulebook/`` folder. The GUI uses it when it is present; the schematic
+#: region board remains the fallback.
+BOARD_IMAGE = Path("Rulebook") / "board.jpg"
+#: Crop away the printed Wildling and Influence tracks; the real UI has live
+#: versions of those. Coordinates are in the source image's pixels.
+BOARD_CROP = (0, 110, 1110, 2175)
+
+#: Region label centres in the source board scan. The overlay puts a control
+#: underline and a unit/order chip near each printed label.
+BOARD_ANCHORS: dict[str, tuple[int, int]] = {
+    "castle_black": (665, 185),
+    "winterfell": (445, 490),
+    "karhold": (815, 310),
+    "the_stony_shore": (255, 565),
+    "white_harbor": (675, 565),
+    "widows_watch": (785, 625),
+    "greywater_watch": (380, 820),
+    "flints_finger": (260, 850),
+    "moat_cailin": (510, 860),
+    "bay_of_ice": (70, 288),
+    "the_shivering_sea": (1005, 555),
+    "sunset_sea": (75, 900),
+    "the_narrow_sea": (1000, 795),
+    "winterfell_port": (260, 300),
+    "white_harbor_port": (600, 735),
+    "pyke": (115, 970),
+    "pyke_port": (230, 900),
+    "ironmans_bay": (185, 915),
+    "seagard": (390, 915),
+    "riverrun": (455, 1050),
+    "the_twins": (560, 950),
+    "the_fingers": (760, 890),
+    "the_mountains_of_the_moon": (680, 1025),
+    "the_eyrie": (820, 1085),
+    "harrenhal": (585, 1135),
+    "lannisport": (310, 1110),
+    "lannisport_port": (280, 1210),
+    "stoney_sept": (450, 1160),
+    "crackclaw_point": (720, 1165),
+    "searoad_marches": (280, 1265),
+    "blackwater": (465, 1460),
+    "kingswood": (835, 1515),
+    "kings_landing": (700, 1475),
+    "dragonstone": (1020, 1210),
+    "dragonstone_port": (1000, 1300),
+    "the_golden_sound": (85, 1280),
+    "blackwater_bay": (830, 1255),
+    "shipbreaker_bay": (1020, 1515),
+    "the_reach": (520, 1610),
+    "highgarden": (250, 1600),
+    "oldtown": (250, 1780),
+    "oldtown_port": (150, 1810),
+    "the_arbor": (75, 2015),
+    "redwyne_straits": (150, 1945),
+    "three_towers": (300, 1865),
+    "dornish_marches": (455, 1710),
+    "storms_end": (780, 1670),
+    "storms_end_port": (1050, 1530),
+    "west_summer_sea": (350, 2090),
+    "the_boneway": (650, 1725),
+    "princes_pass": (450, 1800),
+    "starfall": (400, 1985),
+    "yronwood": (520, 1900),
+    "salt_shore": (650, 1965),
+    "sunspear": (820, 1895),
+    "sunspear_port": (1000, 1900),
+    "sea_of_dorne": (760, 1835),
+    "east_summer_sea": (800, 2100),
+}
+
+
+def find_board_image() -> Path | None:
+    """Locate the local rulebook board scan without packaging or committing it."""
+    candidates = [BOARD_IMAGE]
+    here = Path(__file__).resolve()
+    if len(here.parents) >= 3:
+        candidates.append(here.parents[2] / BOARD_IMAGE)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
 
 @dataclass(frozen=True)
 class GameSettings:
@@ -305,6 +388,8 @@ def region_details(game: Game, human_house: str, region_id: str) -> str:
             kind += " - Castle"
         elif static.is_stronghold:
             kind += " - Stronghold"
+        if static.is_port and static.host:
+            kind += f" - port of {region_name(game, static.host)}"
         if static.home:
             kind += f" - home of {house_name(static.home)}"
         lines.append(kind)
@@ -1197,6 +1282,15 @@ class AgotApp:
             font=("Segoe UI", 8, "bold"),
             anchor="w",
         ).pack(side="left")
+        self._board_mode = tk.Label(
+            head,
+            text="",
+            bg=BG,
+            fg=MUTED,
+            font=("Segoe UI", 7),
+            anchor="w",
+        )
+        self._board_mode.pack(side="left", padx=(8, 0))
         tk.Label(
             head,
             text=(
@@ -1227,12 +1321,21 @@ class AgotApp:
         scrollbar.pack(side="right", fill="y")
         self._board_canvas.bind("<Configure>", self._on_board_resize)
         self._board_canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self._board_canvas.bind("<Button-1>", self._on_board_click)
+        self._board_canvas.bind("<Motion>", self._on_board_motion)
         self._board_canvas.bind(
             "<Button-4>", lambda _event: self._board_canvas.yview_scroll(-3, "units")
         )
         self._board_canvas.bind(
             "<Button-5>", lambda _event: self._board_canvas.yview_scroll(3, "units")
         )
+
+        self._board_source = None
+        self._board_photo = None
+        self._board_image_width = 0
+        self._board_image_error: str | None = None
+        self._board_anchor_points: list[tuple[str, float, float]] = []
+        self._board_warned = False
 
     def _build_right(self, parent: tk.Frame) -> None:
         status = tk.Frame(
@@ -1616,9 +1719,180 @@ class AgotApp:
         width = canvas.winfo_width()
         if width <= 1:
             width = 620
+
+        if self._refresh_image_board(width):
+            self._board_mode.configure(text="RULEBOOK MAP")
+        else:
+            self._refresh_tile_board(width)
+            self._board_mode.configure(text="SCHEMATIC")
+            if not self._board_warned:
+                self._board_warned = True
+                reason = self._board_image_error or "unavailable"
+                if reason == "Pillow is not installed":
+                    hint = "Install it with pip install -e \".[gui]\"."
+                elif reason == "Rulebook/board.jpg not found":
+                    hint = "Place the board scan at Rulebook/board.jpg."
+                else:
+                    hint = "The schematic board is still fully playable."
+                self._append_log(
+                    f"Board image not used ({reason}); showing the schematic board. "
+                    f"{hint}",
+                    "system",
+                )
+        if yview:
+            canvas.yview_moveto(yview[0])
+
+    def _prepare_board_image(self, width: int) -> bool:
+        if self._board_source is None and self._board_image_error is None:
+            path = find_board_image()
+            if path is None:
+                self._board_image_error = "Rulebook/board.jpg not found"
+                return False
+            try:
+                from PIL import Image
+            except ImportError:  # pragma: no cover - depends on the environment
+                self._board_image_error = "Pillow is not installed"
+                return False
+            try:
+                with Image.open(path) as source:
+                    source.load()
+                    self._board_source = source.crop(BOARD_CROP).convert("RGB")
+            except Exception as error:
+                self._board_image_error = f"could not read {path.name}: {error}"
+                return False
+
+        if self._board_source is None:
+            return False
+        if width != self._board_image_width:
+            try:
+                from PIL import Image, ImageTk
+            except ImportError:  # pragma: no cover - depends on the environment
+                self._board_image_error = "Pillow is not installed"
+                return False
+            resampling = getattr(Image, "Resampling", Image).LANCZOS
+            height = max(
+                1,
+                round(
+                    self._board_source.height
+                    * width
+                    / self._board_source.width
+                ),
+            )
+            try:
+                resized = self._board_source.resize((width, height), resampling)
+                self._board_photo = ImageTk.PhotoImage(resized)
+            except Exception as error:
+                self._board_image_error = f"could not scale the board image: {error}"
+                return False
+            self._board_scale = width / self._board_source.width
+            self._board_image_width = width
+        return self._board_photo is not None
+
+    def _refresh_image_board(self, width: int) -> bool:
+        if not self._prepare_board_image(width) or self._board_photo is None:
+            return False
+        canvas = self._board_canvas
+        canvas.create_image(0, 0, image=self._board_photo, anchor="nw")
+        crop_x, crop_y, _crop_right, _crop_bottom = BOARD_CROP
+        scale = self._board_scale
+        points: list[tuple[str, float, float]] = []
+        for region_id, (source_x, source_y) in BOARD_ANCHORS.items():
+            if region_id not in self.game.state.regions:
+                continue
+            x = (source_x - crop_x) * scale
+            y = (source_y - crop_y) * scale
+            points.append((region_id, x, y))
+            self._draw_map_overlay(canvas, x, y, region_id)
+        self._board_anchor_points = points
+        canvas.configure(
+            scrollregion=(0, 0, width, self._board_photo.height() + 8)
+        )
+        return True
+
+    def _draw_map_overlay(
+        self, canvas: tk.Canvas, x: float, y: float, region_id: str
+    ) -> None:
+        assert self.game is not None
+        region = self.game.state.regions[region_id]
+        selected = region_id == self.selected_region
+        if region.controller:
+            control_color = house_color(region.controller)
+        elif region.neutral_force:
+            control_color = RED
+        else:
+            control_color = "#68707a"
+
+        static = self.game.map.regions.get(region_id)
+        details: list[str] = []
+        if static is not None and static.is_port:
+            # Ports have no printed name on the board, so the overlay supplies
+            # one; otherwise the port icon would be hard to identify.
+            details.append(static.name)
+        units = unit_badge(region.units)
+        if units:
+            details.append(units)
+        routed = unit_badge(region.routed)
+        if routed:
+            details.append(f"r {routed}")
+        if region.neutral_force:
+            details.append(f"N{region.neutral_force}")
+        if region.garrison:
+            details.append(f"G{region.garrison}")
+        if region.order:
+            visible = (
+                self.game.state.orders_revealed
+                or region.order_house == self.human_house
+            )
+            details.append(
+                f"[{order_badge(region.order) if visible else '?'}]"
+            )
+        text = "  ".join(details)
+        chip_width = max(34, len(text) * 5 + 10) if text else 0
+        half_width = max(46, chip_width / 2 + 5)
+        if selected:
+            canvas.create_rectangle(
+                x - half_width,
+                y - 13,
+                x + half_width,
+                y + 27,
+                outline=GOLD,
+                width=2,
+            )
+        canvas.create_line(
+            x - 30,
+            y + 9,
+            x + 30,
+            y + 9,
+            fill=control_color,
+            width=4,
+        )
+        if not details:
+            return
+        top = y + 12
+        bottom = y + 26
+        canvas.create_rectangle(
+            x - chip_width / 2,
+            top,
+            x + chip_width / 2,
+            bottom,
+            fill="#0a0d11",
+            outline=GOLD if selected else BORDER,
+            width=1,
+        )
+        canvas.create_text(
+            x,
+            (top + bottom) / 2,
+            text=text,
+            fill=TEXT,
+            font=("Consolas", 7),
+            anchor="center",
+        )
+
+    def _refresh_tile_board(self, width: int) -> None:
+        self._board_anchor_points = []
+        canvas = self._board_canvas
         cols = max(1, (width - 2 * BOARD_PAD) // (TILE_W + TILE_GAP))
         state = self.game.state
-        placed: set[str] = set()
         y = 12
         groups = list(AREAS)
         known = {region_id for _title, regions in groups for region_id in regions}
@@ -1666,12 +1940,9 @@ class AgotApp:
                 x = BOARD_PAD + column * (TILE_W + TILE_GAP)
                 tile_y = y + 27 + row * (TILE_H + TILE_GAP)
                 self._draw_region(canvas, x, tile_y, region_id)
-                placed.add(region_id)
             y += area_height + 10
 
         canvas.configure(scrollregion=(0, 0, width, y + 6))
-        if yview:
-            canvas.yview_moveto(yview[0])
 
     def _draw_region(self, canvas: tk.Canvas, x: int, y: int, region_id: str) -> None:
         assert self.game is not None
@@ -1809,6 +2080,33 @@ class AgotApp:
             "<Leave>",
             lambda _event: canvas.configure(cursor=""),
         )
+
+    def _nearest_board_region(self, x: float, y: float) -> str | None:
+        if not self._board_anchor_points:
+            return None
+        best: str | None = None
+        best_distance = 45.0**2
+        for region_id, anchor_x, anchor_y in self._board_anchor_points:
+            distance = (x - anchor_x) ** 2 + (y - anchor_y) ** 2
+            if distance < best_distance:
+                best_distance = distance
+                best = region_id
+        return best
+
+    def _on_board_click(self, event) -> None:
+        x = self._board_canvas.canvasx(event.x)
+        y = self._board_canvas.canvasy(event.y)
+        region_id = self._nearest_board_region(x, y)
+        if region_id is not None:
+            self._select_region(region_id)
+
+    def _on_board_motion(self, event) -> None:
+        if not self._board_anchor_points:
+            return
+        x = self._board_canvas.canvasx(event.x)
+        y = self._board_canvas.canvasy(event.y)
+        region_id = self._nearest_board_region(x, y)
+        self._board_canvas.configure(cursor="hand2" if region_id else "")
 
     def _on_mousewheel(self, event) -> None:
         if event.delta:
@@ -1973,8 +2271,13 @@ class AgotApp:
             return
         index = int(selection[0])
         if 0 <= index < len(self.actions):
-            text = format_action(self.game, self.actions[index])
+            action = self.actions[index]
+            text = format_action(self.game, action)
             self._selected_action.configure(text=f"Selected: {text}")
+            if action.region and action.region != self.selected_region:
+                self.selected_region = action.region
+                self._refresh_detail()
+                self._refresh_board()
 
     def _on_action_hover(self, event) -> None:
         row = self._action_tree.identify_row(event.y)

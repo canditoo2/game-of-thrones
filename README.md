@@ -62,6 +62,7 @@ published `agot` wheel does not.
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 pip install -e ".[dev]"         # builds the Rust extension + tests + linter
+pip install -e ".[gui]"         # optional: Pillow, for the rulebook board scan
 pip install -e ".[rl]"          # optional: adds PyTorch
 ```
 
@@ -157,9 +158,14 @@ clone cell; make the repository public to skip that step.
 ## Play against a checkpoint
 
 `agot play` opens a desktop window built with Tkinter (bundled with the
-python.org Windows installer; no browser or web server). The setup screen asks
-you to **choose your house** — Baratheon, Lannister, Stark, Greyjoy, Tyrell or
-Martell — and to choose the opponent and checkpoint:
+python.org Windows installer; no browser or web server). When the local
+`Rulebook/board.jpg` scan is present, the game uses it as the board background
+and overlays live control, unit and Order markers. That scan is copyrighted,
+gitignored and never packaged; the app falls back to a schematic region board
+if it is missing. Install Pillow with `pip install -e ".[gui]"` to display the
+scan. The setup screen asks you to **choose your house** — Baratheon,
+Lannister, Stark, Greyjoy, Tyrell or Martell — and to choose the opponent and
+checkpoint:
 
 ```powershell
 agot play --checkpoint checkpoints\run3
