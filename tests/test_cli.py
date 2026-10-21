@@ -47,9 +47,16 @@ def test_net_policy_plays_a_legal_move(tmp_path) -> None:
     assert action in game.legal_actions()
 
 
-def test_play_command_can_quit_immediately(monkeypatch, capsys) -> None:
-    monkeypatch.setattr("builtins.input", lambda _prompt="": "q")
+def test_play_command_opens_the_gui(monkeypatch) -> None:
+    pytest.importorskip("tkinter")
+    import agot.gui
 
+    calls: list[dict[str, object]] = []
+
+    def fake_launch(**kwargs) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(agot.gui, "launch", fake_launch)
     code = main(
         [
             "play",
@@ -58,16 +65,26 @@ def test_play_command_can_quit_immediately(monkeypatch, capsys) -> None:
             "--opponents",
             "greedy",
             "--max-rounds",
-            "1",
-            "--simulations",
             "2",
+            "--simulations",
+            "8",
             "--determinizations",
             "1",
         ]
     )
 
     assert code == 0
-    assert "Game ended early" in capsys.readouterr().out
+    assert calls == [
+        {
+            "checkpoint": None,
+            "house": "baratheon",
+            "opponents": "greedy",
+            "simulations": 8,
+            "determinizations": 1,
+            "seed": 0,
+            "max_rounds": 2,
+        }
+    ]
 
 
 def test_round_robin_runs_two_checkpoints(tmp_path, capsys) -> None:

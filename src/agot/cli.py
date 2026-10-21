@@ -124,21 +124,20 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 
 def cmd_play(args: argparse.Namespace) -> int:
-    """Run one interactive game, optionally against a saved network."""
-    from agot.play import play_interactive
+    """Open the desktop game window."""
+    from agot.gui import launch
 
-    config = GameConfig(seed=args.seed, max_rounds=args.max_rounds)
     try:
-        play_interactive(
-            args.checkpoint,
-            human_house=args.house,
+        launch(
+            checkpoint=args.checkpoint,
+            house=args.house,
             opponents=args.opponents,
             simulations=args.simulations,
             determinizations=args.determinizations,
-            config=config,
             seed=args.seed,
+            max_rounds=args.max_rounds,
         )
-    except (OSError, RuntimeError, ValueError) as error:
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
         raise SystemExit(str(error)) from None
     return 0
 
@@ -548,18 +547,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     play = sub.add_parser(
         "play",
-        help="play one interactive game, by default against a saved network",
+        help="open the desktop game against a saved network",
     )
     play.add_argument(
         "--checkpoint",
-        default="checkpoints/agot.pt",
-        help="a .pt file or a run directory (agot-best.pt preferred); used by net",
+        default=None,
+        help=(
+            "preselected .pt file or run directory (agot-best.pt preferred); "
+            "the setup window can also choose it"
+        ),
     )
     play.add_argument(
         "--house",
         default="stark",
         choices=list(DEFAULT_HOUSES),
-        help="the house you play",
+        help="preselected house; the setup window still asks you to choose",
     )
     play.add_argument(
         "--opponents",

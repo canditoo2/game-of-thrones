@@ -42,7 +42,8 @@ src/agot/
   agents/        policies: random baseline, greedy heuristic, PUCT MCTS
   nn/            the policy/value network (needs PyTorch)
   training/      self-play, replay buffer, trainer, evaluation
-  play.py        interactive human-versus-network game
+  gui.py         desktop game window (Tkinter)
+  play.py        shared game loop and action/board formatting
   cli.py         command-line entry point
 tests/           engine facade, map, agents, training, network and the extension
 docs/            architecture, methods, roadmap and the rulebook fidelity audit
@@ -70,12 +71,10 @@ pip install -e ".[rl]"          # optional: adds PyTorch
 # Play one full game with the greedy baseline.
 agot demo --policy greedy --seed 1
 
-# Play interactively as Stark against a saved network. A run directory picks
-# agot-best.pt when it exists (otherwise agot.pt). The AI seats use 64 MCTS
-# simulations over two determinizations, so your face-down orders stay hidden;
-# --opponents greedy is the fast fallback and --simulations 128 matches the
-# training search budget.
-agot play --checkpoint checkpoints/run3 --house stark
+# Open the desktop game. The setup window chooses your house, the opponent,
+# the checkpoint and the search budget before the match starts. A run
+# directory picks agot-best.pt when it exists (otherwise agot.pt).
+agot play --checkpoint checkpoints/run3
 
 # Head-to-head over several games (random vs greedy).
 agot evaluate --a random --b greedy --games 20
@@ -149,13 +148,41 @@ is cached per commit, so a reconnected session installs it in seconds instead
 of rebuilding Rust; the first session for a new commit takes a couple of
 minutes. A CPU runtime is fine — the search is CPU-bound, so a GPU adds little.
 Open it in Colab (upload the file, or *File → Open notebook → GitHub*) and run
-the cells top to bottom. After training, the "Play against the model" cell
-starts an interactive game against the best checkpoint; it can also be run in
-a separate runtime while a training session is still busy.
+the cells top to bottom.
 
 The repository is private, so add a fine-grained read-only token as a Colab
 secret named `GITHUB_TOKEN` (🔑 panel in the left sidebar) before running the
 clone cell; make the repository public to skip that step.
+
+## Play against a checkpoint
+
+`agot play` opens a desktop window built with Tkinter (bundled with the
+python.org Windows installer; no browser or web server). The setup screen asks
+you to **choose your house** — Baratheon, Lannister, Stark, Greyjoy, Tyrell or
+Martell — and to choose the opponent and checkpoint:
+
+```powershell
+agot play --checkpoint checkpoints\run3
+```
+
+A run directory is convenient: the window resolves `agot-best.pt` when it
+exists and otherwise uses `agot.pt`. You can also browse to a `.pt` file or run
+folder directly; for a checkpoint trained on another machine, copy
+`agot-best.pt` over and use **File...**. The other options are the opponent
+(`net`, `greedy` or `random`), search simulations and determinizations, seed
+and round cap. The
+default is 64 simulations over 2 determinizations: the second world keeps your
+face-down order tokens and secret bids hidden from the bot. With one
+determinization the search is faster but can see them, so it is not a fair game.
+
+The game screen shows every region grouped by area, all six Houses' power,
+Supply, castles, House-card counts and remaining orders, the three Influence tracks,
+the Wildling threat and your hand. Click a region to inspect its controller,
+units, garrison, orders and neighbours. Select an action in the list and press
+**Play selected action**, or double-click it. **Undo** returns to before your
+last decision; **New game** goes back to the house/settings screen. The log
+records public moves only — it never names an AI's face-down order, secret bid
+or House card.
 
 ## How the learning works
 

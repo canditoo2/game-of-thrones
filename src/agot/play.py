@@ -9,12 +9,13 @@ therefore keeps two concerns apart:
 * the network seats search with at least two determinizations, so their PIMC
   worlds resample the human's face-down information instead of reading it.
 
-Use :func:`play_interactive` directly from a notebook, or run::
+The desktop application lives in :mod:`agot.gui`; the command::
 
-    agot play --checkpoint checkpoints/run3/agot-best.pt --house stark
+    agot play --checkpoint checkpoints/run3 --house stark
 
-PyTorch is imported only for ``--opponents net``; the greedy and random
-fallbacks work on a torch-free install.
+opens it. :func:`play_interactive` is the small input/output controller shared
+by the GUI and the tests. PyTorch is imported only for ``opponents="net"``;
+the greedy and random fallbacks work on a torch-free install.
 """
 
 from __future__ import annotations
@@ -73,8 +74,9 @@ class PlayResult:
 def resolve_checkpoint(path: str | Path) -> str:
     """Resolve a checkpoint file or a run directory.
 
-    A directory is convenient in Colab: it picks ``agot-best.pt`` when the run
-    has evaluated at least once, otherwise the latest ``agot.pt``.
+    A directory is convenient for numbered run folders: it picks
+    ``agot-best.pt`` when the run has evaluated at least once, otherwise the
+    latest ``agot.pt``.
     """
     candidate = Path(path).expanduser()
     if candidate.is_dir():
@@ -104,7 +106,7 @@ def _region_name(game: Game, region_id: str | None) -> str:
     return region.name if region is not None else _pretty(region_id)
 
 
-def _order_label(key: str | None) -> str:
+def order_label(key: str | None) -> str:
     if not key:
         return "?"
     spec = ORDERS_BY_KEY.get(key)
@@ -179,7 +181,7 @@ def format_action(game: Game, action: Action) -> str:
             return f"Decline to place an order in {region}"
         return f"Decline the action in {region}"
     if kind is ActionKind.PLACE_ORDER:
-        return f"Place {_order_label(action.order)} in {region}"
+        return f"Place {order_label(action.order)} in {region}"
     if kind is ActionKind.RESOLVE_RAID:
         return f"Raid {target} from {region}"
     if kind is ActionKind.MARCH:
@@ -199,7 +201,7 @@ def format_action(game: Game, action: Action) -> str:
     if kind is ActionKind.USE_BLADE:
         return "Use the Valyrian Steel Blade"
     if kind is ActionKind.RAVEN_SWAP:
-        return f"Messenger Raven: change the order in {region} to {_order_label(action.order)}"
+        return f"Messenger Raven: change the order in {region} to {order_label(action.order)}"
     if kind is ActionKind.RAVEN_DECK_TOP:
         return "Messenger Raven: put the drawn Westeros card on top of the deck"
     if kind is ActionKind.RAVEN_DECK_BOTTOM:
@@ -307,7 +309,7 @@ def render_board(game: Game, human_house: str | None = None) -> str:
             visible = state.orders_revealed or (
                 human_house is not None and region.order_house == human_house
             )
-            token = _order_label(region.order) if visible else "?"
+            token = order_label(region.order) if visible else "?"
             owner = _pretty(region.order_house) if region.order_house else "?"
             details.append(f"order {owner} [{token}]")
         if region.owner and region.owner != region.controller:
@@ -324,7 +326,7 @@ def render_board(game: Game, human_house: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def _make_policies(
+def make_policies(
     config: GameConfig,
     human_house: str,
     opponents: str,
@@ -426,24 +428,21 @@ def _prompt_action(
         output_fn(f"Choose a number from 1 to {len(actions)}.")
 
 
-def _announce_ai(
-    game: Game, house: str, action: Action, output_fn: OutputFn
-) -> None:
-    """Show an AI decision without leaking a face-down order, bid or card."""
+def ai_action_summary(game: Game, house: str, action: Action) -> str:
+    """Describe an AI decision without leaking a face-down order, bid or card."""
     if action.kind is ActionKind.PLACE_ORDER and not game.state.orders_revealed:
-        output_fn(f"  {_house_name(house)} places an order.")
-    elif action.kind in (
+        return f"{_house_name(house)} places an order."
+    if action.kind in (
         ActionKind.RAVEN_SWAP,
         ActionKind.RAVEN_DECK_TOP,
         ActionKind.RAVEN_DECK_BOTTOM,
     ):
-        output_fn(f"  {_house_name(house)} uses the Messenger Raven.")
-    elif action.kind is ActionKind.BID:
-        output_fn(f"  {_house_name(house)} bids in secret.")
-    elif action.kind is ActionKind.PLAY_HOUSE_CARD:
-        output_fn(f"  {_house_name(house)} selects a House card.")
-    else:
-        output_fn(f"  {_house_name(house)}: {format_action(game, action)}")
+        return f"{_house_name(house)} uses the Messenger Raven."
+    if action.kind is ActionKind.BID:
+        return f"{_house_name(house)} bids in secret."
+    if action.kind is ActionKind.PLAY_HOUSE_CARD:
+        return f"{_house_name(house)} selects a House card."
+    return f"{_house_name(house)}: {format_action(game, action)}"
 
 
 def play_interactive(
@@ -461,8 +460,8 @@ def play_interactive(
 ) -> PlayResult:
     """Play one game as ``human_house`` against AI seats.
 
-    ``input_fn`` and ``output_fn`` are injectable for tests and notebook UIs.
-    ``max_steps`` is a test/debug stop, not a game rule.
+    ``input_fn`` and ``output_fn`` are injectable for tests and other front
+    ends. ``max_steps`` is a test/debug stop, not a game rule.
 
     The AI seats use two determinizations by default. A single determinization
     is faster, but then the search sees the human's face-down Order tokens and
@@ -488,7 +487,7 @@ def play_interactive(
             f"unknown house {human_house!r}; choose from {list(config.houses)}"
         )
 
-    policies = _make_policies(
+    policies = make_policies(
         config,
         human_house,
         opponents,
@@ -573,7 +572,7 @@ def play_interactive(
                 aborted = True
                 break
             action = policies[player].act(game)
-            _announce_ai(game, player, action, output_fn)
+            output_fn(f"  {ai_action_summary(game, player, action)}")
 
         game.step(action)
         steps += 1
@@ -617,7 +616,10 @@ def play_interactive(
 
 __all__ = [
     "PlayResult",
+    "ai_action_summary",
     "format_action",
+    "make_policies",
+    "order_label",
     "play_interactive",
     "render_board",
     "resolve_checkpoint",
