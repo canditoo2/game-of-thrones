@@ -183,13 +183,18 @@ face-down order tokens and secret bids hidden from the bot. With one
 determinization the search is faster but can see them, so it is not a fair game.
 
 The game screen shows every region grouped by area, all six Houses' power,
-Supply, castles, House-card counts and remaining orders, the three Influence tracks,
+Supply, castles, House-card counts, remaining orders and special-order allowance, the numbered Influence tracks,
 the Wildling threat and your hand. Click a region to inspect its controller,
 units, garrison, orders and neighbours. Select an action in the list and press
-**Play selected action**, or double-click it. **Undo** returns to before your
-last decision; **New game** goes back to the house/settings screen. The log
-records public moves only — it never names an AI's face-down order, secret bid
-or House card.
+**Play selected action**, or double-click it. Planning uses a guided order
+picker: choose the order type (March, Defend, Support, Raid, Consolidate), then
+the specific strength/starred token, then the destination region. March moves
+list the largest unit stack first, and attack with fewer than all eligible
+units asks for confirmation. **Undo** returns to before your last decision;
+**New game** goes back to the house/settings screen. A battle panel shows the
+attacker, defender, origin, unit counts, unit strengths, order bonuses and
+revealed House cards; the log records battle stages, card reveals, casualties,
+Raven choices and drawn Westeros cards.
 
 Every match also writes a local structured log under
 `checkpoints/play-logs/`:
@@ -255,9 +260,13 @@ These are real deviations from the physical game. They are tracked in
 * **Neutral forces** (King's Landing 5, The Eyrie 6) defend with their printed
   strength; ties go to the attacker and they never use a House card or the
   Valyrian Steel Blade.
-* **Multi-destination marches are not offered.** A March Order moves to a
-  single destination; the real game allows splitting across several areas (at
-  most one of which is a battle).
+* **Multi-destination marches are partial.** Under one March Order the engine
+  can wait after a non-battle move and offer further moves or a finish action;
+  a move into an enemy area starts the battle immediately, so a battle cannot
+  be followed by more moves under that order. The real game allows one battle
+  plus movement to other destinations. The desktop picker puts the largest
+  stack first and warns before attacking with less than the full eligible
+  force.
 
 The board data is also partly unverified; see [`PROVENANCE.md`](PROVENANCE.md)
 for exactly which values are trusted and which need checking against the

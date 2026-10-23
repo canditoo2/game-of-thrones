@@ -6,7 +6,8 @@ import pytest
 
 tk = pytest.importorskip("tkinter")
 
-from agot.engine.enums import UnitType  # noqa: E402
+from agot.engine.actions import Action  # noqa: E402
+from agot.engine.enums import OrderType, UnitType  # noqa: E402
 from agot.engine.map import load_map  # noqa: E402
 from agot.gui import (  # noqa: E402
     AREAS,
@@ -14,7 +15,9 @@ from agot.gui import (  # noqa: E402
     BOARD_CROP,
     AgotApp,
     GameSettings,
+    house_card_line,
     order_badge,
+    supply_limit_text,
     unit_badge,
 )
 
@@ -56,6 +59,76 @@ def test_unit_badges_follow_the_canonical_order() -> None:
         )
         == "F1 K2 S1"
     )
+
+
+def test_house_card_line_reports_strength_and_effect() -> None:
+    eddard = house_card_line("stark", "eddard_stark")
+    catelyn = house_card_line("stark", "catelyn_stark")
+
+    assert eddard is not None and "Strength 4" in eddard
+    assert eddard is not None and "2 sword(s)" in eddard
+    assert catelyn is not None and "Defence Order" in catelyn
+
+
+def test_supply_text_lists_every_level() -> None:
+    text = supply_limit_text()
+
+    for level in range(7):
+        assert f"{level}:" in text
+    assert "6: 4, 3, 2, 2, 2" in text
+
+
+def test_march_establish_control_uses_a_prompt(monkeypatch) -> None:
+    from agot.engine.game import Game, GameConfig
+
+    plain = Action.march(
+        "stark", "winterfell", "white_harbor", units=(1, 0, 0, 0)
+    )
+    establish = Action.march(
+        "stark",
+        "winterfell",
+        "white_harbor",
+        units=(1, 0, 0, 0),
+        establish=True,
+    )
+    app = object.__new__(AgotApp)
+    app.game = Game.new(GameConfig(seed=0))
+    app.root = None
+    app.march_variants = {
+        (plain.region, plain.target, plain.units): [plain, establish]
+    }
+    monkeypatch.setattr("agot.gui.messagebox.askyesno", lambda *args, **kwargs: True)
+
+    assert app._resolve_march_action(plain) == establish
+
+
+def test_battle_summary_includes_troops_and_revealed_cards() -> None:
+    from agot.engine.game import Game, GameConfig
+
+    app = object.__new__(AgotApp)
+    app.game = Game.new(GameConfig(seed=0))
+    battle = {
+        "region": "riverrun",
+        "origin": "harrenhal",
+        "attacker": "lannister",
+        "defender": "stark",
+        "attacker_units": {"footman": 2, "knight": 1, "siege": 0, "ship": 0},
+        "defender_units": {"footman": 1, "knight": 1, "siege": 0, "ship": 0},
+        "attacker_order_strength": 1,
+        "defender_order_strength": 2,
+        "attacker_card": "tywin_lannister",
+        "defender_card": "eddard_stark",
+        "stage": "Blade",
+        "casualties_remaining": 1,
+    }
+
+    lines = app._battle_summary_lines(battle, reveal_cards=True)
+    text = "\n".join(lines)
+
+    assert "Attacker: F2 K1 (unit strength 4)" in text
+    assert "Defender: F1 K1 (unit strength 3)" in text
+    assert "Tywin Lannister" in text
+    assert "Eddard Stark" in text
 
 
 def test_region_sheet_hides_an_opponents_face_down_order() -> None:
@@ -117,8 +190,10 @@ def test_game_screen_starts_with_a_human_turn(tmp_path) -> None:
         assert app.setup is None
         assert app.game_frame is not None
 
-        # The first legal action is selected automatically; playing it must
-        # advance the session and leave the game screen alive.
+        # Planning uses the guided order picker: choose the order type, then
+        # the specific order, then the region.
+        app._select_order_type(OrderType.MARCH)
+        app._select_order_family("march")
         app._play_selected()
         assert app.steps == 1
         assert not app.finished

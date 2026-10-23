@@ -184,9 +184,13 @@ they should be fixed before expecting a strong agent.
     Storms* actually forbid placing the restricted order type.
 11. **Recycling and deck exhaustion.** The physical decks are finite across ten
     rounds; reshuffling behaviour should be verified.
-12. **Multi-destination marches.** A March Order may move units to several
-    destinations (at most one of them a battle); the engine offers one
-    destination per order. Ports, port capture and ship mustering are done.
+12. **Multi-destination marches.** *(partial)* Under one March Order the engine
+    waits after a non-battle move and offers further moves or a finish action,
+    including the pending-march action set. A move into an enemy area consumes
+    the order and starts the battle immediately, so a battle cannot be followed
+    by further moves under that order. The physical game allows one battle plus
+    movement to other destinations. Ports, port capture and ship mustering are
+    done.
 
 ## Priority 3 — learning quality
 

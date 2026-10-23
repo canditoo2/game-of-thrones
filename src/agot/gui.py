@@ -22,9 +22,17 @@ from tkinter import font as tkfont
 import numpy as np
 
 from agot.agents import MCTS, outcome_vector
-from agot.engine.actions import Action
-from agot.engine.enums import ORDERS_BY_KEY, OrderType, Phase, Track, UnitType
+from agot.engine.actions import Action, ActionKind
+from agot.engine.enums import (
+    ORDERS_BY_KEY,
+    SUPPLY_LIMITS,
+    OrderType,
+    Phase,
+    Track,
+    UnitType,
+)
 from agot.engine.game import DEFAULT_HOUSES, Game, GameConfig
+from agot.engine.map import load_house_cards
 from agot.match_log import MatchLog
 from agot.play import (
     ai_action_summary,
@@ -214,6 +222,24 @@ BOARD_IMAGE = Path("Rulebook") / "board.jpg"
 #: versions of those. Coordinates are in the source image's pixels.
 BOARD_CROP = (0, 110, 1110, 2175)
 
+#: Port labels need extra vertical room so they do not cover the adjacent sea
+#: label (notably Storm's End Port over Shipbreaker Bay).
+BOARD_OVERLAY_DY = {"port": 24, "default": 0}
+
+_ORDER_TYPE_LABELS = {
+    OrderType.MARCH: "March",
+    OrderType.DEFEND: "Defend",
+    OrderType.SUPPORT: "Support",
+    OrderType.RAID: "Raid",
+    OrderType.CONSOLIDATE_POWER: "Consolidate",
+}
+_UNIT_STRENGTH = {
+    UnitType.FOOTMAN: 1,
+    UnitType.KNIGHT: 2,
+    UnitType.SIEGE: 4,
+    UnitType.SHIP: 1,
+}
+
 #: Region label centres in the source board scan. The overlay puts a control
 #: underline and a unit/order chip near each printed label.
 BOARD_ANCHORS: dict[str, tuple[int, int]] = {
@@ -246,7 +272,7 @@ BOARD_ANCHORS: dict[str, tuple[int, int]] = {
     "lannisport_port": (280, 1210),
     "stoney_sept": (450, 1160),
     "crackclaw_point": (720, 1165),
-    "searoad_marches": (280, 1265),
+    "searoad_marches": (280, 1295),
     "blackwater": (465, 1460),
     "kingswood": (835, 1515),
     "kings_landing": (700, 1475),
@@ -365,6 +391,73 @@ def unit_badge(counts: dict[UnitType, int]) -> str:
         if counts.get(unit)
     ]
     return " ".join(pieces)
+
+
+def unit_badge_from_snapshot(counts: dict[str, int]) -> str:
+    return " ".join(
+        f"{_UNIT_ABBR[UnitType(name)]}{count}"
+        for name, count in counts.items()
+        if count and name in {unit.value for unit in _UNIT_ORDER}
+    )
+
+
+def snapshot_units(counts: dict[str, int]) -> dict[UnitType, int]:
+    return {
+        UnitType(name): int(count)
+        for name, count in counts.items()
+        if name in {unit.value for unit in _UNIT_ORDER}
+    }
+
+
+def order_family(order: str | None) -> str | None:
+    """Collapse the two physically identical copies of an order token."""
+    if not order:
+        return None
+    if order.endswith(("_a", "_b")):
+        return order[:-2]
+    return order
+
+
+def order_family_label(order: str | None) -> str:
+    label = order_label(order)
+    return label.replace(" (A)", "").replace(" (B)", "")
+
+
+def house_card_info(house: str, card_id: str | None) -> dict | None:
+    if not card_id:
+        return None
+    for card in load_house_cards().deck(house):
+        if card["id"] == card_id:
+            return card
+    return None
+
+
+def house_card_line(house: str, card_id: str | None) -> str | None:
+    info = house_card_info(house, card_id)
+    if info is None:
+        return None
+    parts = [f"{info['name']} - Strength {info['strength']}"]
+    if info.get("swords"):
+        parts.append(f"{info['swords']} sword(s)")
+    if info.get("forts"):
+        parts.append(f"{info['forts']} fort(s)")
+    text = info.get("text")
+    if text:
+        parts.append(text)
+    return " | ".join(parts)
+
+
+def supply_limit_text() -> str:
+    rows = [
+        f"{level}: " + ", ".join(str(value) for value in limits)
+        for level, limits in enumerate(SUPPLY_LIMITS)
+    ]
+    lines = ["Supply limits (army size per area):"]
+    for index in range(0, len(rows), 2):
+        left = rows[index]
+        right = rows[index + 1] if index + 1 < len(rows) else ""
+        lines.append(f"{left:<17}{right}")
+    return "\n".join(lines)
 
 
 def phase_label(state) -> str:
@@ -944,6 +1037,18 @@ class AgotApp:
         self.undo_stack: list[tuple[Game, int, int]] = []
         self.selected_region: str | None = None
         self.actions: list[Action] = []
+        self.display_actions: list[Action] = []
+        self.order_mode: str | None = None
+        self.order_type: OrderType | None = None
+        self.order_family: str | None = None
+        self.order_source_actions: list[Action] = []
+        self.march_variants: dict[tuple, list[Action]] = {}
+        self.battle_stage_last: str | None = None
+        self.battle_region_last: str | None = None
+        self.battle_cards_logged = False
+        self.battle_casualties_last: int | None = None
+        self.last_battle: dict | None = None
+        self.westeros_drawn_seen: dict[str, tuple[int, str | None]] = {}
         self.busy = False
         self.finished = False
         self.generation = 0
@@ -1077,6 +1182,18 @@ class AgotApp:
         self.game = None
         self.policies = {}
         self.actions = []
+        self.display_actions = []
+        self.order_mode = None
+        self.order_type = None
+        self.order_family = None
+        self.order_source_actions = []
+        self.march_variants = {}
+        self.battle_stage_last = None
+        self.battle_region_last = None
+        self.battle_cards_logged = False
+        self.battle_casualties_last = None
+        self.last_battle = None
+        self.westeros_drawn_seen = {}
         self.undo_stack = []
         self.selected_region = None
         self.finished = False
@@ -1112,6 +1229,19 @@ class AgotApp:
         self.game = game
         self.steps = 0
         self.undo_stack = []
+        self.actions = []
+        self.display_actions = []
+        self.order_mode = None
+        self.order_type = None
+        self.order_family = None
+        self.order_source_actions = []
+        self.march_variants = {}
+        self.battle_stage_last = None
+        self.battle_region_last = None
+        self.battle_cards_logged = False
+        self.battle_casualties_last = None
+        self.last_battle = None
+        self.westeros_drawn_seen = {}
         self.finished = False
         self.busy = False
         self.selected_region = self._human_home()
@@ -1361,6 +1491,16 @@ class AgotApp:
             anchor="w",
         )
         self._wildling_label.pack(fill="x", pady=(10, 0))
+        self._supply_label = tk.Label(
+            parent,
+            text=supply_limit_text(),
+            bg=BG,
+            fg=MUTED,
+            font=("Consolas", 7),
+            justify="left",
+            anchor="w",
+        )
+        self._supply_label.pack(fill="x", pady=(8, 0))
 
     def _build_board(self, parent: tk.Frame) -> None:
         head = tk.Frame(parent, bg=BG)
@@ -1457,7 +1597,21 @@ class AgotApp:
         )
         self._turn_sub.pack(fill="x", padx=12, pady=(0, 9))
 
+        self._battle_label = tk.Label(
+            parent,
+            text="",
+            bg=PANEL_ALT,
+            fg=TEXT,
+            justify="left",
+            anchor="w",
+            wraplength=350,
+            padx=8,
+            pady=6,
+            font=("Segoe UI", 8),
+        )
+
         selected = tk.Frame(parent, bg=BG)
+        self._selected_region_frame = selected
         selected.pack(fill="x", pady=(0, 6))
         tk.Label(
             selected,
@@ -1503,6 +1657,12 @@ class AgotApp:
             font=("Segoe UI", 7),
         )
         self._action_hint.pack(side="right")
+
+        self._order_controls = tk.Frame(actions, bg=BG)
+        self._order_type_host = tk.Frame(self._order_controls, bg=BG)
+        self._order_type_host.pack(fill="x", pady=(0, 2))
+        self._order_family_host = tk.Frame(self._order_controls, bg=BG)
+        self._order_family_host.pack(fill="x", pady=(0, 4))
 
         self._selected_action = tk.Label(
             actions,
@@ -1627,6 +1787,7 @@ class AgotApp:
         self._log.tag_configure("system", foreground=MUTED)
         self._log.tag_configure("human", foreground=GOLD)
         self._log.tag_configure("ai", foreground=TEXT)
+        self._log.tag_configure("battle", foreground="#e0a060")
         self._log.tag_configure("over", foreground="#e4c986", font=("Segoe UI", 8, "bold"))
         self._log.tag_configure("error", foreground=RED)
 
@@ -1635,13 +1796,231 @@ class AgotApp:
     def _refresh_all(self) -> None:
         if self.game is None or self.game_frame is None:
             return
+        self._log_westeros_draw()
+        self._log_battle_update()
         self._refresh_topbar()
         self._refresh_houses()
         self._refresh_tracks()
         self._refresh_board()
+        self._refresh_battle_panel()
         self._refresh_detail()
         self._refresh_hand()
         self._refresh_turn()
+
+    def _log_westeros_draw(self) -> None:
+        if self.game is None:
+            return
+        snapshot = self.game.snapshot()
+        decks = snapshot.get("westeros_decks", {})
+        for deck in ("deck_i", "deck_ii", "deck_iii"):
+            data = decks.get(deck)
+            if not data:
+                continue
+            drawn = data.get("drawn")
+            signature = (int(data.get("position", 0)), drawn)
+            if self.westeros_drawn_seen.get(deck) == signature:
+                continue
+            self.westeros_drawn_seen[deck] = signature
+            if not drawn:
+                continue
+            card = str(drawn).replace("_", " ").title()
+            deck_name = deck.replace("_", " ").title()
+            if self.game.state.phase is Phase.RAVEN:
+                self._append_log(
+                    f"Messenger Raven drew {deck_name}: {card}.",
+                    "system",
+                )
+            else:
+                self._append_log(f"{deck_name} drew: {card}.", "system")
+
+    def _battle_card_label(self, house: str | None, card: str | None) -> str:
+        if not house or not card:
+            return "no card"
+        info = house_card_info(house, card)
+        if info is None:
+            return card.replace("_", " ").title()
+        return (
+            f"{info['name']} (str {info['strength']}, "
+            f"sw {info['swords']}, fort {info['forts']})"
+        )
+
+    def _battle_strength(
+        self,
+        counts: dict[UnitType, int],
+        *,
+        attacker: bool,
+        target_is_fortification: bool,
+    ) -> int:
+        total = 0
+        for unit, count in counts.items():
+            if unit is UnitType.SIEGE and not (
+                attacker and target_is_fortification
+            ):
+                continue
+            total += _UNIT_STRENGTH[unit] * count
+        return total
+
+    def _battle_summary_lines(
+        self,
+        battle: dict,
+        *,
+        reveal_cards: bool,
+    ) -> list[str]:
+        assert self.game is not None
+        region = region_name(self.game, str(battle.get("region", "")))
+        origin = region_name(self.game, str(battle.get("origin", "")))
+        attacker = house_name(battle.get("attacker"))
+        defender_value = battle.get("defender")
+        defender = house_name(defender_value) if defender_value else "Neutral"
+        static = self.game.map.regions.get(str(battle.get("region", "")))
+        target_fort = bool(static is not None and static.is_fortification)
+        attacker_units = snapshot_units(battle.get("attacker_units") or {})
+        defender_units = snapshot_units(battle.get("defender_units") or {})
+        attacker_strength = self._battle_strength(
+            attacker_units,
+            attacker=True,
+            target_is_fortification=target_fort,
+        )
+        defender_strength = self._battle_strength(
+            defender_units,
+            attacker=False,
+            target_is_fortification=target_fort,
+        )
+        attacker_order = int(battle.get("attacker_order_strength") or 0)
+        defender_order = int(battle.get("defender_order_strength") or 0)
+        lines = [
+            f"BATTLE - {region}",
+            f"{attacker} attacks {defender} from {origin}",
+            (
+                f"Attacker: {unit_badge(attacker_units) or 'no units'} "
+                f"(unit strength {attacker_strength}), order {attacker_order:+d}"
+            ),
+            (
+                f"Defender: {unit_badge(defender_units) or 'no units'} "
+                f"(unit strength {defender_strength}), order {defender_order:+d}"
+            ),
+        ]
+        stage = str(battle.get("stage", "?"))
+        if reveal_cards:
+            lines.append(
+                "Cards: "
+                f"{self._battle_card_label(battle.get('attacker'), battle.get('attacker_card'))} "
+                "vs "
+                f"{self._battle_card_label(battle.get('defender'), battle.get('defender_card'))}"
+            )
+        else:
+            lines.append("Cards: not revealed yet")
+        detail = f"Stage: {stage}"
+        casualties = int(battle.get("casualties_remaining") or 0)
+        if casualties:
+            detail += f" - {casualties} casualty(ies) left"
+        lines.append(detail)
+        return lines
+
+    def _battle_cards_public(self, battle: dict) -> bool:
+        return str(battle.get("stage", "")) not in ("Support", "Cards")
+
+    def _refresh_battle_panel(self) -> None:
+        if self.game is None:
+            return
+        battle = self.game.state.pending_battle
+        if not battle:
+            if self._battle_label.winfo_manager() == "pack":
+                self._battle_label.pack_forget()
+            return
+        lines = self._battle_summary_lines(
+            battle,
+            reveal_cards=self._battle_cards_public(battle),
+        )
+        self._battle_label.configure(text="\n".join(lines))
+        if self._battle_label.winfo_manager() != "pack":
+            self._battle_label.pack(
+                fill="x",
+                before=self._selected_region_frame,
+                pady=(0, 6),
+            )
+
+    def _log_battle_update(self) -> None:
+        if self.game is None:
+            return
+        battle = self.game.state.pending_battle
+        if not battle:
+            if self.last_battle is not None:
+                region = region_name(
+                    self.game, str(self.last_battle.get("region", ""))
+                )
+                state_region = self.game.state.regions.get(
+                    str(self.last_battle.get("region", ""))
+                )
+                controller = (
+                    house_name(state_region.controller)
+                    if state_region is not None and state_region.controller
+                    else "no house"
+                )
+                self._append_log(
+                    f"Battle in {region} ended; {controller} controls it.",
+                    "battle",
+                )
+            self.last_battle = None
+            self.battle_stage_last = None
+            self.battle_region_last = None
+            self.battle_cards_logged = False
+            self.battle_casualties_last = None
+            return
+
+        region_id = str(battle.get("region", ""))
+        region = region_name(self.game, region_id)
+        stage = str(battle.get("stage", ""))
+        casualties = int(battle.get("casualties_remaining") or 0)
+        if self.last_battle is None or region_id != self.battle_region_last:
+            self._append_log(f"Battle begins in {region}.", "battle")
+            for line in self._battle_summary_lines(
+                battle, reveal_cards=False
+            )[1:]:
+                self._append_log(f"  {line}", "battle")
+            self.battle_cards_logged = False
+            self.battle_casualties_last = casualties
+            self.battle_stage_last = stage
+            self.battle_region_last = region_id
+        elif stage != self.battle_stage_last:
+            if stage == "Support":
+                self._append_log("  Support orders are being declared.", "battle")
+            elif stage == "Cards":
+                self._append_log("  House cards are being chosen.", "battle")
+            elif stage == "Blade":
+                self._append_log("  House cards are revealed.", "battle")
+            elif stage == "Casualties":
+                self._append_log(
+                    f"  Battle resolved; {casualties} casualty(ies) to remove.",
+                    "battle",
+                )
+            elif stage == "Retreat":
+                self._append_log("  Retreat decision.", "battle")
+            elif stage in ("NeutralResolve", "Finalize"):
+                self._append_log("  Battle resolution.", "battle")
+            self.battle_stage_last = stage
+
+        if self._battle_cards_public(battle) and not self.battle_cards_logged:
+            self._append_log(
+                "  Cards: "
+                f"{house_name(battle.get('attacker'))} "
+                f"{self._battle_card_label(battle.get('attacker'), battle.get('attacker_card'))} "
+                "vs "
+                f"{house_name(battle.get('defender'))} "
+                f"{self._battle_card_label(battle.get('defender'), battle.get('defender_card'))}",
+                "battle",
+            )
+            self.battle_cards_logged = True
+
+        if (
+            casualties
+            and casualties != self.battle_casualties_last
+        ):
+            self._append_log(
+                f"  Casualties remaining: {casualties}.", "battle"
+            )
+            self.battle_casualties_last = casualties
+        self.last_battle = dict(battle)
 
     def _refresh_topbar(self) -> None:
         if self.game is None:
@@ -1675,7 +2054,7 @@ class AgotApp:
         for child in self._houses_body.winfo_children():
             child.destroy()
         state = self.game.state
-        headers = ("House", "P", "S", "C", "Cards", "Ord")
+        headers = ("House", "P", "S", "C", "Cards", "Ord", "Spec")
         for column, text in enumerate(headers):
             label = tk.Label(
                 self._houses_body,
@@ -1698,12 +2077,15 @@ class AgotApp:
             if house.eliminated:
                 color = "#5a5f66"
             card_total = len(house.house_cards_available) + len(house.house_cards_used)
+            allowance = state.star_allowance(house_id)
+            special_placed = house.stars_placed()
             values = (
                 f"{house.power}",
                 f"{house.supply_level}",
                 f"{state.castle_count(house_id)}",
                 f"{len(house.house_cards_available)}/{card_total}",
                 f"{len(house.orders_available)}",
+                f"{special_placed}/{allowance}",
             )
             name_cell = tk.Frame(self._houses_body, bg=background)
             name_cell.grid(row=row, column=0, sticky="ew", padx=(0, 3), pady=1)
@@ -1738,12 +2120,22 @@ class AgotApp:
                 )
         tk.Label(
             self._houses_body,
-            text="P power  S supply  C castles  Ord order tokens left",
+            text=(
+                "P power  S supply  C castles  Ord order tokens left\n"
+                "Spec special orders placed / allowance"
+            ),
             bg=BG,
             fg=MUTED,
             font=("Segoe UI", 7),
+            justify="left",
             anchor="w",
-        ).grid(row=len(DEFAULT_HOUSES) + 1, column=0, columnspan=6, sticky="w", pady=(4, 0))
+        ).grid(
+            row=len(DEFAULT_HOUSES) + 1,
+            column=0,
+            columnspan=7,
+            sticky="w",
+            pady=(4, 0),
+        )
 
     def _refresh_tracks(self) -> None:
         if self.game is None:
@@ -1769,9 +2161,13 @@ class AgotApp:
                 font=("Segoe UI", 7, "bold"),
                 anchor="w",
             ).pack(fill="x")
+            numbered = " > ".join(
+                f"{index}. {house_name(house)}"
+                for index, house in enumerate(names, 1)
+            )
             tk.Label(
                 self._tracks_body,
-                text=" > ".join(house_name(house) for house in names) if names else "-",
+                text=numbered if numbered else "-",
                 bg=BG,
                 fg=TEXT,
                 font=("Segoe UI", 8),
@@ -1782,9 +2178,18 @@ class AgotApp:
 
         raven = state.raven_holder()
         blade = state.blade_holder()
+        raven_position = (
+            state.track_position(raven, Track.KINGS_COURT) if raven else 0
+        )
+        blade_position = (
+            state.track_position(blade, Track.FIEFDOMS) if blade else 0
+        )
         tk.Label(
             self._tracks_body,
-            text=f"Raven: {house_name(raven)}    Blade: {house_name(blade)}",
+            text=(
+                f"Raven: {house_name(raven)} (KC {raven_position})    "
+                f"Blade: {house_name(blade)} (F {blade_position})"
+            ),
             bg=BG,
             fg=MUTED,
             font=("Segoe UI", 7),
@@ -1905,6 +2310,10 @@ class AgotApp:
     ) -> None:
         assert self.game is not None
         region = self.game.state.regions[region_id]
+        static = self.game.map.regions.get(region_id)
+        # Port icons sit on top of the adjacent sea labels; move their readout
+        # down so Storm's End Port does not cover Shipbreaker Bay.
+        y += BOARD_OVERLAY_DY["port"] if static is not None and static.is_port else 0
         selected = region_id == self.selected_region
         if region.controller:
             control_color = house_color(region.controller)
@@ -1913,7 +2322,6 @@ class AgotApp:
         else:
             control_color = "#68707a"
 
-        static = self.game.map.regions.get(region_id)
         details: list[str] = []
         if static is not None and static.is_port:
             # Ports have no printed name on the board, so the overlay supplies
@@ -1939,12 +2347,19 @@ class AgotApp:
             )
         text = "  ".join(details)
         chip_width = max(34, len(text) * 5 + 10) if text else 0
+        chip_x = x
+        if self._board_image_width and chip_width:
+            half = chip_width / 2
+            chip_x = min(
+                max(x, half + 3),
+                self._board_image_width - half - 3,
+            )
         half_width = max(46, chip_width / 2 + 5)
         if selected:
             canvas.create_rectangle(
-                x - half_width,
+                chip_x - half_width,
                 y - 13,
-                x + half_width,
+                chip_x + half_width,
                 y + 27,
                 outline=GOLD,
                 width=2,
@@ -1962,16 +2377,16 @@ class AgotApp:
         top = y + 12
         bottom = y + 26
         canvas.create_rectangle(
-            x - chip_width / 2,
+            chip_x - chip_width / 2,
             top,
-            x + chip_width / 2,
+            chip_x + chip_width / 2,
             bottom,
             fill="#0a0d11",
             outline=GOLD if selected else BORDER,
             width=1,
         )
         canvas.create_text(
-            x,
+            chip_x,
             (top + bottom) / 2,
             text=text,
             fill=TEXT,
@@ -2316,6 +2731,15 @@ class AgotApp:
             defender = house_name(defender_value) if defender_value else "Neutral"
             stage = str(battle.get("stage", "")).replace("_", " ").title()
             parts.append(f"Battle in {region}: {attacker} vs {defender} [{stage}].")
+        pending_march = state.pending_march
+        if pending_march:
+            origin = region_name(
+                self.game, str(pending_march.get("origin", ""))
+            )
+            parts.append(
+                f"March order active in {origin}: move more units or "
+                "finish the order."
+            )
         attack = state.wildling_attack
         if attack:
             parts.append(
@@ -2329,19 +2753,63 @@ class AgotApp:
             parts.append("A holders' choice Westeros card is being resolved.")
         return " ".join(parts)
 
-    def _fill_actions(self, actions: list[Action]) -> None:
+    def _choice_button(
+        self,
+        parent: tk.Frame,
+        text: str,
+        command,
+        selected: bool,
+    ) -> tk.Button:
+        button = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=GOLD if selected else PANEL_ALT,
+            fg="#15120b" if selected else TEXT,
+            activebackground=GOLD if selected else "#343c47",
+            activeforeground="#15120b" if selected else TEXT,
+            relief="flat",
+            bd=0,
+            padx=4,
+            pady=2,
+            cursor="hand2",
+            font=("Segoe UI", 7, "bold" if selected else "normal"),
+        )
+        button.pack(side="left", fill="x", expand=True, padx=1)
+        return button
+
+    def _show_order_controls(self) -> None:
+        if self._order_controls.winfo_manager() != "pack":
+            self._order_controls.pack(
+                fill="x",
+                before=self._selected_action,
+                pady=(0, 4),
+            )
+
+    def _hide_order_controls(self) -> None:
+        if self._order_controls.winfo_manager() == "pack":
+            self._order_controls.pack_forget()
+
+    def _set_tree_rows(
+        self,
+        rows: list[tuple[int, str]],
+        heading: str,
+        hint: str,
+    ) -> None:
         self._action_tree.delete(*self._action_tree.get_children())
-        for index, action in enumerate(actions):
+        self._action_tree.heading("action", text=heading)
+        for number, text in rows:
             self._action_tree.insert(
                 "",
                 "end",
-                iid=str(index),
-                values=(index + 1, format_action(self.game, action)),
+                iid=str(number - 1),
+                values=(number, text),
             )
-        if actions:
+        self._action_hint.configure(text=hint)
+        if rows:
             target = 0
             if self.selected_region:
-                for index, action in enumerate(actions):
+                for index, action in enumerate(self.display_actions):
                     if (
                         action.region == self.selected_region
                         or action.target == self.selected_region
@@ -2353,7 +2821,207 @@ class AgotApp:
             self._update_action_selection()
         else:
             self._selected_action.configure(text="")
-        self._action_hint.configure(text=f"{len(actions)} legal")
+
+    def _clear_tree(
+        self, hint: str = "", heading: str = "Choose an action"
+    ) -> None:
+        self._action_tree.delete(*self._action_tree.get_children())
+        self._action_tree.heading("action", text=heading)
+        self.display_actions = []
+        self._action_hint.configure(text=hint)
+        self._selected_action.configure(text="")
+
+    def _fill_actions(self, actions: list[Action]) -> None:
+        self.actions = actions
+        self.display_actions = []
+        self.march_variants = {}
+        self.order_source_actions = []
+        kinds = {action.kind for action in actions}
+        if kinds == {ActionKind.PLACE_ORDER}:
+            self._fill_order_actions(actions, "place")
+            return
+        if kinds == {ActionKind.RAVEN_SWAP}:
+            self._fill_order_actions(actions, "raven")
+            return
+        if ActionKind.MARCH in kinds and kinds <= {
+            ActionKind.MARCH,
+            ActionKind.PASS,
+        }:
+            self._fill_march_actions(actions)
+            return
+        self._fill_flat_actions(actions)
+
+    def _fill_flat_actions(self, actions: list[Action]) -> None:
+        self.order_mode = None
+        self.order_type = None
+        self.order_family = None
+        self._hide_order_controls()
+        self.display_actions = list(actions)
+        rows = [
+            (index + 1, format_action(self.game, action))
+            for index, action in enumerate(actions)
+        ]
+        self._set_tree_rows(rows, "Choose an action", f"{len(actions)} legal")
+
+    def _fill_order_actions(self, actions: list[Action], mode: str) -> None:
+        self.order_mode = mode
+        self.order_source_actions = list(actions)
+        self.march_variants = {}
+        self._show_order_controls()
+        self._render_order_types()
+
+    def _render_order_types(self) -> None:
+        for child in self._order_type_host.winfo_children():
+            child.destroy()
+        types: list[OrderType] = []
+        for action in self.order_source_actions:
+            spec = ORDERS_BY_KEY.get(action.order or "")
+            if spec is not None and spec.order_type not in types:
+                types.append(spec.order_type)
+        if self.order_type not in types:
+            self.order_type = types[0] if len(types) == 1 else None
+        tk.Label(
+            self._order_type_host,
+            text="Type",
+            bg=BG,
+            fg=MUTED,
+            font=("Segoe UI", 7),
+        ).pack(side="left", padx=(0, 2))
+        for order_type in types:
+            self._choice_button(
+                self._order_type_host,
+                _ORDER_TYPE_LABELS[order_type],
+                lambda value=order_type: self._select_order_type(value),
+                self.order_type is order_type,
+            )
+        self._render_order_families()
+
+    def _select_order_type(self, order_type: OrderType) -> None:
+        self.order_type = order_type
+        self.order_family = None
+        self._render_order_types()
+
+    def _render_order_families(self) -> None:
+        for child in self._order_family_host.winfo_children():
+            child.destroy()
+        if self.order_type is None:
+            self._clear_tree(
+                "Choose the order type.",
+                heading="Choose the order type",
+            )
+            return
+        families: dict[str, Action] = {}
+        for action in self.order_source_actions:
+            spec = ORDERS_BY_KEY.get(action.order or "")
+            if spec is None or spec.order_type is not self.order_type:
+                continue
+            family = order_family(action.order)
+            if family is not None and family not in families:
+                families[family] = action
+        if self.order_family not in families:
+            self.order_family = next(iter(families)) if len(families) == 1 else None
+        tk.Label(
+            self._order_family_host,
+            text="Order",
+            bg=BG,
+            fg=MUTED,
+            font=("Segoe UI", 7),
+        ).pack(side="left", padx=(0, 2))
+        for family, action in families.items():
+            self._choice_button(
+                self._order_family_host,
+                order_family_label(action.order),
+                lambda value=family: self._select_order_family(value),
+                self.order_family == family,
+            )
+        self._render_order_regions()
+
+    def _select_order_family(self, family: str) -> None:
+        self.order_family = family
+        self._render_order_families()
+
+    def _render_order_regions(self) -> None:
+        if self.order_type is None:
+            self._clear_tree(
+                "Choose the order type.",
+                heading="Choose the order type",
+            )
+            return
+        if self.order_family is None:
+            self._clear_tree(
+                "Choose the specific order.",
+                heading="Choose the specific order",
+            )
+            return
+        representatives: dict[str, Action] = {}
+        for action in self.order_source_actions:
+            if order_family(action.order) != self.order_family:
+                continue
+            if action.region and action.region not in representatives:
+                representatives[action.region] = action
+        self.display_actions = list(representatives.values())
+        rows = [
+            (index + 1, region_name(self.game, action.region))
+            for index, action in enumerate(self.display_actions)
+        ]
+        self._set_tree_rows(
+            rows,
+            "Choose a region",
+            f"{len(rows)} place(s)",
+        )
+
+    def _fill_march_actions(self, actions: list[Action]) -> None:
+        self.order_mode = "march"
+        self.order_type = None
+        self.order_family = None
+        self._hide_order_controls()
+        groups: dict[tuple, list[Action]] = {}
+        for action in actions:
+            if action.kind is not ActionKind.MARCH:
+                continue
+            key = (action.region, action.target, action.units)
+            groups.setdefault(key, []).append(action)
+        self.march_variants = groups
+        display = [variants[0] for variants in groups.values()]
+        # Put the largest stack first: the default choice should move the whole
+        # army, not accidentally attack with a single unit.
+        display.sort(
+            key=lambda action: (
+                -sum(action.units or ()),
+                action.region or "",
+                action.target or "",
+            )
+        )
+        display.extend(
+            action for action in actions if action.kind is ActionKind.PASS
+        )
+        self.display_actions = display
+        rows = []
+        for index, action in enumerate(self.display_actions):
+            if action.kind is ActionKind.PASS:
+                text = "Finish the March order"
+            else:
+                text = format_action(self.game, action).replace(
+                    " (establish control)", ""
+                )
+            rows.append((index + 1, text))
+        self._set_tree_rows(
+            rows,
+            "Choose a movement",
+            f"{len(display)} choice(s)",
+        )
+
+    def _action_detail_text(self, action: Action) -> str:
+        if action.kind is ActionKind.PASS and self.order_mode == "march":
+            return "Finish the March order"
+        text = format_action(self.game, action)
+        if action.kind is ActionKind.PLAY_HOUSE_CARD:
+            card = house_card_line(
+                action.house or self.human_house, action.card
+            )
+            if card:
+                text += "\n" + card
+        return text
 
     def _update_action_selection(self) -> None:
         selection = self._action_tree.selection()
@@ -2361,9 +3029,9 @@ class AgotApp:
             self._selected_action.configure(text="")
             return
         index = int(selection[0])
-        if 0 <= index < len(self.actions):
-            action = self.actions[index]
-            text = format_action(self.game, action)
+        if 0 <= index < len(self.display_actions):
+            action = self.display_actions[index]
+            text = self._action_detail_text(action)
             self._selected_action.configure(text=f"Selected: {text}")
             if action.region and action.region != self.selected_region:
                 self.selected_region = action.region
@@ -2376,8 +3044,8 @@ class AgotApp:
             self._update_action_selection()
             return
         index = int(row)
-        if 0 <= index < len(self.actions):
-            text = format_action(self.game, self.actions[index])
+        if 0 <= index < len(self.display_actions):
+            text = self._action_detail_text(self.display_actions[index])
             self._selected_action.configure(text=f"Hover: {text}")
 
     def _clear_actions(self) -> None:
@@ -2385,7 +3053,14 @@ class AgotApp:
         self._action_hint.configure(text="")
         if hasattr(self, "_selected_action"):
             self._selected_action.configure(text="")
+        self._hide_order_controls()
         self.actions = []
+        self.display_actions = []
+        self.order_mode = None
+        self.order_type = None
+        self.order_family = None
+        self.order_source_actions = []
+        self.march_variants = {}
 
     def _set_play_enabled(self, enabled: bool) -> None:
         self._play_button.configure(state="normal" if enabled else "disabled")
@@ -2477,7 +3152,20 @@ class AgotApp:
             chosen_index=index,
             target=target,
         )
-        self._append_log(ai_action_summary(self.game, player, action), "ai")
+        if action.kind in (
+            ActionKind.RAVEN_SWAP,
+            ActionKind.RAVEN_DECK_TOP,
+            ActionKind.RAVEN_DECK_BOTTOM,
+        ):
+            self._append_log(
+                f"Messenger Raven - {house_name(player)}: "
+                f"{format_action(self.game, action)}",
+                "ai",
+            )
+        else:
+            self._append_log(
+                ai_action_summary(self.game, player, action), "ai"
+            )
         try:
             self.game.step(action)
         except Exception as error:
@@ -2486,6 +3174,65 @@ class AgotApp:
         self.steps += 1
         self._refresh_all()
         self._schedule_turn()
+
+    def _confirm_march_force(self, action: Action) -> bool:
+        """Warn before a battle that leaves part of the army behind."""
+        if action.kind is not ActionKind.MARCH or self.game is None:
+            return True
+        if not action.region or not action.target or action.units is None:
+            return True
+        origin = self.game.state.regions.get(action.region)
+        target = self.game.state.regions.get(action.target)
+        if origin is None or target is None:
+            return True
+        enemy = (
+            target.neutral_force > 0
+            or (
+                target.controller not in (None, self.human_house)
+                and (target.total(include_routed=False) > 0 or target.garrison > 0)
+            )
+        )
+        if not enemy:
+            return True
+        moving = sum(action.units)
+        static = self.game.map.regions.get(action.target)
+        if static is not None and (static.is_sea or static.is_port):
+            available = origin.units.get(UnitType.SHIP, 0)
+        else:
+            available = sum(
+                origin.units.get(unit, 0)
+                for unit in (UnitType.FOOTMAN, UnitType.KNIGHT, UnitType.SIEGE)
+            )
+        if moving >= available:
+            return True
+        return messagebox.askyesno(
+            "March attack",
+            (
+                f"You are attacking with {moving} of {available} units from "
+                f"{region_name(self.game, action.region)}. The battle starts "
+                "immediately; units left behind cannot join. Continue?"
+            ),
+            parent=self.root,
+        )
+
+    def _resolve_march_action(self, action: Action) -> Action | None:
+        if action.kind is not ActionKind.MARCH:
+            return action
+        key = (action.region, action.target, action.units)
+        variants = self.march_variants.get(key, [action])
+        by_establish = {bool(candidate.establish): candidate for candidate in variants}
+        if True in by_establish and False in by_establish:
+            origin = region_name(self.game, action.region)
+            use_power = messagebox.askyesno(
+                "March",
+                (
+                    f"Use 1 Power token to establish control of {origin} "
+                    "after this march?"
+                ),
+                parent=self.root,
+            )
+            return by_establish[use_power]
+        return variants[0]
 
     def _play_selected(self) -> None:
         if (
@@ -2500,12 +3247,19 @@ class AgotApp:
             self._set_turn_text("YOUR MOVE", "Select an action in the list first.")
             return
         index = int(selection[0])
-        if not 0 <= index < len(self.actions):
+        if not 0 <= index < len(self.display_actions):
             return
-        action = self.actions[index]
+        action = self.display_actions[index]
+        if self.order_mode == "march":
+            if not self._confirm_march_force(action):
+                return
+            action = self._resolve_march_action(action)
+            if action is None:
+                return
         actions = self.actions
+        chosen_index = actions.index(action)
         target = np.zeros(len(actions), dtype=np.float64)
-        target[index] = 1.0
+        target[chosen_index] = 1.0
         example_count = (
             self.match_log.example_count if self.match_log is not None else 0
         )
@@ -2516,7 +3270,7 @@ class AgotApp:
             source="human",
             action=action,
             legal_actions=actions,
-            chosen_index=index,
+            chosen_index=chosen_index,
             target=target,
         )
         self._append_log(f"You: {format_action(self.game, action)}", "human")
