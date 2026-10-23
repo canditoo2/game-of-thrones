@@ -392,6 +392,7 @@ class RustGame:
             max_rounds=config.max_rounds,
             victory_castles=config.victory_castles,
             use_westeros_decks=config.use_westeros_decks,
+            deferred_battles=config.deferred_battles,
         )
         return cls(inner, config)
 

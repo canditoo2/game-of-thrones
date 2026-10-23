@@ -226,7 +226,13 @@ impl Game {
         // legal-action list, so sort by region id, not by index.
         let map = &self.data.map;
         targets.sort_unstable_by_key(|target| map.id_of(*target));
+        let deferred_battle = self.deferred_battles && self.state.deferred_battle.is_some();
         for target in targets {
+            if deferred_battle && self.battle_target(house, target) {
+                // A March order can contain at most one battle; the first
+                // battle is resolved after the order's movement is finished.
+                continue;
+            }
             let terrain = self.data.map.region(target).terrain;
             if terrain == Terrain::Sea || terrain == Terrain::Port {
                 actions.extend(self.naval_march_actions(house, region, target, &profile));
@@ -402,6 +408,14 @@ impl Game {
             return false;
         }
         region.total(true) - moving == 0
+    }
+
+    fn battle_target(&self, house: HouseId, target: RegionId) -> bool {
+        let region = self.state.region(target);
+        region.neutral_force > 0
+            || (region.controller.is_some()
+                && region.controller != Some(house)
+                && (!region.is_empty() || region.garrison > 0))
     }
 
     fn march_targets(&self, house: HouseId, origin: RegionId) -> SmallVec<[RegionId; 16]> {
@@ -594,7 +608,7 @@ impl Game {
                     .into_iter()
                     .map(|(region, _)| region)
                     .collect();
-            self.state.pending_battle = Some(PendingBattle {
+            let battle = PendingBattle {
                 region: target_id,
                 attacker: house,
                 defender: None,
@@ -623,11 +637,21 @@ impl Game {
                 retreat_destination: None,
                 defender_order: None,
                 defender_order_house: None,
-            });
+            };
+            let target_text = self.data.map.id_of(target_id).to_string();
+            if self.deferred_battles {
+                self.state.deferred_battle = Some(battle);
+                self.state.pending_march = Some(PendingMarch { house, origin });
+                self.state.note(format!(
+                    "{house} marches into {target_text}; the Neutral Force battle is queued"
+                ));
+                self.settle_source_control(origin);
+                return Ok(());
+            }
+            self.state.pending_battle = Some(battle);
             self.consume_order(house, origin);
             self.state.pending_march = None;
             self.state.phase = Phase::Combat;
-            let target_text = self.data.map.id_of(target_id).to_string();
             self.state.note(format!(
                 "{house} marches into {target_text} and attacks the Neutral Force"
             ));
@@ -655,7 +679,7 @@ impl Game {
                     .into_iter()
                     .map(|(region, _)| region)
                     .collect();
-            self.state.pending_battle = Some(PendingBattle {
+            let battle = PendingBattle {
                 region: target_id,
                 attacker: house,
                 defender: Some(defender),
@@ -684,11 +708,21 @@ impl Game {
                 retreat_destination: None,
                 defender_order: None,
                 defender_order_house: None,
-            });
+            };
+            let target_text = self.data.map.id_of(target_id).to_string();
+            if self.deferred_battles {
+                self.state.deferred_battle = Some(battle);
+                self.state.pending_march = Some(PendingMarch { house, origin });
+                self.state.note(format!(
+                    "{house} marches into {target_text}; the battle is queued"
+                ));
+                self.settle_source_control(origin);
+                return Ok(());
+            }
+            self.state.pending_battle = Some(battle);
             self.consume_order(house, origin);
             self.state.pending_march = None;
             self.state.phase = Phase::Combat;
-            let target_text = self.data.map.id_of(target_id).to_string();
             self.state.note(format!(
                 "{house} marches into {target_text} and attacks {defender}"
             ));
@@ -739,6 +773,12 @@ impl Game {
         };
         self.consume_order(pending.house, pending.origin);
         self.state.pending_march = None;
+        if let Some(battle) = self.state.deferred_battle.take() {
+            // All destinations have been chosen: the queued battle now starts.
+            self.state.pending_battle = Some(battle);
+            self.state.phase = Phase::Combat;
+            self.state.active_house = None;
+        }
     }
 
     /// Units that leave a marching area.
@@ -896,6 +936,7 @@ impl Game {
     pub(crate) fn next_action_step(&mut self) {
         self.state.action_house_last = None;
         self.state.pending_march = None;
+        self.state.deferred_battle = None;
         match self.state.action_step {
             ActionStep::Raid => self.state.action_step = ActionStep::March,
             ActionStep::March => self.state.action_step = ActionStep::ConsolidatePower,
@@ -1622,5 +1663,73 @@ mod tests {
         assert_eq!(game.state.region(winterfell).order, Some(order));
         assert!(game.state.pending_march.is_some());
         assert_eq!(game.current_player(), Some(house));
+    }
+
+    #[test]
+    fn a_battle_waits_until_the_march_destinations_are_finished() {
+        let mut game = game(1);
+        let data = Arc::clone(&game.data);
+        let winterfell = data.map.lookup("winterfell").unwrap();
+        let white_harbor = data.map.lookup("white_harbor").unwrap();
+        let moat_cailin = data.map.lookup("moat_cailin").unwrap();
+        let house = HouseId(2);
+        let enemy = HouseId(0);
+        let order = crate::enums::OrderKey::from_name("march").unwrap();
+        game.deferred_battles = true;
+        game.state.phase = Phase::Action;
+        game.state.action_step = ActionStep::March;
+        game.state.active_house = Some(house);
+        {
+            let source = game.state.region_mut(winterfell);
+            source.controller = Some(house);
+            source.owner = Some(house);
+            source.units = [0; 4];
+            source.units[UnitType::Footman.index()] = 2;
+            source.order = Some(order);
+            source.order_house = Some(house);
+            let enemy_region = game.state.region_mut(white_harbor);
+            enemy_region.controller = Some(enemy);
+            enemy_region.owner = Some(enemy);
+            enemy_region.units = [0; 4];
+            enemy_region.units[UnitType::Footman.index()] = 1;
+            let empty = game.state.region_mut(moat_cailin);
+            empty.controller = None;
+            empty.owner = None;
+            empty.units = [0; 4];
+        }
+
+        let actions = game.march_actions(house, winterfell);
+        let attack = actions
+            .iter()
+            .find(|action| {
+                action.target == Some(white_harbor) && action.units == Some([1, 0, 0, 0])
+            })
+            .copied()
+            .expect("a one-footman attack is offered");
+        game.step(attack).unwrap();
+        assert_eq!(game.state.phase, Phase::Action);
+        assert!(game.state.deferred_battle.is_some());
+        assert!(game.state.pending_battle.is_none());
+
+        let follow_up = game
+            .legal_actions()
+            .into_iter()
+            .find(|action| {
+                action.kind == crate::ActionKind::March
+                    && action.target == Some(moat_cailin)
+                    && action.units == Some([1, 0, 0, 0])
+            })
+            .expect("the second destination is still offered");
+        game.step(follow_up).unwrap();
+
+        assert_eq!(game.state.phase, Phase::Combat);
+        assert!(game.state.deferred_battle.is_none());
+        assert_eq!(
+            game.state
+                .pending_battle
+                .as_ref()
+                .map(|battle| battle.region),
+            Some(white_harbor)
+        );
     }
 }

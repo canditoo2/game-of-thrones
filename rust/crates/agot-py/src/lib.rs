@@ -300,9 +300,10 @@ impl PyGame {
 #[pymethods]
 impl PyGame {
     /// `Game.new(houses=None, seed=0, max_rounds=10, victory_castles=7,
-    /// use_westeros_decks=True, data_dir=None)`.
+    /// use_westeros_decks=True, deferred_battles=False, data_dir=None)`.
     #[classmethod]
-    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, data_dir=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, deferred_battles=false, data_dir=None))]
     fn new(
         _cls: &Bound<'_, PyType>,
         houses: Option<Vec<String>>,
@@ -310,6 +311,7 @@ impl PyGame {
         max_rounds: u8,
         victory_castles: u8,
         use_westeros_decks: bool,
+        deferred_battles: bool,
         data_dir: Option<String>,
     ) -> PyResult<PyGame> {
         let data = match data_dir {
@@ -337,7 +339,8 @@ impl PyGame {
             seed,
             use_westeros_decks,
         };
-        let game = CoreGame::new(data, config).map_err(engine_error)?;
+        let mut game = CoreGame::new(data, config).map_err(engine_error)?;
+        game.deferred_battles = deferred_battles;
         Ok(PyGame { game })
     }
 

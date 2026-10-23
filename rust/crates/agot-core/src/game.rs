@@ -64,6 +64,10 @@ pub struct Game {
     pub data: Arc<DataSet>,
     pub state: State,
     pub config: GameConfig,
+    /// Desktop-play rule option: queue the one battle of a March order until
+    /// all of its destinations have been chosen. Self-play keeps the original
+    /// immediate-battle behaviour so the frozen reference fixtures remain valid.
+    pub deferred_battles: bool,
     pub rng: Rng,
 }
 
@@ -82,6 +86,7 @@ impl Clone for Game {
             data: Arc::clone(&self.data),
             state: self.state.clone(),
             config: self.config.clone(),
+            deferred_battles: self.deferred_battles,
             rng: source.fork(),
         }
     }
@@ -108,6 +113,7 @@ impl Game {
             data,
             state,
             config,
+            deferred_battles: false,
             rng,
         };
         game.advance()?;
@@ -561,6 +567,7 @@ impl Game {
         self.state.raven_used = false;
         self.state.action_house_last = None;
         self.state.pending_march = None;
+        self.state.deferred_battle = None;
         self.state.return_phase = None;
 
         for region in self

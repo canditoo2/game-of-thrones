@@ -260,13 +260,12 @@ These are real deviations from the physical game. They are tracked in
 * **Neutral forces** (King's Landing 5, The Eyrie 6) defend with their printed
   strength; ties go to the attacker and they never use a House card or the
   Valyrian Steel Blade.
-* **Multi-destination marches are partial.** Under one March Order the engine
-  can wait after a non-battle move and offer further moves or a finish action;
-  a move into an enemy area starts the battle immediately, so a battle cannot
-  be followed by more moves under that order. The real game allows one battle
-  plus movement to other destinations. The desktop picker puts the largest
-  stack first and warns before attacking with less than the full eligible
-  force.
+* **Multi-destination marches.** Desktop play enables deferred battles: under
+  one March Order you choose all destinations first, then the one battle is
+  resolved when the order is finished. The default training/evaluation engine
+  keeps the legacy immediate-battle path so the frozen differential fixtures
+  remain valid. The desktop picker puts the largest stack first and warns
+  before attacking with less than the full eligible force.
 
 The board data is also partly unverified; see [`PROVENANCE.md`](PROVENANCE.md)
 for exactly which values are trusted and which need checking against the

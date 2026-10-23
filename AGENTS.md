@@ -23,8 +23,10 @@ strongest.
   --house stark` opens the local Tkinter desktop game: the setup screen chooses the human
   house, opponent and checkpoint, then the full board and action list are shown. When
   `Rulebook/board.jpg` is present (Pillow installed), the game uses the local scan as the
-  board; otherwise it falls back to the schematic region board. AI seats
-  default to 64 simulations over 2 determinizations (2 keeps face-down orders and bids
+  board; otherwise it falls back to the schematic region board. Desktop play enables
+  `deferred_battles`, so all March destinations are chosen before the one battle starts;
+  training/evaluation keep the legacy immediate-battle default for the frozen fixtures.
+  AI seats default to 64 simulations over 2 determinizations (2 keeps face-down orders and bids
   hidden), and `--opponents greedy` is the fast fallback. Gauntlet = single-seat win rate vs
   a field; any policy argument accepts `net:<checkpoint>` (MCTS over that saved network), and
   `round-robin` builds a league table across checkpoints.

@@ -184,13 +184,13 @@ they should be fixed before expecting a strong agent.
     Storms* actually forbid placing the restricted order type.
 11. **Recycling and deck exhaustion.** The physical decks are finite across ten
     rounds; reshuffling behaviour should be verified.
-12. **Multi-destination marches.** *(partial)* Under one March Order the engine
-    waits after a non-battle move and offers further moves or a finish action,
-    including the pending-march action set. A move into an enemy area consumes
-    the order and starts the battle immediately, so a battle cannot be followed
-    by further moves under that order. The physical game allows one battle plus
-    movement to other destinations. Ports, port capture and ship mustering are
-    done.
+12. **Multi-destination marches.** *(done for desktop play)* `GameConfig` has a
+    `deferred_battles` option: under one March Order the engine queues the one
+    battle, allows further non-battle destinations or a finish action, then
+    resolves the battle after the order is consumed. The desktop GUI enables
+    it; training and the frozen parity fixtures keep the legacy immediate-battle
+    default until a new reference is recorded. Ports, port capture and ship
+    mustering are done.
 
 ## Priority 3 — learning quality
 

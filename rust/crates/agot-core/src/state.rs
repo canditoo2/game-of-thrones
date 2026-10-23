@@ -494,6 +494,10 @@ pub struct State {
     /// Pending bids for the current bidding round, keyed by house.
     pub pending_bids: SmallVec<[(HouseId, u8); N_HOUSES]>,
     pub pending_battle: Option<PendingBattle>,
+    /// A battle encountered during a multi-destination March. It is promoted
+    /// to `pending_battle` only after the March order is finished, so all
+    /// movement is chosen before combat begins.
+    pub deferred_battle: Option<PendingBattle>,
     pub pending_march: Option<PendingMarch>,
     /// Which influence tracks have still to be bid on, in resolution order.
     pub bid_tracks: SmallVec<[Track; 3]>,
@@ -536,6 +540,7 @@ impl State {
             pending_planning: SmallVec::new(),
             pending_bids: SmallVec::new(),
             pending_battle: None,
+            deferred_battle: None,
             pending_march: None,
             bid_tracks: SmallVec::new(),
             fortifications: SmallVec::new(),

@@ -309,7 +309,7 @@ pub fn state_fingerprint(state: &State, data: &DataSet) -> Value {
     );
     root.insert(
         "pending_battle_present".into(),
-        json!(state.pending_battle.is_some()),
+        json!(state.pending_battle.is_some() || state.deferred_battle.is_some()),
     );
     root.insert(
         "wildling_attack_present".into(),

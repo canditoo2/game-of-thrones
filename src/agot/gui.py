@@ -1207,7 +1207,11 @@ class AgotApp:
             self.setup.set_status("Preparing the table...")
         self.root.update_idletasks()
         try:
-            config = GameConfig(seed=settings.seed, max_rounds=settings.max_rounds)
+            config = GameConfig(
+                seed=settings.seed,
+                max_rounds=settings.max_rounds,
+                deferred_battles=True,
+            )
             policies = make_policies(
                 config,
                 settings.house,
@@ -3209,8 +3213,9 @@ class AgotApp:
             "March attack",
             (
                 f"You are attacking with {moving} of {available} units from "
-                f"{region_name(self.game, action.region)}. The battle starts "
-                "immediately; units left behind cannot join. Continue?"
+                f"{region_name(self.game, action.region)}. The battle will be "
+                "resolved after you finish this March order; units left behind "
+                "cannot join. Continue?"
             ),
             parent=self.root,
         )
