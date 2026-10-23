@@ -178,6 +178,7 @@ pub fn selfplay<'py>(
     let max_rounds: u8 = spec_or(spec, "max_rounds", 10)?;
     let victory_castles: u8 = spec_or(spec, "victory_castles", 7)?;
     let use_westeros_decks: bool = spec_or(spec, "use_westeros_decks", true)?;
+    let doran_choice: bool = spec_or(spec, "doran_choice", false)?;
     let houses: Option<Vec<String>> = spec_value(spec, "houses")?;
     let data_dir: Option<String> = spec_value(spec, "data_dir")?;
     let step_limit: u32 = spec_or(spec, "step_limit", 20_000)?;
@@ -247,8 +248,10 @@ pub fn selfplay<'py>(
         let mut states: Vec<Game> = configs
             .iter()
             .map(|config| {
-                Game::new(Arc::clone(&data), config.clone())
-                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+                let mut game = Game::new(Arc::clone(&data), config.clone())
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                game.doran_choice = doran_choice;
+                Ok(game)
             })
             .collect::<PyResult<Vec<Game>>>()?;
 

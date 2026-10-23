@@ -29,7 +29,7 @@ open, and the deterministic defaults used for multi-choice effects — see
 | Which Westeros cards carry a Wildling icon | **High** | Confirmed against the same file and the physical component list |
 | Holders'-choice Westeros cards (A Throne of Blades, Dark Wings Dark Words, Put to the Sword) | **High** | Text confirmed against `Rulebook/Westeros_card.txt`; modelled as holder decisions |
 | The 42 House card names and printed stats | **High** | Transcribed from the user-supplied `Rulebook/151060549-House-Cards-Reference-Sheet.txt` and cross-checked against community data sets |
-| House card ability texts | **High** | Transcribed from the same reference sheet; player sub-choices use a documented deterministic default |
+| House card ability texts | **High** | Transcribed from the same reference sheet; Doran's track is a learned action, other player sub-choices use a documented deterministic default |
 | House Martell's House cards | **High** | Included in the reference sheet; the earlier file was missing Darkstar and had wrong strengths |
 | House Martell's starting units | **High** | Confirmed by the user against the physical board (Sunspear 1 Footman + 1 Knight, Salt Shore 1 Footman, 1 Ship in the Sea of Dorne) |
 | Six-player influence track order | **High** | Corrected by the user against the physical board |

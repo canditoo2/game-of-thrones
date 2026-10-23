@@ -18,7 +18,7 @@ import numpy as np
 
 from agot.agents.base import Policy, one_hot_target
 from agot.engine.actions import Action, ActionKind
-from agot.engine.enums import ORDERS_BY_KEY, OrderType, Phase, UnitType
+from agot.engine.enums import ORDERS_BY_KEY, OrderType, Phase, Track, UnitType
 from agot.engine.game import Game
 
 _UNIT_VALUE = {
@@ -293,6 +293,29 @@ class GreedyPolicy(Policy):
 
     def _score_westeros_choice(self, game: Game, action: Action) -> float:
         """Prefer the holder's most useful option; 'none' is the fallback."""
+        battle = game.state.pending_battle
+        if battle is not None and battle.get("stage") == "Doran":
+            index = action.amount if action.amount is not None else 0
+            tracks = (Track.IRON_THRONE, Track.FIEFDOMS, Track.KINGS_COURT)
+            if not 0 <= index < len(tracks):
+                return 0.0
+            track = tracks[index]
+            owner = action.house
+            opponent = (
+                battle.get("defender")
+                if owner == battle.get("attacker")
+                else battle.get("attacker")
+            )
+            if not opponent:
+                return 0.0
+            score = max(0.0, 7.0 - game.state.track_position(opponent, track)) * 0.5
+            if track is Track.FIEFDOMS:
+                fiefdoms = game.state.tracks.get(Track.FIEFDOMS, [])
+                if fiefdoms and fiefdoms[0] == opponent:
+                    score += 3.0
+            if track is Track.KINGS_COURT:
+                score += 0.25
+            return score
         card = action.card or "none"
         if card == "none":
             return 0.0

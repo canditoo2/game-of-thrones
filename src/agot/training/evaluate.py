@@ -96,6 +96,7 @@ def evaluate_match(
             victory_castles=base.victory_castles,
             seed=seed + game_index,
             use_westeros_decks=base.use_westeros_decks,
+            doran_choice=base.doran_choice,
         )
         policies = seat_policies(
             factory_a, factory_b, houses, seed=seed + game_index * 7, swap=swap
@@ -179,6 +180,7 @@ def _game_config(
         victory_castles=base.victory_castles,
         seed=seed,
         use_westeros_decks=base.use_westeros_decks,
+        doran_choice=base.doran_choice,
     )
 
 
@@ -238,6 +240,7 @@ def _play_model_games(
         "max_rounds": config.max_rounds,
         "victory_castles": config.victory_castles,
         "use_westeros_decks": config.use_westeros_decks,
+        "doran_choice": config.doran_choice,
         "houses": list(houses),
         "step_limit": step_limit,
         "scripted": [list(policies) for policies in scripted],
@@ -530,6 +533,7 @@ def evaluate_net_vs_field(
         "max_rounds": base.max_rounds,
         "victory_castles": base.victory_castles,
         "use_westeros_decks": base.use_westeros_decks,
+        "doran_choice": base.doran_choice,
         "houses": list(houses),
         "step_limit": step_limit,
         "scripted": scripted,

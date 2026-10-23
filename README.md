@@ -191,7 +191,9 @@ picker: choose the order type (March, Defend, Support, Raid, Consolidate), then
 the specific strength/starred token, then the destination region. March moves
 list the largest unit stack first, and attack with fewer than all eligible
 units asks for confirmation. **Undo** returns to before your last decision;
-**New game** goes back to the house/settings screen. A battle panel shows the
+**New game** goes back to the house/settings screen. Python training and
+evaluation treat Doran Martell's track as three legal actions, so the policy
+learns which track to move. A battle panel shows the
 attacker, defender, origin, unit counts, unit, order, support and garrison
 strengths, the **pre-card total for both sides** (so support is known before a
 House card is chosen) and revealed House cards. The log records battle stages,

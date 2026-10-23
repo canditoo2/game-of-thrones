@@ -1948,7 +1948,12 @@ fn doran_moves_influence_before_blade_and_carries_the_used_face() {
         game.state.track_order(Track::Fiefdoms)[0],
         house("baratheon")
     );
-    game.choose_doran_track(Track::Fiefdoms).unwrap();
+    let choices = game.legal_actions();
+    assert_eq!(choices.len(), 3);
+    assert!(choices.iter().all(|choice| {
+        choice.kind == ActionKind::WesterosChoice && choice.amount.is_some_and(|track| track < 3)
+    }));
+    game.step(choices[1]).unwrap();
     assert_eq!(
         game.state.pending_battle.as_ref().unwrap().stage,
         BattleStage::Blade

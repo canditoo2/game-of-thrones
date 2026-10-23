@@ -109,7 +109,7 @@ phase pauses for them; see `docs/roadmap.md`). The chosen defaults are:
 | Aeron Damphair | Pays 2 Power and swaps in the strongest card when it is worth more than Aeron (0). |
 | Mace Tyrell | Destroys one opposing participating Footman. |
 | Queen of Thorns | Removes the first opposing Order in a neighbouring area (id order), never the attacker's origin March. |
-| Doran Martell | Desktop play asks the card's owner which Influence track to use; training uses the track on which the opponent ranks highest. Doran resolves before the Valyrian Steel Blade step, so a new holder may use an unused blade. |
+| Doran Martell | Three legal track choices. Desktop play prompts the card's owner; Python training/evaluation expose the same three actions (encoded in the action amount field) so the policy learns the choice. Doran resolves before the Valyrian Steel Blade step, so a new holder may use an unused blade. |
 | Patchface | Discards the opponent's strongest card in hand. |
 
 All other card abilities are fully determined (no sub-choice).

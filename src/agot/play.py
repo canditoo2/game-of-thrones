@@ -224,6 +224,19 @@ def format_action(game: Game, action: Action) -> str:
     if kind is ActionKind.BID:
         return f"Bid {action.amount if action.amount is not None else '?'} Power"
     if kind is ActionKind.WESTEROS_CHOICE:
+        battle = game.state.pending_battle
+        if (
+            game.state.phase is Phase.COMBAT
+            and battle is not None
+            and battle.get("stage") == "Doran"
+        ):
+            tracks = (Track.IRON_THRONE, Track.FIEFDOMS, Track.KINGS_COURT)
+            index = action.amount if action.amount is not None else 0
+            track = tracks[index] if 0 <= index < len(tracks) else tracks[0]
+            return (
+                "Doran Martell: move the opponent to the bottom of "
+                f"{_TRACK_NAMES[track]}"
+            )
         if action.card and action.card != "none":
             return f"Resolve Westeros card {_pretty(action.card)}"
         return "Choose no Westeros effect"

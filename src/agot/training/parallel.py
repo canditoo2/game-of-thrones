@@ -241,6 +241,7 @@ def parallel_self_play(
             victory_castles=base.victory_castles,
             seed=plan.seed + index,
             use_westeros_decks=base.use_westeros_decks,
+            doran_choice=base.doran_choice,
         )
         for index in range(plan.games)
     ]

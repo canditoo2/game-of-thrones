@@ -91,6 +91,7 @@ def spec_for(plan: SelfPlayPlan, base_config: GameConfig | None = None) -> dict:
         "max_rounds": plan.max_rounds,
         "victory_castles": base.victory_castles,
         "use_westeros_decks": base.use_westeros_decks,
+        "doran_choice": base.doran_choice,
         "houses": list(base.houses),
     }
 
@@ -208,6 +209,7 @@ def try_batched_self_play(
         first.max_rounds,
         first.victory_castles,
         first.use_westeros_decks,
+        first.doran_choice,
         tuple(first.houses),
     )
     for config in configs:
@@ -215,6 +217,7 @@ def try_batched_self_play(
             config.max_rounds,
             config.victory_castles,
             config.use_westeros_decks,
+            config.doran_choice,
             tuple(config.houses),
         ) != shared:
             return None
@@ -240,6 +243,7 @@ def try_batched_self_play(
         "max_rounds": first.max_rounds,
         "victory_castles": first.victory_castles,
         "use_westeros_decks": first.use_westeros_decks,
+        "doran_choice": first.doran_choice,
         "houses": list(first.houses),
         "step_limit": step_limit,
         "scripted": scripted,

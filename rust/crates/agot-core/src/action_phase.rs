@@ -1142,9 +1142,9 @@ impl Game {
                     .map(|card| Action::play_house_card(house, Some(card)))
                     .collect()
             }
-            // Doran Martell is a desktop prompt, not an encoded action, so the
-            // action list stays empty while the GUI asks for the track.
-            BattleStage::Doran => Vec::new(),
+            BattleStage::Doran => (0..3u8)
+                .map(|track| Action::doran_choice(house, track))
+                .collect(),
             BattleStage::Blade => vec![Action::use_blade(house), Action::pass(house)],
             BattleStage::Casualties => {
                 let Some(result) = battle.result.as_ref() else {

@@ -363,6 +363,19 @@ impl Action {
         }
     }
 
+    /// Doran Martell's Influence-track choice, encoded in `amount`.
+    ///
+    /// The action kind is reused so the frozen action-feature layout does not
+    /// change; the amount block distinguishes the three tracks.
+    pub fn doran_choice(house: HouseId, track: u8) -> Action {
+        Action {
+            kind: ActionKind::WesterosChoice,
+            house: Some(house),
+            amount: Some(track),
+            ..Action::new(ActionKind::WesterosChoice)
+        }
+    }
+
     /// The same action, with a region attached.
     ///
     /// Python's `Action.pass_(house, region=...)` names the area whose order is

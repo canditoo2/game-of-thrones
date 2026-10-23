@@ -3289,37 +3289,37 @@ class AgotApp:
             and battle is not None
             and str(battle.get("stage", "")) == "Doran"
         ):
-            self.busy = True
-            self._clear_actions()
             owner = battle.get("doran_owner")
-            attacker = battle.get("attacker")
-            defender = battle.get("defender")
-            opponent = defender if owner == attacker else attacker
             if owner == self.human_house:
+                self.busy = True
+                self._clear_actions()
+                attacker = battle.get("attacker")
+                defender = battle.get("defender")
+                opponent = defender if owner == attacker else attacker
                 self._set_turn_text(
                     "DORAN MARTELL",
                     "Choose which Influence track Doran moves your opponent to.",
                 )
                 track = self._ask_doran_track()
-            else:
-                track = self._default_doran_track(opponent)
-            if track is None:
+                if track is None:
+                    return
+                try:
+                    self.game.choose_doran_track(track)
+                except Exception as error:  # keep the window alive
+                    self._fail(f"There was no legal Doran track choice: {error}")
+                    return
+                self.steps += 1
+                self._append_log(
+                    f"Doran Martell: {house_name(owner)} moves "
+                    f"{house_name(opponent)} to the bottom of "
+                    f"{TRACK_LABELS[Track(track)]}.",
+                    "battle",
+                )
+                self._refresh_all()
+                self._schedule_turn()
                 return
-            try:
-                self.game.choose_doran_track(track)
-            except Exception as error:  # keep the window alive
-                self._fail(f"There was no legal Doran track choice: {error}")
-                return
-            self.steps += 1
-            self._append_log(
-                f"Doran Martell: {house_name(owner)} moves "
-                f"{house_name(opponent)} to the bottom of "
-                f"{TRACK_LABELS[Track(track)]}.",
-                "battle",
-            )
-            self._refresh_all()
-            self._schedule_turn()
-            return
+            # An AI owner goes through its policy below, with the three
+            # Doran actions the engine now offers.
 
         if state.phase is Phase.WESTEROS and state.westeros_waiting:
             self.busy = True
@@ -3353,15 +3353,6 @@ class AgotApp:
         self.ai_after = self.root.after(
             25, lambda: self._ai_step(generation)
         )
-
-    def _default_doran_track(self, opponent: str | None) -> str:
-        if self.game is None or not opponent:
-            return Track.FIEFDOMS.value
-        return min(
-            TRACK_ORDER,
-            key=lambda track: self.game.state.track_position(opponent, track)
-            or 99,
-        ).value
 
     def _ask_doran_track(self) -> str | None:
         """Small modal choice for Doran Martell's Influence track."""
