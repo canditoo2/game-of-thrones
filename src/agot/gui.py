@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import tkinter as tk
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
@@ -32,7 +33,7 @@ from agot.engine.enums import (
     UnitType,
 )
 from agot.engine.game import DEFAULT_HOUSES, Game, GameConfig
-from agot.engine.map import load_house_cards
+from agot.engine.map import load_house_cards, load_json
 from agot.match_log import MatchLog
 from agot.play import (
     ai_action_summary,
@@ -430,6 +431,75 @@ def house_card_info(house: str, card_id: str | None) -> dict | None:
         if card["id"] == card_id:
             return card
     return None
+
+
+@lru_cache(maxsize=1)
+def westeros_cards() -> dict[str, dict]:
+    """The bundled Westeros card definitions, loaded once for the log."""
+    return load_json("westeros.json")["cards"]
+
+
+def westeros_card_name(card_id: str) -> str:
+    card = westeros_cards().get(card_id)
+    if card is None:
+        return card_id.replace("_", " ").title()
+    return str(card.get("name") or card_id.replace("_", " ").title())
+
+
+def westeros_card_effect(card_id: str) -> str:
+    """A compact table-text version of a card's effect for the public log."""
+    card = westeros_cards().get(card_id)
+    if card is None:
+        return ""
+    effect = str(card.get("effect", "none"))
+    if effect == "gain_power_per_crown":
+        return (
+            "each House gains 1 Power per Crown icon it controls, plus "
+            "1 per controlled Port with a friendly Ship and no enemy "
+            "Ships in its connected sea"
+        )
+    if effect == "bid_all_tracks":
+        return (
+            "each House bids Power to re-rank the Iron Throne, Fiefdoms "
+            "and King's Court tracks"
+        )
+    if effect == "mustering":
+        return "all Houses may muster units in their castles and strongholds"
+    if effect == "supply":
+        return "all Houses adjust their Supply to the barrels they control"
+    if effect == "wildlings_attack":
+        return "all Houses bid Power to repel a Wildling attack"
+    if effect == "winter_is_coming":
+        return "this deck is reshuffled and a replacement card is drawn"
+    if effect == "influence_decision":
+        holder = {
+            "iron_throne": "Iron Throne",
+            "raven": "Messenger Raven",
+            "blade": "Valyrian Steel Blade",
+        }.get(str(card.get("holder")), "named token")
+        options = ", ".join(
+            westeros_card_name(str(option))
+            for option in card.get("options", [])
+        )
+        return f"the {holder} holder chooses: {options}"
+    if effect == "order_restriction":
+        order = str(card.get("restricted_order", "")).replace("_", " ")
+        return f"{order.title()} orders cannot be played this round"
+    return "no mechanical effect"
+
+
+def _queue_difference(
+    previous: tuple[str, ...] | None,
+    current: tuple[str, ...],
+) -> list[str]:
+    """Cards removed from the front of the pending-Westeros queue."""
+    if previous is None:
+        return []
+    remaining = list(previous)
+    for card in current:
+        if card in remaining:
+            remaining.remove(card)
+    return remaining
 
 
 def house_card_line(house: str, card_id: str | None) -> str | None:
@@ -1049,6 +1119,8 @@ class AgotApp:
         self.battle_casualties_last: int | None = None
         self.last_battle: dict | None = None
         self.westeros_drawn_seen: dict[str, tuple[int, str | None]] = {}
+        self.westeros_pending_seen: tuple[str, ...] | None = None
+        self.power_seen: dict[str, int] = {}
         self.busy = False
         self.finished = False
         self.generation = 0
@@ -1194,6 +1266,8 @@ class AgotApp:
         self.battle_casualties_last = None
         self.last_battle = None
         self.westeros_drawn_seen = {}
+        self.westeros_pending_seen = None
+        self.power_seen = {}
         self.undo_stack = []
         self.selected_region = None
         self.finished = False
@@ -1246,6 +1320,11 @@ class AgotApp:
         self.battle_casualties_last = None
         self.last_battle = None
         self.westeros_drawn_seen = {}
+        self.westeros_pending_seen = None
+        self.power_seen = {
+            house_id: house.power
+            for house_id, house in self.game.state.houses.items()
+        }
         self.finished = False
         self.busy = False
         self.selected_region = self._human_home()
@@ -1815,7 +1894,14 @@ class AgotApp:
         if self.game is None:
             return
         snapshot = self.game.snapshot()
+        pending = tuple(
+            str(card) for card in (snapshot.get("pending_westeros") or ())
+        )
+        resolved = _queue_difference(self.westeros_pending_seen, pending)
+        self.westeros_pending_seen = pending or None
+
         decks = snapshot.get("westeros_decks", {})
+        drew_cards: list[str] = []
         for deck in ("deck_i", "deck_ii", "deck_iii"):
             data = decks.get(deck)
             if not data:
@@ -1827,15 +1913,67 @@ class AgotApp:
             self.westeros_drawn_seen[deck] = signature
             if not drawn:
                 continue
-            card = str(drawn).replace("_", " ").title()
+            card_id = str(drawn)
+            drew_cards.append(card_id)
+            card = westeros_card_name(card_id)
+            effect = westeros_card_effect(card_id)
+            detail = f" - {effect}" if effect else ""
             deck_name = deck.replace("_", " ").title()
             if self.game.state.phase is Phase.RAVEN:
                 self._append_log(
-                    f"Messenger Raven drew {deck_name}: {card}.",
+                    f"Messenger Raven drew {deck_name}: {card}{detail}.",
                     "system",
                 )
             else:
-                self._append_log(f"{deck_name} drew: {card}.", "system")
+                self._append_log(
+                    f"{deck_name} drew: {card}{detail}.",
+                    "system",
+                )
+
+        for card_id in resolved:
+            card = westeros_card_name(card_id)
+            effect = westeros_card_effect(card_id)
+            detail = f" - {effect}" if effect else ""
+            self._append_log(
+                f"Westeros resolved: {card}{detail}.",
+                "system",
+            )
+
+        current_power = {
+            house_id: house.power
+            for house_id, house in self.game.state.houses.items()
+        }
+        if self.power_seen and current_power:
+            deltas = {
+                house_id: current_power[house_id]
+                - self.power_seen.get(house_id, current_power[house_id])
+                for house_id in current_power
+            }
+            active = any(delta != 0 for delta in deltas.values())
+            westeros_phase = self.game.state.phase in {
+                Phase.WESTEROS,
+                Phase.WESTEROS_CHOICE,
+                Phase.BIDDING,
+                Phase.WILDLING_ATTACK,
+                Phase.MUSTERING,
+            }
+            if active and (resolved or westeros_phase or drew_cards):
+                changes = ", ".join(
+                    f"{house_name(house_id)} {delta:+d}"
+                    for house_id, delta in deltas.items()
+                    if delta
+                )
+                self._append_log(f"Power changes: {changes}.", "system")
+            elif not active and (
+                "game_of_thrones" in resolved
+                or (not pending and "game_of_thrones" in drew_cards)
+            ):
+                self._append_log(
+                    "Game of Thrones: no Power gained (no Crown icons or "
+                    "qualifying Ports).",
+                    "system",
+                )
+        self.power_seen = current_power
 
     def _battle_card_label(self, house: str | None, card: str | None) -> str:
         if not house or not card:

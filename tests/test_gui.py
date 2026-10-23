@@ -7,7 +7,7 @@ import pytest
 tk = pytest.importorskip("tkinter")
 
 from agot.engine.actions import Action  # noqa: E402
-from agot.engine.enums import OrderType, UnitType  # noqa: E402
+from agot.engine.enums import OrderType, Phase, UnitType  # noqa: E402
 from agot.engine.map import load_map  # noqa: E402
 from agot.gui import (  # noqa: E402
     AREAS,
@@ -15,10 +15,13 @@ from agot.gui import (  # noqa: E402
     BOARD_CROP,
     AgotApp,
     GameSettings,
+    _queue_difference,
     house_card_line,
     order_badge,
     supply_limit_text,
     unit_badge,
+    westeros_card_effect,
+    westeros_card_name,
 )
 
 
@@ -68,6 +71,62 @@ def test_house_card_line_reports_strength_and_effect() -> None:
     assert eddard is not None and "Strength 4" in eddard
     assert eddard is not None and "2 sword(s)" in eddard
     assert catelyn is not None and "Defence Order" in catelyn
+
+
+def test_game_of_thrones_effect_text_explains_power_and_ports() -> None:
+    assert westeros_card_name("game_of_thrones") == "Game of Thrones"
+    effect = westeros_card_effect("game_of_thrones")
+    assert "Crown" in effect
+    assert "Port" in effect
+    assert "Power" in effect
+
+
+def test_westeros_queue_difference_reports_resolved_cards() -> None:
+    assert _queue_difference(
+        ("game_of_thrones", "dark_wings_dark_words"),
+        ("dark_wings_dark_words",),
+    ) == ["game_of_thrones"]
+    assert _queue_difference(
+        ("game_of_thrones", "dark_wings_dark_words"),
+        (),
+    ) == ["game_of_thrones", "dark_wings_dark_words"]
+    assert _queue_difference(None, ("clash_of_kings",)) == []
+
+
+def test_westeros_log_reports_game_of_thrones_power_gain() -> None:
+    class House:
+        def __init__(self, power: int) -> None:
+            self.power = power
+
+    class State:
+        phase = Phase.WESTEROS
+        houses = {"stark": House(4), "lannister": House(2)}
+
+    class Game:
+        state = State()
+
+        def snapshot(self) -> dict:
+            return {
+                "pending_westeros": ["dark_wings_dark_words"],
+                "westeros_decks": {},
+            }
+
+    app = AgotApp.__new__(AgotApp)
+    app.game = Game()
+    app.westeros_drawn_seen = {}
+    app.westeros_pending_seen = (
+        "game_of_thrones",
+        "dark_wings_dark_words",
+    )
+    app.power_seen = {"stark": 1, "lannister": 2}
+    messages: list[str] = []
+    app._append_log = lambda message, tag="system": messages.append(message)
+
+    app._log_westeros_draw()
+
+    text = "\n".join(messages)
+    assert "Westeros resolved: Game of Thrones" in text
+    assert "Power changes: Stark +3" in text
 
 
 def test_supply_text_lists_every_level() -> None:

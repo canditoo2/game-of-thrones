@@ -1455,6 +1455,33 @@ mod tests {
     }
 
     #[test]
+    fn game_of_thrones_grants_power_per_crown_and_controlled_port() {
+        let mut game = game(1);
+        let house = HouseId(2);
+        let card = game
+            .data
+            .westeros
+            .card_index("game_of_thrones")
+            .expect("the card exists");
+        let expected: u16 = game
+            .state
+            .controlled_regions(house)
+            .iter()
+            .map(|region| game.data.map.region(*region).power as u16)
+            .sum::<u16>()
+            + game.port_power_bonus(house) as u16;
+        game.state.house_mut(house).unwrap().power = 0;
+        game.state.pending_westeros = Some(SmallVec::from_slice(&[card]));
+        game.state.phase = Phase::Westeros;
+
+        game.drain_westeros().unwrap();
+
+        assert!(expected > 0, "the setup house controls a crown icon");
+        assert_eq!(game.state.house(house).unwrap().power, expected as u8);
+        assert!(game.state.pending_westeros.is_none());
+    }
+
+    #[test]
     fn cleanup_recovers_routed_units_and_returns_orders() {
         let mut game = game(1);
         let house = game.current_player().unwrap();
