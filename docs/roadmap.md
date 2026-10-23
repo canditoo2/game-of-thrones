@@ -192,6 +192,13 @@ they should be fixed before expecting a strong agent.
     default until a new reference is recorded. Ports, port capture and ship
     mustering are done.
 
+13. **Sequential Westeros reveal.** *(done for desktop play)* `GameConfig` has a
+    `sequential_westeros` option: in rounds 2-10 the desktop GUI reveals Deck I,
+    resolves it, then Deck II, resolves it, then Deck III, resolving it, with a
+    short pause between steps. The pre-card Combat Strength shown to both sides
+    includes units, Order, declared Support and defending garrison. Training and
+    the frozen parity fixtures keep the simultaneous draw/resolution default.
+
 ## Priority 3 — learning quality
 
 13. **Training must produce a non-trivial policy.** The pipeline runs, but the

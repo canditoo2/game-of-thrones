@@ -93,6 +93,52 @@ def test_westeros_queue_difference_reports_resolved_cards() -> None:
     assert _queue_difference(None, ("clash_of_kings",)) == []
 
 
+def test_battle_summary_shows_support_and_pre_card_totals() -> None:
+    class MapGame:
+        map = load_map()
+
+    app = AgotApp.__new__(AgotApp)
+    app.game = MapGame()
+    battle = {
+        "region": "winterfell",
+        "origin": "white_harbor",
+        "attacker": "stark",
+        "defender": "lannister",
+        "stage": "Cards",
+        "attacker_units": {
+            "footman": 2,
+            "knight": 0,
+            "ship": 0,
+            "siege": 0,
+        },
+        "defender_units": {
+            "footman": 1,
+            "knight": 1,
+            "ship": 0,
+            "siege": 0,
+        },
+        "attacker_units_strength": 2,
+        "defender_units_strength": 3,
+        "attacker_order_strength": 1,
+        "defender_order_strength": 1,
+        "attacker_support": 2,
+        "defender_support": 1,
+        "defender_garrison": 0,
+        "neutral_force": 0,
+        "attacker_total": 5,
+        "defender_total": 5,
+    }
+
+    text = "\n".join(
+        app._battle_summary_lines(battle, reveal_cards=False)
+    )
+
+    assert "support +2" in text
+    assert "support +1" in text
+    assert "total 5" in text
+    assert "Before House cards: Stark 5 vs Lannister 5." in text
+
+
 def test_westeros_log_reports_game_of_thrones_power_gain() -> None:
     class House:
         def __init__(self, power: int) -> None:
@@ -184,8 +230,12 @@ def test_battle_summary_includes_troops_and_revealed_cards() -> None:
     lines = app._battle_summary_lines(battle, reveal_cards=True)
     text = "\n".join(lines)
 
-    assert "Attacker: F2 K1 (unit strength 4)" in text
-    assert "Defender: F1 K1 (unit strength 3)" in text
+    assert "Attacker: F2 K1 (unit 4, order +1, support +0, total 5)" in text
+    assert (
+        "Defender: F1 K1 (unit 3, order +2, support +0, garrison +0, total 5)"
+        in text
+    )
+    assert "Before House cards: Lannister 5 vs Stark 5." in text
     assert "Tywin Lannister" in text
     assert "Eddard Stark" in text
 

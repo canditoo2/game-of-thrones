@@ -481,6 +481,10 @@ pub struct State {
     pub westeros_decks: [DeckState; 3],
     /// Westeros card effects still to resolve this round.
     pub pending_westeros: Option<SmallVec<[u16; 3]>>,
+    /// Desktop-play sequencing: the next deck to draw (0..3), and whether
+    /// the table is paused between drawing and resolving one card.
+    pub westeros_next_deck: u8,
+    pub westeros_waiting: bool,
     pub westeros_choice: Option<WesterosChoice>,
     pub wildling_deck: DeckState,
     /// Unused by the engine (kept for parity with the Python state).
@@ -532,6 +536,8 @@ impl State {
             wildling_attack: None,
             westeros_decks: std::array::from_fn(|_| DeckState::default()),
             pending_westeros: None,
+            westeros_next_deck: 0,
+            westeros_waiting: false,
             westeros_choice: None,
             wildling_deck: DeckState::default(),
             wildling_deck_pos: 0,

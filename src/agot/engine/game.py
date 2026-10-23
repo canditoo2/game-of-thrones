@@ -50,6 +50,9 @@ class GameConfig:
     #: Desktop play enables this; training keeps the legacy immediate battle
     #: so the frozen reference fixtures stay valid.
     deferred_battles: bool = False
+    #: Reveal and resolve the three Westeros cards one at a time. Desktop play
+    #: enables this; training keeps the reference simultaneous draw.
+    sequential_westeros: bool = False
 
     def __post_init__(self) -> None:
         unknown = set(self.houses) - set(load_houses().houses)

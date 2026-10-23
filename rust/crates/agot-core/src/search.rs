@@ -241,6 +241,7 @@ struct Node {
     data: Arc<DataSet>,
     config: GameConfig,
     deferred_battles: bool,
+    sequential_westeros: bool,
     /// The position, or `None` while the node is still pending.
     ///
     /// Boxed deliberately: most nodes are pending children created by an
@@ -278,6 +279,7 @@ impl Node {
             data: Arc::clone(&game.data),
             config: game.config.clone(),
             deferred_battles: game.deferred_battles,
+            sequential_westeros: game.sequential_westeros,
             state: Some(Box::new(game.state.clone())),
             rng: source.fork(),
             pending: None,
@@ -330,6 +332,7 @@ fn with_node_game<R>(nodes: &mut [Node], index: u32, body: impl FnOnce(&Game) ->
             .expect("a node must be materialized before it is used"),
         config: node.config.clone(),
         deferred_battles: node.deferred_battles,
+        sequential_westeros: node.sequential_westeros,
         rng: node.rng.clone(),
     };
     let restore = RestoreGame {
@@ -732,6 +735,7 @@ impl<E: Evaluator> Mcts<E> {
             state: node.state.as_deref()?.clone(),
             config: node.config.clone(),
             deferred_battles: node.deferred_battles,
+            sequential_westeros: node.sequential_westeros,
             rng: node.rng.clone(),
         })
     }
@@ -787,6 +791,7 @@ impl<E: Evaluator> Mcts<E> {
                     .clone(),
                 config: parent.config.clone(),
                 deferred_battles: parent.deferred_battles,
+                sequential_westeros: parent.sequential_westeros,
                 rng: parent.rng.clone(),
             }
         };
@@ -886,13 +891,14 @@ impl<E: Evaluator> Mcts<E> {
                 *prior = (1.0 - weight) * *prior + weight * sample;
             }
         }
-        let (data, config, rng, deferred_battles) = {
+        let (data, config, rng, deferred_battles, sequential_westeros) = {
             let parent = &self.nodes[index as usize];
             (
                 Arc::clone(&parent.data),
                 parent.config.clone(),
                 parent.rng.clone(),
                 parent.deferred_battles,
+                parent.sequential_westeros,
             )
         };
         let first_child = self.nodes.len() as u32;
@@ -901,6 +907,7 @@ impl<E: Evaluator> Mcts<E> {
                 data: Arc::clone(&data),
                 config: config.clone(),
                 deferred_battles,
+                sequential_westeros,
                 state: None,
                 rng: rng.clone(),
                 pending: Some((index, *action)),

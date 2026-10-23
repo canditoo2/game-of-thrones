@@ -192,9 +192,12 @@ the specific strength/starred token, then the destination region. March moves
 list the largest unit stack first, and attack with fewer than all eligible
 units asks for confirmation. **Undo** returns to before your last decision;
 **New game** goes back to the house/settings screen. A battle panel shows the
-attacker, defender, origin, unit counts, unit strengths, order bonuses and
-revealed House cards; the log records battle stages, card reveals, casualties,
-Raven choices and drawn Westeros cards.
+attacker, defender, origin, unit counts, unit, order, support and garrison
+strengths, the **pre-card total for both sides** (so support is known before a
+House card is chosen) and revealed House cards. The log records battle stages,
+support totals, card reveals, casualties, Raven choices and Westeros cards. In
+desktop play the three Westeros cards are revealed and resolved one at a time,
+with a pause between each draw and its effect.
 
 Every match also writes a local structured log under
 `checkpoints/play-logs/`:

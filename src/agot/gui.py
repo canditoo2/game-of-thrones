@@ -1285,6 +1285,7 @@ class AgotApp:
                 seed=settings.seed,
                 max_rounds=settings.max_rounds,
                 deferred_battles=True,
+                sequential_westeros=True,
             )
             policies = make_policies(
                 config,
@@ -2028,21 +2029,56 @@ class AgotApp:
             attacker=False,
             target_is_fortification=target_fort,
         )
+        stage = str(battle.get("stage", "?"))
         attacker_order = int(battle.get("attacker_order_strength") or 0)
         defender_order = int(battle.get("defender_order_strength") or 0)
+        attacker_support = int(battle.get("attacker_support") or 0)
+        defender_support = int(battle.get("defender_support") or 0)
+        defender_garrison = int(battle.get("defender_garrison") or 0)
+        neutral_force = int(battle.get("neutral_force") or 0)
+        attacker_total = int(
+            battle.get(
+                "attacker_total",
+                attacker_strength + attacker_order + attacker_support,
+            )
+            or 0
+        )
+        defender_total = int(
+            battle.get(
+                "defender_total",
+                defender_strength
+                + defender_order
+                + defender_support
+                + defender_garrison,
+            )
+            or 0
+        )
+        if defender_value is None:
+            defender_total = neutral_force
+        defender_line = (
+            f"Defender: Neutral Force (strength {defender_total})"
+            if defender_value is None
+            else (
+                f"Defender: {unit_badge(defender_units) or 'no units'} "
+                f"(unit {defender_strength}, order {defender_order:+d}, "
+                f"support {defender_support:+d}, garrison {defender_garrison:+d}, "
+                f"total {defender_total})"
+            )
+        )
         lines = [
             f"BATTLE - {region}",
             f"{attacker} attacks {defender} from {origin}",
             (
                 f"Attacker: {unit_badge(attacker_units) or 'no units'} "
-                f"(unit strength {attacker_strength}), order {attacker_order:+d}"
+                f"(unit {attacker_strength}, order {attacker_order:+d}, "
+                f"support {attacker_support:+d}, total {attacker_total})"
             ),
+            defender_line,
             (
-                f"Defender: {unit_badge(defender_units) or 'no units'} "
-                f"(unit strength {defender_strength}), order {defender_order:+d}"
+                f"Before House cards: {attacker} {attacker_total} "
+                f"vs {defender} {defender_total}."
             ),
         ]
-        stage = str(battle.get("stage", "?"))
         if reveal_cards:
             lines.append(
                 "Cards: "
@@ -2129,6 +2165,10 @@ class AgotApp:
                 self._append_log("  Support orders are being declared.", "battle")
             elif stage == "Cards":
                 self._append_log("  House cards are being chosen.", "battle")
+                for line in self._battle_summary_lines(
+                    battle, reveal_cards=False
+                )[2:]:
+                    self._append_log(f"  {line}", "battle")
             elif stage == "Blade":
                 self._append_log("  House cards are revealed.", "battle")
             elif stage == "Casualties":
@@ -3234,6 +3274,27 @@ class AgotApp:
         if human is not None and human.eliminated:
             self._finish_game(eliminated=True)
             return
+        if state.phase is Phase.WESTEROS and state.westeros_waiting:
+            self.busy = True
+            self._clear_actions()
+            if state.pending_westeros:
+                self._set_turn_text(
+                    "WESTEROS",
+                    f"{westeros_card_name(state.pending_westeros[0])} revealed. "
+                    "Resolving it before the next card...",
+                )
+            else:
+                self._set_turn_text(
+                    "WESTEROS",
+                    "Preparing the next Westeros card...",
+                )
+            if self.ai_after is not None:
+                return
+            generation = self.generation
+            self.ai_after = self.root.after(
+                1100, lambda: self._continue_westeros(generation)
+            )
+            return
         player = self.game.current_player()
         if player == self.human_house:
             self.busy = False
@@ -3245,6 +3306,23 @@ class AgotApp:
         self.ai_after = self.root.after(
             25, lambda: self._ai_step(generation)
         )
+
+    def _continue_westeros(self, generation: int) -> None:
+        self.ai_after = None
+        if (
+            generation != self.generation
+            or self.game is None
+            or self.finished
+        ):
+            return
+        try:
+            self.game.continue_westeros()
+        except Exception as error:
+            self._fail(f"The engine could not resolve the Westeros card: {error}")
+            return
+        self.steps += 1
+        self._refresh_all()
+        self._schedule_turn()
 
     def _ai_step(self, generation: int) -> None:
         self.ai_after = None

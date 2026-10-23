@@ -13,7 +13,7 @@ strongest.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
-- Tests: `.venv\Scripts\python -m pytest -q` (119 tests; the rules/combat/encoder
+- Tests: `.venv\Scripts\python -m pytest -q` (120 tests; the rules/combat/encoder
   regressions live in Rust — see `cargo test --release` below). When piped in PowerShell
   the final summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`
@@ -24,8 +24,10 @@ strongest.
   house, opponent and checkpoint, then the full board and action list are shown. When
   `Rulebook/board.jpg` is present (Pillow installed), the game uses the local scan as the
   board; otherwise it falls back to the schematic region board. Desktop play enables
-  `deferred_battles`, so all March destinations are chosen before the one battle starts;
-  training/evaluation keep the legacy immediate-battle default for the frozen fixtures.
+  `deferred_battles`, so all March destinations are chosen before the one battle starts,
+  and `sequential_westeros`, which reveals and resolves each of the three cards one at a
+  time. Training/evaluation keep the legacy immediate-battle/simultaneous-card defaults
+  for the frozen fixtures.
   AI seats default to 64 simulations over 2 determinizations (2 keeps face-down orders and bids
   hidden), and `--opponents greedy` is the fast fallback. Gauntlet = single-seat win rate vs
   a field; any policy argument accepts `net:<checkpoint>` (MCTS over that saved network), and

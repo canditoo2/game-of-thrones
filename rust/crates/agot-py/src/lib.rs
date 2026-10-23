@@ -300,10 +300,11 @@ impl PyGame {
 #[pymethods]
 impl PyGame {
     /// `Game.new(houses=None, seed=0, max_rounds=10, victory_castles=7,
-    /// use_westeros_decks=True, deferred_battles=False, data_dir=None)`.
+    /// use_westeros_decks=True, deferred_battles=False,
+    /// sequential_westeros=False, data_dir=None)`.
     #[classmethod]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, deferred_battles=false, data_dir=None))]
+    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, deferred_battles=false, sequential_westeros=false, data_dir=None))]
     fn new(
         _cls: &Bound<'_, PyType>,
         houses: Option<Vec<String>>,
@@ -312,6 +313,7 @@ impl PyGame {
         victory_castles: u8,
         use_westeros_decks: bool,
         deferred_battles: bool,
+        sequential_westeros: bool,
         data_dir: Option<String>,
     ) -> PyResult<PyGame> {
         let data = match data_dir {
@@ -341,6 +343,7 @@ impl PyGame {
         };
         let mut game = CoreGame::new(data, config).map_err(engine_error)?;
         game.deferred_battles = deferred_battles;
+        game.sequential_westeros = sequential_westeros;
         Ok(PyGame { game })
     }
 
@@ -517,6 +520,16 @@ impl PyGame {
         Ok(json.call_method1("loads", (text,))?.unbind())
     }
 
+    /// Whether the desktop-sequenced Westeros phase is waiting for Continue.
+    fn westeros_waiting(&self) -> bool {
+        self.game.state.westeros_waiting
+    }
+
+    /// Resolve the next step of a desktop-sequenced Westeros phase.
+    fn continue_westeros(&mut self) -> PyResult<()> {
+        self.game.continue_westeros().map_err(engine_error)
+    }
+
     /// The parked battle, as the dict the Python engine keeps.
     ///
     /// The fingerprint only records whether a battle is pending; a caller that
@@ -536,6 +549,26 @@ impl PyGame {
             }
             serde_json::Value::Object(map)
         };
+        let support = agot_core::combat::support_from_choices(
+            &self.game.state,
+            &self.game.data.map,
+            battle.region,
+            &battle.support_choices,
+        );
+        let target = self.game.state.region(battle.region);
+        let target_is_fortification = self.game.data.map.region(battle.region).is_fortification();
+        let attacker_unit_strength =
+            agot_core::combat::units_strength(&battle.attacker_units, target_is_fortification)
+                as i16;
+        let defender_unit_strength =
+            agot_core::combat::units_strength(&battle.defender_units, false) as i16;
+        let attacker_total = attacker_unit_strength
+            + battle.attacker_order_strength
+            + support.attacker_strength as i16;
+        let defender_total = defender_unit_strength
+            + battle.defender_order_strength
+            + support.defender_strength as i16
+            + target.garrison as i16;
         let value = serde_json::json!({
             "region": self.game.data.map.id_of(battle.region),
             "attacker": battle.attacker.name(),
@@ -554,6 +587,16 @@ impl PyGame {
                 }
                 _ => None,
             },
+            "attacker_units_strength": attacker_unit_strength,
+            "defender_units_strength": defender_unit_strength,
+            "attacker_order_strength": battle.attacker_order_strength,
+            "defender_order_strength": battle.defender_order_strength,
+            "attacker_support": support.attacker_strength,
+            "defender_support": support.defender_strength,
+            "defender_garrison": target.garrison,
+            "neutral_force": target.neutral_force,
+            "attacker_total": attacker_total,
+            "defender_total": defender_total,
             "blade_done": battle.blade_done,
             "attacker_blade": battle.attacker_blade,
             "defender_blade": battle.defender_blade,

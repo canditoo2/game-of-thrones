@@ -68,6 +68,10 @@ pub struct Game {
     /// all of its destinations have been chosen. Self-play keeps the original
     /// immediate-battle behaviour so the frozen reference fixtures remain valid.
     pub deferred_battles: bool,
+    /// Desktop-play presentation option: reveal and resolve the three Westeros
+    /// cards one at a time instead of drawing all three before the first effect.
+    /// Self-play keeps the reference flow.
+    pub sequential_westeros: bool,
     pub rng: Rng,
 }
 
@@ -87,6 +91,7 @@ impl Clone for Game {
             state: self.state.clone(),
             config: self.config.clone(),
             deferred_battles: self.deferred_battles,
+            sequential_westeros: self.sequential_westeros,
             rng: source.fork(),
         }
     }
@@ -114,6 +119,7 @@ impl Game {
             state,
             config,
             deferred_battles: false,
+            sequential_westeros: false,
             rng,
         };
         game.advance()?;
@@ -159,6 +165,22 @@ impl Game {
     }
 
     // -- stepping --------------------------------------------------------
+
+    /// Resolve the next step of a desktop-sequenced Westeros phase.
+    ///
+    /// After a card is revealed, the table waits before resolving it; after a
+    /// card resolves, it waits before revealing the next one. The GUI can show
+    /// each card and its effect one at a time.
+    pub fn continue_westeros(&mut self) -> Result<(), EngineError> {
+        if !self.sequential_westeros
+            || self.state.phase != Phase::Westeros
+            || !self.state.westeros_waiting
+        {
+            return Ok(());
+        }
+        self.state.westeros_waiting = false;
+        self.advance()
+    }
 
     /// Applies one action, then lets the engine auto-advance.
     pub fn step(&mut self, action: Action) -> Result<(), EngineError> {
@@ -212,7 +234,15 @@ impl Game {
             }
 
             match self.state.phase {
-                Phase::Westeros => self.run_westeros_phase()?,
+                Phase::Westeros => {
+                    if self.state.westeros_waiting {
+                        // The table paused after revealing a card. The GUI
+                        // calls `continue_westeros` to resolve it.
+                        self.state.active_house = None;
+                        return Ok(());
+                    }
+                    self.run_westeros_phase()?
+                }
                 Phase::WesterosChoice => match self.state.westeros_choice.as_ref() {
                     Some(choice) => {
                         let holder = choice.holder;
@@ -612,6 +642,8 @@ impl Game {
         self.state.bid_tracks.clear();
         self.state.pending_bids.clear();
         self.state.pending_westeros = None;
+        self.state.westeros_next_deck = 0;
+        self.state.westeros_waiting = false;
         self.state.wildling_attack = None;
         self.state.westeros_choice = None;
         for deck in self.state.westeros_decks.iter_mut() {

@@ -21,13 +21,53 @@ impl Game {
     // ==================================================================
 
     pub(crate) fn run_westeros_phase(&mut self) -> Result<(), EngineError> {
+        if self.sequential_westeros && self.state.westeros_waiting {
+            return Ok(());
+        }
         if self.state.pending_westeros.is_none() {
             // Round one draws no Westeros cards.
             if self.state.round == 1 || !self.config.use_westeros_decks {
                 self.state.phase = Phase::Planning;
                 return Ok(());
             }
-            self.state.order_restrictions.clear();
+            if !self.sequential_westeros || self.state.westeros_next_deck == 0 {
+                self.state.order_restrictions.clear();
+            }
+
+            if self.sequential_westeros {
+                // Desktop play reveals one deck at a time. The card is parked
+                // in `pending_westeros` so the GUI can show it before the
+                // player continues to its resolution.
+                loop {
+                    if self.state.westeros_next_deck >= 3 {
+                        return self.finish_westeros_round();
+                    }
+                    let deck = self.state.westeros_next_deck as usize;
+                    self.state.westeros_next_deck += 1;
+                    let card = self.draw_westeros(deck);
+                    self.state.westeros_decks[deck].drawn = card;
+                    let Some(card) = card else {
+                        continue;
+                    };
+                    self.state.pending_westeros = Some(SmallVec::from_slice(&[card]));
+                    self.state.westeros_waiting = true;
+                    self.state.phase = Phase::Westeros;
+                    self.state.active_house = None;
+                    // The Wildling icon belongs to the revealed card; an
+                    // attack triggered at the cap still resolves first.
+                    let advance = self.data.westeros.card(card)["advance_wildlings"]
+                        .as_bool()
+                        .unwrap_or(false);
+                    if advance {
+                        self.advance_wildlings(1)?;
+                        if self.state.phase == Phase::WildlingAttack {
+                            return Ok(());
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+
             let mut drawn: SmallVec<[u16; 3]> = SmallVec::new();
             for deck in 0..3 {
                 let card = self.draw_westeros(deck);
@@ -127,8 +167,20 @@ impl Game {
             }
         }
 
+        if self.sequential_westeros && self.state.westeros_next_deck < 3 {
+            self.state.pending_westeros = None;
+            self.state.phase = Phase::Westeros;
+            self.state.westeros_waiting = true;
+            self.state.active_house = None;
+            return Ok(());
+        }
+        self.finish_westeros_round()
+    }
+
+    fn finish_westeros_round(&mut self) -> Result<(), EngineError> {
         self.state.pending_westeros = None;
         self.state.bid_tracks.clear();
+        self.state.westeros_waiting = false;
         if self.any_mustering_points() {
             self.state.phase = Phase::Mustering;
         } else {
@@ -237,10 +289,12 @@ impl Game {
             .as_str()
             .unwrap_or("card")
             .to_string();
-        match picked {
-            None => self
-                .state
-                .note(format!("{card_name}: holder chooses no effect")),
+        let entered_extra_step = match picked {
+            None => {
+                self.state
+                    .note(format!("{card_name}: holder chooses no effect"));
+                false
+            }
             Some(picked) => {
                 let picked_name = self.data.westeros.card(picked)["name"]
                     .as_str()
@@ -248,11 +302,19 @@ impl Game {
                     .to_string();
                 self.state
                     .note(format!("{card_name}: holder chooses {picked_name}"));
-                self.apply_westeros_effect(picked)?;
+                self.apply_westeros_effect(picked)?
             }
-        }
+        };
         if self.state.phase == Phase::WesterosChoice {
             self.state.phase = Phase::Westeros;
+        }
+        if self.sequential_westeros
+            && !entered_extra_step
+            && self.state.phase == Phase::Westeros
+            && self.state.westeros_next_deck < 3
+        {
+            self.state.westeros_waiting = true;
+            self.state.active_house = None;
         }
         Ok(())
     }
@@ -625,7 +687,14 @@ impl Game {
             self.state.phase = Phase::Westeros;
             return;
         }
+        if self.sequential_westeros && self.state.westeros_next_deck < 3 {
+            self.state.phase = Phase::Westeros;
+            self.state.westeros_waiting = true;
+            self.state.active_house = None;
+            return;
+        }
         self.state.pending_westeros = None;
+        self.state.westeros_waiting = false;
         if self.any_mustering_points() {
             self.state.phase = Phase::Mustering;
         } else {
@@ -1479,6 +1548,76 @@ mod tests {
         assert!(expected > 0, "the setup house controls a crown icon");
         assert_eq!(game.state.house(house).unwrap().power, expected as u8);
         assert!(game.state.pending_westeros.is_none());
+    }
+
+    #[test]
+    fn sequential_westeros_reveals_and_resolves_one_card_at_a_time() {
+        let mut game = game(1);
+        let house = HouseId(2);
+        let supply = game
+            .data
+            .westeros
+            .card_index("supply")
+            .expect("supply card");
+        let game_of_thrones = game
+            .data
+            .westeros
+            .card_index("game_of_thrones")
+            .expect("Game of Thrones card");
+        let last_days = game
+            .data
+            .westeros
+            .card_index("last_days_of_summer")
+            .expect("Last Days card");
+        game.sequential_westeros = true;
+        game.state.round = 2;
+        game.state.phase = Phase::Westeros;
+        game.state.active_house = None;
+        game.state.pending_westeros = None;
+        game.state.westeros_next_deck = 0;
+        game.state.westeros_waiting = false;
+        game.state.westeros_decks[0] = DeckState::new([supply]);
+        game.state.westeros_decks[1] = DeckState::new([game_of_thrones]);
+        game.state.westeros_decks[2] = DeckState::new([last_days]);
+        game.state.house_mut(house).unwrap().power = 0;
+
+        game.advance().unwrap();
+        assert!(game.state.westeros_waiting);
+        assert_eq!(game.state.pending_westeros.as_deref(), Some(&[supply][..]));
+        assert_eq!(game.state.westeros_next_deck, 1);
+
+        game.continue_westeros().unwrap();
+        assert!(game.state.westeros_waiting);
+        assert!(
+            game.state.pending_westeros.is_none(),
+            "pending={:?} phase={:?} next={}",
+            game.state.pending_westeros,
+            game.state.phase,
+            game.state.westeros_next_deck
+        );
+
+        game.continue_westeros().unwrap();
+        assert_eq!(
+            game.state.pending_westeros.as_deref(),
+            Some(&[game_of_thrones][..])
+        );
+        assert_eq!(game.state.westeros_next_deck, 2);
+
+        game.continue_westeros().unwrap();
+        assert!(game.state.pending_westeros.is_none());
+        assert!(game.state.house(house).unwrap().power > 0);
+
+        game.continue_westeros().unwrap();
+        assert_eq!(
+            game.state.pending_westeros.as_deref(),
+            Some(&[last_days][..])
+        );
+        assert_eq!(game.state.westeros_next_deck, 3);
+
+        game.continue_westeros().unwrap();
+        assert!(!game.state.westeros_waiting);
+        assert!(game.state.pending_westeros.is_none());
+        assert_ne!(game.state.phase, Phase::Westeros);
     }
 
     #[test]

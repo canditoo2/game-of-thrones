@@ -197,6 +197,10 @@ class StateView:
         return self._game._inner.pending_battle()
 
     @property
+    def westeros_waiting(self) -> bool:
+        return bool(self._game._inner.westeros_waiting())
+
+    @property
     def westeros_choice(self) -> dict | None:
         return self._data()["westeros_choice"]
 
@@ -393,6 +397,7 @@ class RustGame:
             victory_castles=config.victory_castles,
             use_westeros_decks=config.use_westeros_decks,
             deferred_battles=config.deferred_battles,
+            sequential_westeros=config.sequential_westeros,
         )
         return cls(inner, config)
 
@@ -452,6 +457,12 @@ class RustGame:
             )
             for action in self._inner.legal_actions()
         ]
+
+    def continue_westeros(self) -> None:
+        """Resolve the next reveal/resolution step of a desktop Westeros phase."""
+        self._inner.continue_westeros()
+        self._version += 1
+        self._snapshot = None
 
     def step(self, action: Action) -> None:
         """Apply a Python ``Action`` by matching it against the engine's own.
