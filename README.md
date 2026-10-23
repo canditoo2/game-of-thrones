@@ -44,6 +44,7 @@ src/agot/
   training/      self-play, replay buffer, trainer, evaluation
   gui.py         desktop game window (Tkinter)
   play.py        shared game loop and action/board formatting
+  match_log.py   local JSONL/NPZ logs of human-vs-bot matches
   cli.py         command-line entry point
 tests/           engine facade, map, agents, training, network and the extension
 docs/            architecture, methods, roadmap and the rulebook fidelity audit
@@ -189,6 +190,19 @@ units, garrison, orders and neighbours. Select an action in the list and press
 last decision; **New game** goes back to the house/settings screen. The log
 records public moves only — it never names an AI's face-down order, secret bid
 or House card.
+
+Every match also writes a local structured log under
+`checkpoints/play-logs/`:
+
+- `play-*.jsonl` — the setup, every decision, undo events and the result.
+- `play-*.npz` — when the bot seats use MCTS, the completed game's bot decisions
+  in `ReplayBuffer` format, with the search visit distribution as the policy
+  target and the final per-house outcome as the value target. These are suitable
+  for inspection or merging into a training buffer; human one-hot moves are not
+  put into the NPZ. Undone decisions are removed from the NPZ while the JSONL
+  keeps the undo event.
+
+The folder is under the gitignored `checkpoints/` tree and is never uploaded.
 
 ## How the learning works
 

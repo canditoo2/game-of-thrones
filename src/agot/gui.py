@@ -19,9 +19,13 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 
+import numpy as np
+
+from agot.agents import MCTS, outcome_vector
 from agot.engine.actions import Action
 from agot.engine.enums import ORDERS_BY_KEY, OrderType, Phase, Track, UnitType
 from agot.engine.game import DEFAULT_HOUSES, Game, GameConfig
+from agot.match_log import MatchLog
 from agot.play import (
     ai_action_summary,
     format_action,
@@ -924,9 +928,12 @@ class AgotApp:
         root: tk.Tk,
         *,
         defaults: GameSettings | None = None,
+        match_log_dir: str | Path = "checkpoints/play-logs",
     ) -> None:
         self.root = root
         self.defaults = defaults or GameSettings()
+        self.match_log_dir = Path(match_log_dir)
+        self.match_log: MatchLog | None = None
         self.setup: SetupPanel | None = None
         self.game_frame: tk.Frame | None = None
         self.game: Game | None = None
@@ -934,7 +941,7 @@ class AgotApp:
         self.settings: GameSettings | None = None
         self.human_house = self.defaults.house
         self.steps = 0
-        self.undo_stack: list[tuple[Game, int]] = []
+        self.undo_stack: list[tuple[Game, int, int]] = []
         self.selected_region: str | None = None
         self.actions: list[Action] = []
         self.busy = False
@@ -1060,6 +1067,7 @@ class AgotApp:
     def show_setup(self, defaults: GameSettings | None = None) -> None:
         self.generation += 1
         self._cancel_ai()
+        self._finish_match_log(aborted=True, note="returned to setup")
         if self.game_frame is not None:
             self.game_frame.destroy()
             self.game_frame = None
@@ -1113,11 +1121,16 @@ class AgotApp:
             self.setup.destroy()
             self.setup = None
         self._build_game_frame()
+        self._open_match_log(settings)
         self._append_log(
             f"You take the {house_name(self.human_house)} seat. "
             f"Opponents: {settings.opponents}.",
             "system",
         )
+        if self.match_log is not None:
+            self._append_log(
+                f"Match log: {self.match_log.jsonl_path}", "system"
+            )
         self.root.title(
             f"A Game of Thrones - {house_name(self.human_house)}"
         )
@@ -1132,6 +1145,84 @@ class AgotApp:
             if region.home == self.human_house:
                 return region_id
         return None
+
+    def _open_match_log(self, settings: GameSettings) -> None:
+        try:
+            self.match_log = MatchLog(
+                self.match_log_dir,
+                human_house=settings.house,
+                opponents=settings.opponents,
+                checkpoint=settings.checkpoint,
+                simulations=settings.simulations,
+                determinizations=settings.determinizations,
+                seed=settings.seed,
+                max_rounds=settings.max_rounds,
+            )
+        except OSError as error:
+            self.match_log = None
+            self._append_log(f"Match log unavailable: {error}", "error")
+
+    def _finish_match_log(self, *, aborted: bool, note: str | None = None) -> None:
+        log = self.match_log
+        self.match_log = None
+        if log is None:
+            return
+        game = self.game
+        winner = game.winner() if game is not None else None
+        rounds = game.state.round if game is not None else 0
+        outcome = None
+        if (
+            not aborted
+            and game is not None
+            and game.is_terminal()
+            and winner is not None
+        ):
+            outcome = outcome_vector(game)
+        try:
+            log.finish(
+                winner=winner,
+                rounds=rounds,
+                steps=self.steps,
+                aborted=aborted,
+                note=note,
+                outcome=outcome,
+            )
+        except OSError as error:
+            self._append_log(f"Could not finish match log: {error}", "error")
+
+    def _log_decision(
+        self,
+        *,
+        house: str,
+        actor: str,
+        source: str,
+        action: Action,
+        legal_actions: list[Action],
+        chosen_index: int,
+        target: np.ndarray,
+    ) -> None:
+        if self.match_log is None or self.game is None:
+            return
+        state = self.game.state
+        try:
+            observation = self.game.observe()
+            self.match_log.decision(
+                step=self.steps,
+                round_number=state.round,
+                phase=state.phase.value,
+                action_step=state.action_step.value,
+                house=house,
+                actor=actor,
+                source=source,
+                action=action,
+                legal_actions=legal_actions,
+                chosen_index=chosen_index,
+                target=target,
+                observation=observation,
+            )
+        except Exception as error:
+            self._append_log(f"Match log error: {error}", "error")
+            self.match_log = None
 
     # -- game screen construction ---------------------------------------
 
@@ -2354,10 +2445,38 @@ class AgotApp:
             self._fail(f"No policy was built for {house_name(player)}.")
             return
         try:
-            action = policy.act(self.game)
+            if isinstance(policy, MCTS):
+                result = policy.search(self.game)
+                if not result.actions:
+                    raise RuntimeError("the search returned no actions")
+                visits = np.asarray(result.visits, dtype=np.float64)
+                total = float(visits.sum())
+                target = (
+                    visits / total
+                    if total > 0
+                    else np.full(len(visits), 1.0 / max(1, len(visits)))
+                )
+                index = int(np.argmax(visits))
+                action = result.actions[index]
+                actions = list(result.actions)
+                source = "mcts"
+            else:
+                action, target = policy.decide(self.game)
+                actions = self.game.legal_actions()
+                index = actions.index(action)
+                source = getattr(policy, "name", "bot")
         except Exception as error:  # keep the window alive on a policy failure
             self._fail(f"The bot could not move: {error}")
             return
+        self._log_decision(
+            house=player,
+            actor="bot",
+            source=source,
+            action=action,
+            legal_actions=actions,
+            chosen_index=index,
+            target=target,
+        )
         self._append_log(ai_action_summary(self.game, player, action), "ai")
         try:
             self.game.step(action)
@@ -2384,7 +2503,22 @@ class AgotApp:
         if not 0 <= index < len(self.actions):
             return
         action = self.actions[index]
-        self.undo_stack.append((self.game.clone(), self.steps))
+        actions = self.actions
+        target = np.zeros(len(actions), dtype=np.float64)
+        target[index] = 1.0
+        example_count = (
+            self.match_log.example_count if self.match_log is not None else 0
+        )
+        self.undo_stack.append((self.game.clone(), self.steps, example_count))
+        self._log_decision(
+            house=self.human_house,
+            actor="human",
+            source="human",
+            action=action,
+            legal_actions=actions,
+            chosen_index=index,
+            target=target,
+        )
         self._append_log(f"You: {format_action(self.game, action)}", "human")
         try:
             self.game.step(action)
@@ -2408,7 +2542,10 @@ class AgotApp:
             return
         self._cancel_ai()
         self.generation += 1
-        self.game, self.steps = self.undo_stack.pop()
+        self.game, self.steps, example_count = self.undo_stack.pop()
+        if self.match_log is not None:
+            self.match_log.truncate_examples(example_count)
+            self.match_log.undo(step=self.steps)
         self._append_log("You stepped back to your previous decision.", "system")
         self.busy = False
         self._refresh_all()
@@ -2424,6 +2561,7 @@ class AgotApp:
         self.finished = True
         self.busy = False
         self._set_play_enabled(False)
+        self._finish_match_log(aborted=True, note=message)
         messagebox.showerror("A Game of Thrones", message, parent=self.root)
 
     def _finish_game(self, *, eliminated: bool) -> None:
@@ -2452,6 +2590,10 @@ class AgotApp:
             message = "The round cap was reached with no winner."
         self._set_turn_text(title, message)
         self._append_log(message, "over")
+        self._finish_match_log(
+            aborted=eliminated,
+            note="house eliminated" if eliminated else None,
+        )
         generation = self.generation
         self.root.after(
             120,
@@ -2474,6 +2616,7 @@ class AgotApp:
     def _on_close(self) -> None:
         self.generation += 1
         self._cancel_ai()
+        self._finish_match_log(aborted=True, note="window closed")
         self.root.destroy()
 
 

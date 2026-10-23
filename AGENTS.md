@@ -13,7 +13,7 @@ strongest.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
-- Tests: `.venv\Scripts\python -m pytest -q` (110 tests; the rules/combat/encoder
+- Tests: `.venv\Scripts\python -m pytest -q` (112 tests; the rules/combat/encoder
   regressions live in Rust — see `cargo test --release` below). When piped in PowerShell
   the final summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`
@@ -96,6 +96,9 @@ strongest.
   `--resume`), `agot.log.jsonl` (one line per iteration) and `agot-best.pt` (best gauntlet eval).
   The replay buffer is deliberately not saved — a resumed run refills it and shows a transient
   loss spike.
+- The GUI writes human-vs-bot matches under `checkpoints/play-logs/`: a JSONL decision/result
+  log and, for MCTS bot seats, a ReplayBuffer-compatible NPZ of those decisions. Undo truncates
+  the NPZ but leaves an undo event in the JSONL.
 - Smoke gate before any long run: policy loss must fall **below ~2.0** and keep falling. Flat
   ~2.0 is the old failure signature, not convergence.
 - Launch/monitor/resume commands: README "Quickstart". `agot report --checkpoint <ckpt>

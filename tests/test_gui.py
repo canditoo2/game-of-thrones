@@ -96,10 +96,10 @@ def test_setup_screen_constructs() -> None:
         root.destroy()
 
 
-def test_game_screen_starts_with_a_human_turn() -> None:
+def test_game_screen_starts_with_a_human_turn(tmp_path) -> None:
     root = _root_or_skip()
     try:
-        app = AgotApp(root)
+        app = AgotApp(root, match_log_dir=tmp_path)
         started = app.start_game(
             GameSettings(
                 house="baratheon",
