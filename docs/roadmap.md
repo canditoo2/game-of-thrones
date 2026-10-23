@@ -151,10 +151,12 @@ they should be fixed before expecting a strong agent.
 4. **House-card abilities.** *(done)* All 42 cards' text effects are modelled
    in `rust/crates/agot-core/src/house_cards.rs`: passive strength/icon
    modifiers, immediate
-   destruction/Order/track effects, and post-combat effects. Where a card lets
-   its owner choose (which Footman, which Order, which alternate card, which
-   retreat), the engine picks a deterministic default; the exact defaults are
-   documented in the module docstring.
+   destruction/Order/track effects, and post-combat effects. In desktop play
+   Doran Martell asks its owner which Influence track to move; training keeps a
+   deterministic default. In both modes card text resolves before the blade
+   step, and a used blade stays used if Doran changes its holder. The remaining
+   choices (which Footman, which Order, which alternate card, which retreat)
+   use documented deterministic defaults; see the module docstring.
 
 5. **Wildlings.** *(done)* The track, the per-round icon advance (all icons
    counted before card effects resolve), the secret Power bid and all nine

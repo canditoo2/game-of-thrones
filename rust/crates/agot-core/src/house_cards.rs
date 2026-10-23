@@ -216,6 +216,8 @@ pub struct BattleContext {
     pub power_costs: SmallVec<[(HouseId, u8); 2]>,
     pub orders_to_remove: SmallVec<[RegionId; 2]>,
     pub influence_move: Option<(Track, HouseId)>,
+    /// Doran Martell's chosen track, when the desktop player picked one.
+    pub doran_track: Option<Track>,
     /// Houses whose card (The Blackfish) ignores all casualties this battle.
     pub casualty_immunity: SmallVec<[HouseId; 2]>,
     pub notes: Vec<String>,
@@ -626,16 +628,19 @@ fn doran(ctx: &mut BattleContext, state: &State, cards: &HouseCardData, house: H
         return;
     }
     let opponent = ctx.opponent_of(house);
-    // Python's `min` keeps the first minimum, so the track order decides ties.
-    let mut best: Option<(Track, usize)> = None;
-    for track in Track::ALL {
-        let position = state.track_position(opponent, track);
-        match best {
-            Some((_, best_position)) if position >= best_position => {}
-            _ => best = Some((track, position)),
+    let track = ctx.doran_track.unwrap_or_else(|| {
+        // Python's `min` keeps the first minimum, so the track order decides
+        // ties.
+        let mut best: Option<(Track, usize)> = None;
+        for track in Track::ALL {
+            let position = state.track_position(opponent, track);
+            match best {
+                Some((_, best_position)) if position >= best_position => {}
+                _ => best = Some((track, position)),
+            }
         }
-    }
-    let track = best.map(|(track, _)| track).unwrap_or(Track::IronThrone);
+        best.map(|(track, _)| track).unwrap_or(Track::IronThrone)
+    });
     ctx.influence_move = Some((track, opponent));
     ctx.notes.push(format!(
         "Doran Martell sends {opponent} to the bottom of {}",
@@ -683,10 +688,18 @@ pub fn commit_deferred(state: &mut State, _cards: &HouseCardData, ctx: &BattleCo
         }
     }
     if let Some((track, house)) = ctx.influence_move {
+        let previous_blade = if track == Track::Fiefdoms {
+            state.blade_holder()
+        } else {
+            None
+        };
         let order = &mut state.tracks[track.index()];
         if let Some(position) = order.iter().position(|candidate| *candidate == house) {
             order.remove(position);
             order.push(house);
+        }
+        if track == Track::Fiefdoms {
+            state.transfer_blade_used(previous_blade);
         }
     }
 }

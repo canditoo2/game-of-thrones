@@ -26,8 +26,9 @@ strongest.
   board; otherwise it falls back to the schematic region board. Desktop play enables
   `deferred_battles`, so all March destinations are chosen before the one battle starts,
   and `sequential_westeros`, which reveals and resolves each of the three cards one at a
-  time. Training/evaluation keep the legacy immediate-battle/simultaneous-card defaults
-  for the frozen fixtures.
+  time; `doran_choice` prompts for Doran Martell's Influence track. Combat card text
+  resolves before the blade step. Training/evaluation keep the reference defaults for
+  the frozen fixtures.
   AI seats default to 64 simulations over 2 determinizations (2 keeps face-down orders and bids
   hidden), and `--opponents greedy` is the fast fallback. Gauntlet = single-seat win rate vs
   a field; any policy argument accepts `net:<checkpoint>` (MCTS over that saved network), and

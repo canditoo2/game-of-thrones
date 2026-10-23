@@ -1286,6 +1286,7 @@ class AgotApp:
                 max_rounds=settings.max_rounds,
                 deferred_battles=True,
                 sequential_westeros=True,
+                doran_choice=True,
             )
             policies = make_policies(
                 config,
@@ -2169,8 +2170,16 @@ class AgotApp:
                     battle, reveal_cards=False
                 )[2:]:
                     self._append_log(f"  {line}", "battle")
+            elif stage == "Doran":
+                self._append_log(
+                    "  Doran Martell chooses an Influence track.",
+                    "battle",
+                )
             elif stage == "Blade":
-                self._append_log("  House cards are revealed.", "battle")
+                self._append_log(
+                    "  House-card text resolved; now the Valyrian Steel Blade step.",
+                    "battle",
+                )
             elif stage == "Casualties":
                 self._append_log(
                     f"  Battle resolved; {casualties} casualty(ies) to remove.",
@@ -3274,6 +3283,44 @@ class AgotApp:
         if human is not None and human.eliminated:
             self._finish_game(eliminated=True)
             return
+        battle = state.pending_battle
+        if (
+            state.phase is Phase.COMBAT
+            and battle is not None
+            and str(battle.get("stage", "")) == "Doran"
+        ):
+            self.busy = True
+            self._clear_actions()
+            owner = battle.get("doran_owner")
+            attacker = battle.get("attacker")
+            defender = battle.get("defender")
+            opponent = defender if owner == attacker else attacker
+            if owner == self.human_house:
+                self._set_turn_text(
+                    "DORAN MARTELL",
+                    "Choose which Influence track Doran moves your opponent to.",
+                )
+                track = self._ask_doran_track()
+            else:
+                track = self._default_doran_track(opponent)
+            if track is None:
+                return
+            try:
+                self.game.choose_doran_track(track)
+            except Exception as error:  # keep the window alive
+                self._fail(f"There was no legal Doran track choice: {error}")
+                return
+            self.steps += 1
+            self._append_log(
+                f"Doran Martell: {house_name(owner)} moves "
+                f"{house_name(opponent)} to the bottom of "
+                f"{TRACK_LABELS[Track(track)]}.",
+                "battle",
+            )
+            self._refresh_all()
+            self._schedule_turn()
+            return
+
         if state.phase is Phase.WESTEROS and state.westeros_waiting:
             self.busy = True
             self._clear_actions()
@@ -3306,6 +3353,72 @@ class AgotApp:
         self.ai_after = self.root.after(
             25, lambda: self._ai_step(generation)
         )
+
+    def _default_doran_track(self, opponent: str | None) -> str:
+        if self.game is None or not opponent:
+            return Track.FIEFDOMS.value
+        return min(
+            TRACK_ORDER,
+            key=lambda track: self.game.state.track_position(opponent, track)
+            or 99,
+        ).value
+
+    def _ask_doran_track(self) -> str | None:
+        """Small modal choice for Doran Martell's Influence track."""
+        if self.root is None:
+            return Track.FIEFDOMS.value
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Doran Martell")
+        dialog.configure(bg=BG)
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        result: list[str] = []
+
+        def pick(track: str) -> None:
+            result.append(track)
+            dialog.destroy()
+
+        tk.Label(
+            dialog,
+            text="Doran Martell",
+            bg=BG,
+            fg=GOLD,
+            font=("Georgia", 12, "bold"),
+        ).pack(padx=20, pady=(14, 2))
+        tk.Label(
+            dialog,
+            text="Choose the Influence track for your opponent.",
+            bg=BG,
+            fg=TEXT,
+            font=("Segoe UI", 9),
+        ).pack(padx=20, pady=(0, 10))
+        for track in TRACK_ORDER:
+            tk.Button(
+                dialog,
+                text=TRACK_LABELS[track],
+                command=lambda value=track.value: pick(value),
+                bg=PANEL_ALT,
+                fg=TEXT,
+                activebackground=BORDER,
+                activeforeground=TEXT,
+                relief="flat",
+                padx=12,
+                pady=5,
+                font=("Segoe UI", 9, "bold"),
+            ).pack(fill="x", padx=20, pady=3)
+        dialog.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: pick(Track.FIEFDOMS.value),
+        )
+        dialog.bind("<Escape>", lambda _event: pick(Track.FIEFDOMS.value))
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dialog.grab_set()
+        dialog.focus_set()
+        self.root.wait_window(dialog)
+        return result[0] if result else None
 
     def _continue_westeros(self, generation: int) -> None:
         self.ai_after = None

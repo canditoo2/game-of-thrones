@@ -301,10 +301,10 @@ impl PyGame {
 impl PyGame {
     /// `Game.new(houses=None, seed=0, max_rounds=10, victory_castles=7,
     /// use_westeros_decks=True, deferred_battles=False,
-    /// sequential_westeros=False, data_dir=None)`.
+    /// sequential_westeros=False, doran_choice=False, data_dir=None)`.
     #[classmethod]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, deferred_battles=false, sequential_westeros=false, data_dir=None))]
+    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, deferred_battles=false, sequential_westeros=false, doran_choice=false, data_dir=None))]
     fn new(
         _cls: &Bound<'_, PyType>,
         houses: Option<Vec<String>>,
@@ -314,6 +314,7 @@ impl PyGame {
         use_westeros_decks: bool,
         deferred_battles: bool,
         sequential_westeros: bool,
+        doran_choice: bool,
         data_dir: Option<String>,
     ) -> PyResult<PyGame> {
         let data = match data_dir {
@@ -344,6 +345,7 @@ impl PyGame {
         let mut game = CoreGame::new(data, config).map_err(engine_error)?;
         game.deferred_battles = deferred_battles;
         game.sequential_westeros = sequential_westeros;
+        game.doran_choice = doran_choice;
         Ok(PyGame { game })
     }
 
@@ -530,6 +532,13 @@ impl PyGame {
         self.game.continue_westeros().map_err(engine_error)
     }
 
+    /// Apply Doran Martell's chosen Influence track in the current battle.
+    fn choose_doran_track(&mut self, track: &str) -> PyResult<()> {
+        let track = agot_core::enums::Track::from_name(track)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown track {track:?}")))?;
+        self.game.choose_doran_track(track).map_err(engine_error)
+    }
+
     /// The parked battle, as the dict the Python engine keeps.
     ///
     /// The fingerprint only records whether a battle is pending; a caller that
@@ -587,6 +596,7 @@ impl PyGame {
                 }
                 _ => None,
             },
+            "doran_owner": battle.doran_owner.map(|house| house.name()),
             "attacker_units_strength": attacker_unit_strength,
             "defender_units_strength": defender_unit_strength,
             "attacker_order_strength": battle.attacker_order_strength,

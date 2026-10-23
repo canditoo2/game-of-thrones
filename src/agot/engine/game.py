@@ -53,6 +53,9 @@ class GameConfig:
     #: Reveal and resolve the three Westeros cards one at a time. Desktop play
     #: enables this; training keeps the reference simultaneous draw.
     sequential_westeros: bool = False
+    #: Ask the Doran Martell player which Influence track to move. Desktop play
+    #: enables this; training keeps the deterministic default.
+    doran_choice: bool = False
 
     def __post_init__(self) -> None:
         unknown = set(self.houses) - set(load_houses().houses)

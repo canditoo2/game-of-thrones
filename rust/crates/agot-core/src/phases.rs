@@ -622,6 +622,11 @@ impl Game {
                 state.power = state.power.saturating_sub(*amount);
             }
         }
+        let previous_blade = if track == Track::Fiefdoms {
+            self.state.blade_holder()
+        } else {
+            None
+        };
         let throne = self.state.tracks[Track::IronThrone.index()].clone();
         let current = self.state.tracks[track.index()].clone();
         let mut ordered: SmallVec<[HouseId; 6]> = current
@@ -673,6 +678,9 @@ impl Game {
             }
         }
         self.state.tracks[track.index()] = ordered;
+        if track == Track::Fiefdoms {
+            self.state.transfer_blade_used(previous_blade);
+        }
         self.state
             .note(format!("bids resolved for {} ({bids:?})", track.as_str()));
         self.state.pending_bids.clear();
@@ -704,6 +712,11 @@ impl Game {
 
     /// Move a house to the top or bottom of an Influence track.
     pub(crate) fn move_influence(&mut self, track: Track, house: HouseId, to_top: bool) {
+        let previous_blade = if track == Track::Fiefdoms {
+            self.state.blade_holder()
+        } else {
+            None
+        };
         let current = self.state.tracks[track.index()].clone();
         let rest: SmallVec<[HouseId; 6]> = current
             .iter()
@@ -741,6 +754,9 @@ impl Game {
         }
         next.extend(dead);
         self.state.tracks[track.index()] = next;
+        if track == Track::Fiefdoms {
+            self.state.transfer_blade_used(previous_blade);
+        }
         let direction = if to_top { "top" } else { "bottom" };
         self.state.note(format!(
             "{house} moves to the {direction} of {}",

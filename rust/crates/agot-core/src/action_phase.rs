@@ -623,6 +623,9 @@ impl Game {
                 defender_card: None,
                 attacker_card_chosen: false,
                 defender_card_chosen: false,
+                doran_owner: None,
+                doran_track: None,
+                prepared: None,
                 blade_done: false,
                 attacker_blade: false,
                 defender_blade: false,
@@ -694,6 +697,9 @@ impl Game {
                 defender_card: None,
                 attacker_card_chosen: false,
                 defender_card_chosen: false,
+                doran_owner: None,
+                doran_track: None,
+                prepared: None,
                 blade_done: false,
                 attacker_blade: false,
                 defender_blade: false,
@@ -974,6 +980,46 @@ impl Game {
     // Combat Phase
     // ==================================================================
 
+    fn doran_owner(&self, battle: &PendingBattle) -> Option<HouseId> {
+        for house in [Some(battle.attacker), battle.defender]
+            .into_iter()
+            .flatten()
+        {
+            let card = if house == battle.attacker {
+                battle.attacker_card
+            } else {
+                battle.defender_card
+            };
+            if house_cards::ability_of(&self.data.house_cards, house, card) == "doran_martell" {
+                return Some(house);
+            }
+        }
+        None
+    }
+
+    /// Apply the Influence track chosen for Doran Martell, then resume at Blade.
+    pub fn choose_doran_track(&mut self, track: Track) -> Result<(), EngineError> {
+        if !self.doran_choice || self.state.phase != Phase::Combat {
+            return Ok(());
+        }
+        let Some(battle) = self.state.pending_battle.as_ref() else {
+            return Ok(());
+        };
+        if battle.stage != BattleStage::Doran {
+            return Ok(());
+        }
+        if let Some(battle) = self.state.pending_battle.as_mut() {
+            battle.doran_track = Some(track);
+            battle.doran_owner = None;
+            battle.stage = BattleStage::Cards;
+        }
+        self.prepare_battle_effects();
+        if let Some(battle) = self.state.pending_battle.as_mut() {
+            battle.stage = BattleStage::Blade;
+        }
+        self.advance()
+    }
+
     pub(crate) fn next_combat_chooser(&mut self) -> Option<HouseId> {
         // The battle is read as a snapshot and written back in short bursts: a
         // `&mut` into `pending_battle` cannot be held while the rest of the
@@ -1003,11 +1049,22 @@ impl Game {
                 if !snapshot.defender_card_chosen {
                     return snapshot.defender;
                 }
+                if self.doran_choice && snapshot.doran_track.is_none() {
+                    if let Some(owner) = self.doran_owner(snapshot) {
+                        if let Some(battle) = self.state.pending_battle.as_mut() {
+                            battle.stage = BattleStage::Doran;
+                            battle.doran_owner = Some(owner);
+                        }
+                        return self.next_combat_chooser();
+                    }
+                }
+                self.prepare_battle_effects();
                 if let Some(battle) = self.state.pending_battle.as_mut() {
                     battle.stage = BattleStage::Blade;
                 }
                 self.next_combat_chooser()
             }
+            BattleStage::Doran => snapshot.doran_owner,
             BattleStage::Blade => {
                 let attacker = snapshot.attacker;
                 let defender = snapshot.defender;
@@ -1085,6 +1142,9 @@ impl Game {
                     .map(|card| Action::play_house_card(house, Some(card)))
                     .collect()
             }
+            // Doran Martell is a desktop prompt, not an encoded action, so the
+            // action list stays empty while the GUI asks for the track.
+            BattleStage::Doran => Vec::new(),
             BattleStage::Blade => vec![Action::use_blade(house), Action::pass(house)],
             BattleStage::Casualties => {
                 let Some(result) = battle.result.as_ref() else {
@@ -1229,6 +1289,59 @@ impl Game {
         Ok(())
     }
 
+    /// Resolve card text and immediate effects before the blade step.
+    ///
+    /// The physical sequence is: reveal cards, resolve their text, then let the
+    /// blade holder decide whether to use the Valyrian Steel Blade. The pure
+    /// context is parked on `PendingBattle` so the final comparison does not
+    /// apply the same card effects twice.
+    fn prepare_battle_effects(&mut self) {
+        let Some(battle) = self.state.pending_battle.as_ref() else {
+            return;
+        };
+        if battle.prepared.is_some() {
+            return;
+        }
+        let request = BattleRequest {
+            region: battle.region,
+            attacker: battle.attacker,
+            defender: battle.defender.unwrap_or(battle.attacker),
+            attacker_units: battle.attacker_units,
+            defender_units: battle.defender_units,
+            attacker_card: battle.attacker_card,
+            defender_card: battle.defender_card,
+            attacker_order_strength: battle.attacker_order_strength,
+            defender_order_strength: battle.defender_order_strength,
+            attacker_blade: false,
+            defender_blade: false,
+            attacker_order: battle.attacker_order,
+            attacker_origin: battle.origin,
+            support_choices: Some(battle.support_choices.clone()),
+        };
+        let doran_track = battle.doran_track;
+        let context = combat::prepare_battle(
+            &self.state,
+            &self.data.map,
+            &self.data.house_cards,
+            &request,
+            doran_track,
+        );
+        let notes = context.notes.clone();
+        // Immediate board changes (Doran's track move, Queen of Thorns's Order
+        // removal, Tyrion/Aeron swaps) happen before the blade is offered.
+        house_cards::commit_deferred(&mut self.state, &self.data.house_cards, &context);
+        if let Some(battle) = self.state.pending_battle.as_mut() {
+            battle.attacker_card = context.attacker_card;
+            battle.defender_card = context.defender_card;
+            battle.attacker_units = context.attacker_units;
+            battle.defender_units = context.defender_units;
+            battle.prepared = Some(context);
+        }
+        for note in notes {
+            self.state.note(note);
+        }
+    }
+
     /// Decide the battle, then pause for the defeated player's choices.
     pub(crate) fn begin_battle_resolution(&mut self) -> Result<(), EngineError> {
         let Some(battle) = self.state.pending_battle.as_ref() else {
@@ -1255,13 +1368,19 @@ impl Game {
             // here silently grants support from any adjacent Support order.
             support_choices: Some(battle.support_choices.clone()),
         };
-        let result = combat::resolve_battle(
-            &self.state,
-            &self.data.map,
-            &self.data.house_cards,
-            &request,
-        );
-        house_cards::commit_deferred(&mut self.state, &self.data.house_cards, &result.context);
+        let prepared = battle.prepared.clone();
+        let result = match prepared.as_ref() {
+            Some(context) => combat::finish_battle(&self.state, &request, context.clone()),
+            None => combat::resolve_battle(
+                &self.state,
+                &self.data.map,
+                &self.data.house_cards,
+                &request,
+            ),
+        };
+        if prepared.is_none() {
+            house_cards::commit_deferred(&mut self.state, &self.data.house_cards, &result.context);
+        }
         // Remember the defender's Order token: if the attacker wins, the battle
         // clears it from the board and it returns to its owner's pool.
         let defender_order = self.state.region(result.region).order;

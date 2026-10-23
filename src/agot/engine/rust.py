@@ -398,6 +398,7 @@ class RustGame:
             use_westeros_decks=config.use_westeros_decks,
             deferred_battles=config.deferred_battles,
             sequential_westeros=config.sequential_westeros,
+            doran_choice=config.doran_choice,
         )
         return cls(inner, config)
 
@@ -461,6 +462,12 @@ class RustGame:
     def continue_westeros(self) -> None:
         """Resolve the next reveal/resolution step of a desktop Westeros phase."""
         self._inner.continue_westeros()
+        self._version += 1
+        self._snapshot = None
+
+    def choose_doran_track(self, track: str) -> None:
+        """Apply Doran Martell's Influence-track choice."""
+        self._inner.choose_doran_track(track)
         self._version += 1
         self._snapshot = None
 

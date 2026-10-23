@@ -594,6 +594,23 @@ pub fn resolve_battle(
     cards: &HouseCardData,
     request: &BattleRequest,
 ) -> BattleResult {
+    let context = prepare_battle(state, map, cards, request, None);
+    finish_battle(state, request, context)
+}
+
+/// Build the card-effect context, before the Valyrian Steel Blade step.
+///
+/// The phase machine calls this as soon as both House cards are revealed, then
+/// commits the immediate board changes before asking the blade holder whether
+/// to use the blade. [`finish_battle`] later compares the already-modified
+/// sides. Keeping the context also means card effects are not applied twice.
+pub fn prepare_battle(
+    state: &State,
+    map: &GameMap,
+    cards: &HouseCardData,
+    request: &BattleRequest,
+    doran_track: Option<Track>,
+) -> BattleContext {
     let region_id = request.region;
     let is_fortification = map.region(region_id).is_fortification();
     let region = state.region(region_id);
@@ -667,10 +684,27 @@ pub fn resolve_battle(
         power_costs: SmallVec::new(),
         orders_to_remove: SmallVec::new(),
         influence_move: None,
+        doran_track,
         casualty_immunity: SmallVec::new(),
         notes: Vec::new(),
     };
     house_cards::apply_pre_battle(&mut ctx, state, map, cards);
+    ctx
+}
+
+/// Compare the prepared sides and build the final battle result.
+///
+/// The immediate card effects were already applied by [`prepare_battle`]; this
+/// only applies the blade choice made after them and decides the outcome.
+pub fn finish_battle(
+    state: &State,
+    request: &BattleRequest,
+    mut ctx: BattleContext,
+) -> BattleResult {
+    // The blade is selected after the card text. A prepared context was built
+    // before the blade choice, so apply the two blade flags here.
+    ctx.attacker_side.blade = request.attacker_blade;
+    ctx.defender_side.blade = request.defender_blade;
 
     // The abilities may have changed either side's printed statistics (a swap,
     // a passive modifier), so the totals are read back from the context - the
@@ -721,7 +755,7 @@ pub fn resolve_battle(
     }
 
     BattleResult {
-        region: region_id,
+        region: request.region,
         attacker: ctx.attacker_side,
         defender: ctx.defender_side,
         winner,

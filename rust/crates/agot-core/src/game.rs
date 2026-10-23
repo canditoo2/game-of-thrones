@@ -72,6 +72,9 @@ pub struct Game {
     /// cards one at a time instead of drawing all three before the first effect.
     /// Self-play keeps the reference flow.
     pub sequential_westeros: bool,
+    /// Desktop-play choice for Doran Martell's Influence track. Training keeps
+    /// the historical deterministic default so the frozen fixtures stay valid.
+    pub doran_choice: bool,
     pub rng: Rng,
 }
 
@@ -92,6 +95,7 @@ impl Clone for Game {
             config: self.config.clone(),
             deferred_battles: self.deferred_battles,
             sequential_westeros: self.sequential_westeros,
+            doran_choice: self.doran_choice,
             rng: source.fork(),
         }
     }
@@ -120,6 +124,7 @@ impl Game {
             config,
             deferred_battles: false,
             sequential_westeros: false,
+            doran_choice: false,
             rng,
         };
         game.advance()?;

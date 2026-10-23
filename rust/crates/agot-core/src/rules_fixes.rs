@@ -935,6 +935,9 @@ fn using_the_valyrian_steel_blade_is_the_holders_choice() {
         defender_card: None,
         attacker_card_chosen: true,
         defender_card_chosen: true,
+        doran_owner: None,
+        doran_track: None,
+        prepared: None,
         blade_done: false,
         attacker_blade: false,
         defender_blade: false,
@@ -1844,6 +1847,171 @@ fn doran_moves_the_opponent_to_the_bottom_of_a_track() {
     resolve_and_apply(&mut game.state, &data.map, &data.house_cards, &request);
 
     assert_eq!(game.state.track_order(Track::Fiefdoms).last(), Some(&stark));
+}
+
+/// Doran resolves before the blade step, and a used blade stays used.
+#[test]
+fn doran_moves_influence_before_blade_and_carries_the_used_face() {
+    fn setup(used: bool) -> (Game, Arc<DataSet>, HouseId, HouseId) {
+        let (mut game, data) = clean(0);
+        let (origin, target) = adjacent_land_pair(&data);
+        let (baratheon, martell) = (house("baratheon"), house("martell"));
+        game.state.phase = Phase::Combat;
+        game.state.active_house = Some(baratheon);
+        game.state.region_mut(origin).controller = Some(baratheon);
+        game.state.region_mut(origin).units = [1, 0, 0, 0];
+        game.state.region_mut(target).controller = Some(martell);
+        game.state.region_mut(target).units = [1, 0, 0, 0];
+        let others = [
+            house("stark"),
+            house("lannister"),
+            house("greyjoy"),
+            house("tyrell"),
+        ];
+        game.state.tracks[Track::IronThrone.index()] = SmallVec::from_slice(&[
+            others[0], martell, others[1], others[2], others[3], baratheon,
+        ]);
+        game.state.tracks[Track::Fiefdoms.index()] = SmallVec::from_slice(&[
+            baratheon, martell, others[0], others[1], others[2], others[3],
+        ]);
+        game.state.tracks[Track::KingsCourt.index()] = SmallVec::from_slice(&[
+            others[0], martell, others[1], others[2], others[3], baratheon,
+        ]);
+        game.state.house_mut(baratheon).unwrap().blade_used = used;
+        game.state.house_mut(martell).unwrap().blade_used = false;
+        game.state.pending_battle = Some(PendingBattle {
+            region: target,
+            attacker: baratheon,
+            defender: Some(martell),
+            neutral: false,
+            origin: Some(origin),
+            attacker_order: None,
+            attacker_units: [1, 0, 0, 0],
+            defender_units: [1, 0, 0, 0],
+            attacker_order_strength: 0,
+            defender_order_strength: 0,
+            attacker_card: Some(card(&data, baratheon, "stannis_baratheon")),
+            defender_card: Some(card(&data, martell, "doran_martell")),
+            attacker_card_chosen: true,
+            defender_card_chosen: true,
+            doran_owner: None,
+            doran_track: None,
+            prepared: None,
+            blade_done: false,
+            attacker_blade: false,
+            defender_blade: false,
+            stage: BattleStage::Cards,
+            support_queue: SmallVec::new(),
+            support_index: 0,
+            support_choices: SmallVec::new(),
+            result: None,
+            casualties_remaining: 0,
+            retreat_options: SmallVec::new(),
+            retreat_house: None,
+            retreat_destination: None,
+            defender_order: None,
+            defender_order_house: None,
+        });
+        (game, data, baratheon, martell)
+    }
+
+    let (mut game, _data, baratheon, martell) = setup(false);
+    assert_eq!(game.next_combat_chooser(), Some(martell));
+    assert_eq!(game.state.track_order(Track::Fiefdoms)[0], martell);
+    assert_eq!(
+        game.state.pending_battle.as_ref().unwrap().stage,
+        BattleStage::Blade
+    );
+    assert!(game
+        .state
+        .pending_battle
+        .as_ref()
+        .unwrap()
+        .prepared
+        .is_some());
+    assert!(!game.state.house(baratheon).unwrap().blade_used);
+
+    let (mut game, _data, _baratheon, martell) = setup(true);
+    assert_eq!(game.next_combat_chooser(), None);
+    assert_eq!(game.state.track_order(Track::Fiefdoms)[0], martell);
+    assert!(game.state.house(martell).unwrap().blade_used);
+    assert!(game.state.pending_battle.as_ref().unwrap().blade_done);
+
+    let (mut game, _data, _baratheon, martell) = setup(false);
+    game.doran_choice = true;
+    assert_eq!(game.next_combat_chooser(), Some(martell));
+    assert_eq!(
+        game.state.pending_battle.as_ref().unwrap().stage,
+        BattleStage::Doran
+    );
+    assert_eq!(
+        game.state.track_order(Track::Fiefdoms)[0],
+        house("baratheon")
+    );
+    game.choose_doran_track(Track::Fiefdoms).unwrap();
+    assert_eq!(
+        game.state.pending_battle.as_ref().unwrap().stage,
+        BattleStage::Blade
+    );
+    assert_eq!(game.state.track_order(Track::Fiefdoms)[0], martell);
+    assert_eq!(game.state.active_house, Some(martell));
+}
+
+/// Moving a King's Court position does not remove orders already on the board.
+#[test]
+fn doran_does_not_remove_already_placed_starred_orders() {
+    let (mut game, data) = clean(0);
+    let (origin, target) = adjacent_land_pair(&data);
+    let (martell, stark, baratheon) = (house("martell"), house("stark"), house("baratheon"));
+    game.state.region_mut(origin).controller = Some(martell);
+    game.state.region_mut(origin).units = [0; 4];
+    let order_region = game
+        .state
+        .region_ids()
+        .find(|region| *region != origin && *region != target)
+        .expect("a third region");
+    let starred = OrderKey::from_name("march_plus").unwrap();
+    game.state.region_mut(order_region).order = Some(starred);
+    game.state.region_mut(order_region).order_house = Some(baratheon);
+    game.state.tracks[Track::IronThrone.index()] = SmallVec::from_slice(&[
+        baratheon,
+        martell,
+        stark,
+        house("lannister"),
+        house("greyjoy"),
+        house("tyrell"),
+    ]);
+    game.state.tracks[Track::Fiefdoms.index()] = SmallVec::from_slice(&[
+        baratheon,
+        martell,
+        stark,
+        house("lannister"),
+        house("greyjoy"),
+        house("tyrell"),
+    ]);
+    game.state.tracks[Track::KingsCourt.index()] = SmallVec::from_slice(&[
+        stark,
+        martell,
+        baratheon,
+        house("lannister"),
+        house("greyjoy"),
+        house("tyrell"),
+    ]);
+
+    let mut request = battle(
+        target,
+        martell,
+        stark,
+        [1, 0, 0, 0],
+        [1, 0, 0, 0],
+        Some(card(&data, martell, "doran_martell")),
+        None,
+    );
+    request.attacker_origin = Some(origin);
+    resolve_and_apply(&mut game.state, &data.map, &data.house_cards, &request);
+
+    assert_eq!(game.state.region(order_region).order, Some(starred));
+    assert_eq!(game.state.region(order_region).order_house, Some(baratheon));
 }
 
 /// Python: `test_tyrion_returns_the_opponents_card_and_forces_a_swap`.

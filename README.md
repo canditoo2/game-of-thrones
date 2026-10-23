@@ -196,8 +196,12 @@ attacker, defender, origin, unit counts, unit, order, support and garrison
 strengths, the **pre-card total for both sides** (so support is known before a
 House card is chosen) and revealed House cards. The log records battle stages,
 support totals, card reveals, casualties, Raven choices and Westeros cards. In
-desktop play the three Westeros cards are revealed and resolved one at a time,
-with a pause between each draw and its effect.
+combat, card text resolves before the Valyrian Steel Blade step: Doran Martell's
+owner chooses the Influence track, a new blade holder may use an unused blade,
+and an already-used blade stays used if Doran moves it. Starred orders already on
+the board are not removed when a King's Court position changes. In desktop play
+the three Westeros cards are revealed and resolved one at a time, with a pause
+between each draw and its effect.
 
 Every match also writes a local structured log under
 `checkpoints/play-logs/`:

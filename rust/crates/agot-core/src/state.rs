@@ -22,6 +22,7 @@ use crate::enums::{
     ActionStep, CardId, HouseId, OrderKey, OrderType, Phase, RegionId, Track, UnitType, N_HOUSES,
     STAR_ALLOWANCE_BY_COURT_POSITION, SUPPLY_LIMITS,
 };
+use crate::house_cards::BattleContext;
 
 /// Upper bound on regions a board may have (the base map has 58).
 pub const MAX_REGIONS: usize = 64;
@@ -355,6 +356,8 @@ pub enum BattleStage {
     NeutralResolve,
     /// Both sides pick a House card.
     Cards,
+    /// Doran Martell's owner chooses which Influence track to move.
+    Doran,
     /// The Valyrian Steel Blade holder decides whether to spend it.
     Blade,
     /// The loser destroys one unit per Sword icon.
@@ -390,6 +393,12 @@ pub struct PendingBattle {
     pub defender_card: Option<CardId>,
     pub attacker_card_chosen: bool,
     pub defender_card_chosen: bool,
+    /// Set while Doran Martell pauses for his owner's Influence-track choice.
+    pub doran_owner: Option<HouseId>,
+    pub doran_track: Option<Track>,
+    /// Card text and immediate board changes, prepared after both cards are
+    /// revealed and before the Valyrian Steel Blade step.
+    pub prepared: Option<BattleContext>,
     pub blade_done: bool,
     pub attacker_blade: bool,
     pub defender_blade: bool,
@@ -623,6 +632,33 @@ impl State {
 
     pub fn blade_holder(&self) -> Option<HouseId> {
         self.tracks[Track::Fiefdoms.index()].first().copied()
+    }
+
+    /// Carry the blade token's used side with a change of holder.
+    ///
+    /// `House::blade_used` records the token face for the current holder. When
+    /// Doran Martell or a Clash of Kings bid moves the Fiefdoms leader, the
+    /// token itself does not refresh: the new holder inherits the used face and
+    /// cannot use the blade again that round.
+    pub fn transfer_blade_used(&mut self, previous: Option<HouseId>) {
+        let current = self.blade_holder();
+        if current == previous {
+            return;
+        }
+        let used = previous
+            .and_then(|house| self.house(house))
+            .map(|house| house.blade_used)
+            .unwrap_or(false);
+        if let Some(previous) = previous {
+            if let Some(house) = self.house_mut(previous) {
+                house.blade_used = false;
+            }
+        }
+        if let Some(current) = current {
+            if let Some(house) = self.house_mut(current) {
+                house.blade_used = used;
+            }
+        }
     }
 
     pub fn raven_holder(&self) -> Option<HouseId> {

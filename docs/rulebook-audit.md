@@ -42,6 +42,7 @@ facts extracted from them are stored.
 | 10 | Starred-order allowance | Flagged unverified | Confirmed `(3, 3, 2, 1, 0, 0)` | `chibimagic` `KingsCourtTrack::FIVE_SIX_PLAYER_SPECIAL_ORDERS`; printed on the board |
 | 11 | Cross-house support | Support was automatic and only ever helped its owner | Combat opens with a Support step: each adjacent Support order's owner, in Iron Throne order, declares `attacker`, `defender` or `refuse`. A player may never support an opponent against their own units; Neutral Forces can never be supported | Rulebook pp. 17-18 and p. 26 |
 | 12 | Siege Engine support | Counted only when the *supporting* area was a Castle/Stronghold | Counts only when the *embattled* area is a Castle/Stronghold, which is what the rulebook means | Rulebook p. 18 |
+| 13 | Combat card-text / blade timing | Immediate House-card effects were applied with the final comparison, after the blade step | Card text and immediate effects resolve first; Doran can move the Fiefdoms leader before the blade decision. A new blade holder may use an unused blade; a blade used earlier remains used when it changes hands. Existing starred orders remain on the board when King's Court changes. | Rulebook combat steps; FFG forum archive topic 291514 |
 
 Correction 2 also carries a (non-mechanical) fact: House Stark is the only house
 to open with **both** a Stronghold (Winterfell) and a Castle (White Harbor).
@@ -56,7 +57,7 @@ are right:
 * Mustering costs (Footman 1, Knight 2, Ship 1, Siege Engine 2).
 * Garrison strength 2; a port holds at most 3 Ships.
 * Casualties = **swords on the winner's card minus forts on the loser's card**;
-  the Valyrian Steel Blade adds 1 strength and is spent once per battle.
+  the Valyrian Steel Blade adds 1 strength and is spent once per round (turn).
 * Strength ties are broken by **Fiefdoms** track position (defender wins an
   exact tie on strength *and* track).
 * Victory at **7** castles/strongholds.
@@ -108,7 +109,7 @@ phase pauses for them; see `docs/roadmap.md`). The chosen defaults are:
 | Aeron Damphair | Pays 2 Power and swaps in the strongest card when it is worth more than Aeron (0). |
 | Mace Tyrell | Destroys one opposing participating Footman. |
 | Queen of Thorns | Removes the first opposing Order in a neighbouring area (id order), never the attacker's origin March. |
-| Doran Martell | Moves the opponent down the track on which they rank highest. |
+| Doran Martell | Desktop play asks the card's owner which Influence track to use; training uses the track on which the opponent ranks highest. Doran resolves before the Valyrian Steel Blade step, so a new holder may use an unused blade. |
 | Patchface | Discards the opponent's strongest card in hand. |
 
 All other card abilities are fully determined (no sub-choice).
