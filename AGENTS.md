@@ -5,15 +5,15 @@ rules engine, search and encoder (`rust/`) behind a thin Python facade, an optio
 scorer network (`nn/`) and the self-play training loop (`training/`). Everything is driven by
 the `agot` CLI.
 
-**Current direction (2026-10-21):** `run3` is training on Colab (checkpoints under
-`/content/drive/MyDrive/agot/run3`); this PC remains the build-and-verify machine and must not
-start heavy runs unless asked. The pipeline was rebuilt after the two void runs (below), so
-watch the policy loss and the best-checkpoint eval rather than assuming the last checkpoint is
-strongest.
+**Current direction (2026-10-27):** the next Colab run is **`run4`** (checkpoints under
+`/content/drive/MyDrive/agot/run4`); this PC remains the build-and-verify machine and must not
+start heavy runs unless asked. `run3` predates the sequential Westeros/PIMC changes and is a
+pre-change baseline, not a resume target. Watch the policy-loss trend and the best-checkpoint
+eval rather than assuming the last checkpoint is strongest.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
-- Tests: `.venv\Scripts\python -m pytest -q` (179 tests; the rules/combat/encoder
+- Tests: `.venv\Scripts\python -m pytest -q` (180 tests; the rules/combat/encoder
   regressions live in Rust — see `cargo test --release` below). When piped in PowerShell
   the final summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`

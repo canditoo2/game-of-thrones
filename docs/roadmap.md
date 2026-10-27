@@ -198,15 +198,14 @@ they should be fixed before expecting a strong agent.
     Storms* actually forbid placing the restricted order type.
 11. **Recycling and deck exhaustion.** The physical decks are finite across ten
     rounds; reshuffling behaviour should be verified.
-12. **Multi-destination marches.** *(done for desktop play)* `GameConfig` has a
-    `deferred_battles` option: under one March Order the engine queues the one
-    battle, allows further non-battle destinations or a finish action, then
-    resolves the battle after the order is consumed. The desktop GUI enables
-    it; Python self-play training keeps it off by default, and the frozen
-    parity fixtures pin that immediate-battle path. Every config copy and
-    native driver spec carries the flag, so a training experiment can enable it
-    without changing the fixtures. Ports, port capture and ship mustering are
-    done.
+12. **Multi-destination marches.** *(done for desktop, console, training and
+    evaluation)* `GameConfig` has a `deferred_battles` option: under one March
+    Order the engine queues the one battle, allows further non-battle
+    destinations or a finish action, then resolves the battle after the order is
+    consumed. The desktop GUI, console play, training and evaluation enable it;
+    the frozen parity fixtures keep the immediate-battle path. Every config copy
+    and native driver spec carries the flag. Ports, port capture and ship
+    mustering are done.
 
 13. **Sequential Westeros reveal.** *(done for desktop, console, training and
     evaluation)* `GameConfig` has a `sequential_westeros` option: in rounds 2-10

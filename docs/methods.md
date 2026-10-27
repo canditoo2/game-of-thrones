@@ -142,7 +142,7 @@ Kept short; each entry is *what it is → pro → con → verdict*.
 5. **Table play (G3).** Meta/kingmaking rules and, for live negotiation, an LLM
    diplomacy layer over a strong engine, plus an interface to play one seat.
 
-## Runbook: the first credible run (run3)
+## Runbook: the next credible run (run4)
 
 Heavy runs happen on the training machine; the build machine only prepares and
 verifies. The commands below are the whole procedure. On Google Colab,
@@ -156,10 +156,10 @@ checkpoints on Drive, resume across disconnects).
      --eval-games 12 --eval-every 2 --checkpoint checkpoints/smoke/agot.pt
    ```
 
-   Gate: policy loss must fall **below ~2.0** (the log of the candidate count)
-   and keep falling. A flat ~2.0 for every iteration is the old broken-head
-   signature, not convergence. Kill the run once and restart it with `--resume`
-   to prove recovery, and render
+   Gate: policy loss must **move and trend down**; the absolute value depends on
+   the number of legal candidates, and the generic choice actions raised it
+   above the old ~2.0 signature. Kill the run once and restart it with
+   `--resume` to prove recovery, and render
    `agot report --checkpoint checkpoints/smoke/agot.pt`.
 
 1. **Calibrate the field.** The periodic gauntlet fills five seats round-robin
@@ -170,24 +170,24 @@ checkpoints on Drive, resume across disconnects).
    agot gauntlet --candidate random --opponents random,greedy --games 60
    ```
 
-2. **Launch run3.**
+2. **Launch run4.**
 
    ```bash
    agot train --iterations 120 --games 48 --workers 12 --batch-games 4 \
      --opponent-rate 0.2 --train-threads 4 \
      --temperature-rounds 3 --final-temperature 0.25 \
      --eval-games 30 --eval-every 10 \
-     --checkpoint checkpoints/run3/agot.pt
+     --checkpoint checkpoints/run4/agot.pt
    ```
 
    Watch it in another terminal:
 
    ```bash
-   agot report --checkpoint checkpoints/run3/agot.pt --iterations 120 --watch 15 --open
+   agot report --checkpoint checkpoints/run4/agot.pt --iterations 120 --watch 15 --open
    ```
 
    Interrupt it at any time; continue with the same command plus
-   `--resume checkpoints/run3/agot.pt`.
+   `--resume checkpoints/run4/agot.pt`.
 
 3. **Decision gates.** By iteration ~20 the policy loss must be trending down,
    not flat. By iteration ~50-70 the gauntlet win rate must sit above the greedy
@@ -197,12 +197,12 @@ checkpoints on Drive, resume across disconnects).
 4. **Verify the result.** Measure the best checkpoint directly:
 
    ```bash
-   agot gauntlet --candidate net:checkpoints/run3/agot-best.pt --opponents random --games 200
+   agot gauntlet --candidate net:checkpoints/run4/agot-best.pt --opponents random --games 200
    ```
 
    G1 is met when this clears the greedy baseline (38.3% against five random
    opponents) with a CI that excludes it. For the league view:
 
    ```bash
-   agot round-robin --checkpoints checkpoints/run3/agot.pt checkpoints/run3/agot-best.pt --games 30
+   agot round-robin --checkpoints checkpoints/run4/agot.pt checkpoints/run4/agot-best.pt --games 30
    ```

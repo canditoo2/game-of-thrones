@@ -569,7 +569,9 @@ def play_interactive(
     if max_steps is not None and max_steps < 0:
         raise ValueError("max_steps cannot be negative")
     if config is None:
-        config = GameConfig(seed=seed, sequential_westeros=True)
+        config = GameConfig(
+            seed=seed, sequential_westeros=True, deferred_battles=True
+        )
     if human_house not in config.houses:
         raise ValueError(
             f"unknown house {human_house!r}; choose from {list(config.houses)}"

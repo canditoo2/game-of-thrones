@@ -134,6 +134,7 @@ def _play_chunk(configs: list[GameConfig], options: dict) -> list[GameRecord]:
                 temperature_schedule=options["temperature_schedule"],
                 seed=options["seed"] + start,
                 opponents=opponents,
+                batch_games=batch,
             )
         )
     return records

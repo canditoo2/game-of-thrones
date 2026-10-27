@@ -4,9 +4,9 @@ Examples::
 
     agot demo --policy greedy --seed 1
     agot evaluate --a random --b greedy --games 20
-    agot gauntlet --candidate net:checkpoints/run3/agot-best.pt --opponents random
-    agot round-robin --checkpoints checkpoints/run3/agot.pt checkpoints/run3/agot-best.pt
-    agot play --checkpoint checkpoints/run3/agot-best.pt --house stark
+    agot gauntlet --candidate net:checkpoints/run4/agot-best.pt --opponents random
+    agot round-robin --checkpoints checkpoints/run4/agot.pt checkpoints/run4/agot-best.pt
+    agot play --checkpoint checkpoints/run4/agot-best.pt --house stark
     agot train --iterations 100 --games 48 --workers 12 --checkpoint checkpoints/agot.pt
     agot report --checkpoint checkpoints/agot.pt --open
 
@@ -76,7 +76,7 @@ def _policy_factory(name: str, **options):
         if not path:
             raise SystemExit(
                 "the net policy needs a checkpoint: use net:<path> "
-                "(e.g. --candidate net:checkpoints/run3/agot-best.pt)"
+                "(e.g. --candidate net:checkpoints/run4/agot-best.pt)"
             )
         model = _load_net(path)
         from agot.nn.model import NeuralEvaluator
@@ -101,7 +101,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
     from agot.training.selfplay import play_game
 
     config = GameConfig(
-        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True
+        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True, deferred_battles=True
     )
     factory = _policy_factory(
         args.policy,
@@ -146,7 +146,7 @@ def cmd_play(args: argparse.Namespace) -> int:
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
     config = GameConfig(
-        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True
+        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True, deferred_battles=True
     )
     if args.a.startswith("net:") and args.b.startswith("net:"):
         from agot.training.evaluate import evaluate_models_match
@@ -199,7 +199,7 @@ def cmd_gauntlet(args: argparse.Namespace) -> int:
     """Measure one candidate's single-seat win rate against a field."""
     names = [name for name in args.opponents.split(",") if name]
     config = GameConfig(
-        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True
+        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True, deferred_battles=True
     )
 
     # A saved network against scripted opponents is the training gauntlet and
@@ -293,7 +293,7 @@ def cmd_round_robin(args: argparse.Namespace) -> int:
             config=GameConfig(
                 seed=args.seed,
                 max_rounds=args.max_rounds,
-                sequential_westeros=True,
+                sequential_westeros=True, deferred_battles=True,
             ),
             seed=args.seed,
         )
@@ -351,7 +351,7 @@ def _run_training(args: argparse.Namespace) -> int:
         torch.set_num_threads(train_threads)
 
     config = GameConfig(
-        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True
+        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True, deferred_battles=True
     )
     model = (
         PolicyValueNet.load(args.resume)

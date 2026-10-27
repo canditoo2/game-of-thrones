@@ -47,8 +47,8 @@ class GameConfig:
     #: Draw and apply the three Westeros cards each round from round two.
     use_westeros_decks: bool = True
     #: Queue a March order's battle until all its destinations are chosen.
-    #: Desktop play enables this; training keeps the legacy immediate battle
-    #: so the frozen reference fixtures stay valid.
+    #: Desktop/console play, training and evaluation enable this; the dataclass
+    #: default stays False so raw frozen-fixture builders can opt out.
     deferred_battles: bool = False
     #: Reveal and resolve the three Westeros cards one at a time, resolving
     #: each card's sub-phase (mustering, supply, bidding, a Wildling attack)

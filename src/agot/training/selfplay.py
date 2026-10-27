@@ -134,7 +134,9 @@ def self_play(
     ``policy_factory(house, seed) -> Policy`` is called once per house so that
     each seat gets an independently seeded instance.
     """
-    config = config or GameConfig(seed=seed)
+    config = config or GameConfig(
+        seed=seed, sequential_westeros=True, deferred_battles=True
+    )
     policies = {
         house: policy_factory(house, seed + index)
         for index, house in enumerate(config.houses)
@@ -164,6 +166,7 @@ def batched_self_play(
     opponents: list[dict[str, Policy]] | None = None,
     record_opponents: bool = False,
     step_limit: int = DEFAULT_STEP_LIMIT,
+    batch_games: int = 4,
 ) -> list[GameRecord]:
     """Play several games in lockstep, batching every network call.
 
@@ -210,6 +213,7 @@ def batched_self_play(
         opponents=opponents,
         record_opponents=record_opponents,
         step_limit=step_limit,
+        batch_games=batch_games,
     )
     if rust_records is not None:
         LAST_BACKEND = "rust"

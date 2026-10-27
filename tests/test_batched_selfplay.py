@@ -62,6 +62,27 @@ def test_batched_sequential_westeros_does_not_truncate() -> None:
     assert records[0].examples
 
 
+def test_batched_selfplay_forwards_batch_games(monkeypatch) -> None:
+    from agot.training import rust_engine
+
+    captured: dict = {}
+
+    def fake(evaluator, configs, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(rust_engine, "try_batched_self_play", fake)
+    records = batched_self_play(
+        UniformEvaluator(),
+        [GameConfig(seed=1)],
+        simulations=1,
+        batch_games=12,
+    )
+
+    assert records == []
+    assert captured["batch_games"] == 12
+
+
 def test_worker_chunking_keeps_every_game_seed() -> None:
     """Round-robin chunks must not replay a neighbour's seed.
 

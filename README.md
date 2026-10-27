@@ -78,7 +78,7 @@ agot demo --policy greedy --seed 1
 # Open the desktop game. The setup window chooses your house, the opponent,
 # the checkpoint and the search budget before the match starts. A run
 # directory picks agot-best.pt when it exists (otherwise agot.pt).
-agot play --checkpoint checkpoints/run3
+agot play --checkpoint checkpoints/run4
 
 # Head-to-head over several games (random vs greedy).
 agot evaluate --a random --b greedy --games 20
@@ -88,11 +88,11 @@ agot gauntlet --candidate greedy --opponents random --games 60
 
 # Evaluate a saved checkpoint: any policy argument accepts net:<path>, which
 # searches with MCTS over that network at the given --simulations budget.
-agot gauntlet --candidate net:checkpoints/run3/agot-best.pt --opponents random --games 200
+agot gauntlet --candidate net:checkpoints/run4/agot-best.pt --opponents random --games 200
 
 # League table: each checkpoint plays one rotating seat against the other
 # checkpoints (plus random/greedy anchors), with a Wilson 95% interval.
-agot round-robin --checkpoints checkpoints/run3/agot.pt checkpoints/run3/agot-best.pt --games 30
+agot round-robin --checkpoints checkpoints/run4/agot.pt checkpoints/run4/agot-best.pt --games 30
 
 # See the legal actions at the start of a game.
 agot legal
@@ -148,9 +148,9 @@ Run the Python layer with `pytest -q`, the engine, search and encoder gates with
 it clones this repository, mounts Drive, builds (or reuses) the abi3 wheel and
 then launches a resumable training run whose checkpoints are written to Google
 Drive, so a disconnected runtime continues from the last iteration. The wheel
-is cached per commit, so a reconnected session installs it in seconds instead
-of rebuilding Rust; the first session for a new commit takes a couple of
-minutes. A CPU runtime is fine — the search is CPU-bound, so a GPU adds little.
+is cached per source tree (not per commit), so a reconnected session or a
+docs-only change installs it in seconds instead of rebuilding Rust; the first
+session for a new source tree takes a few minutes. A CPU runtime is fine — the search is CPU-bound, so a GPU adds little.
 Open it in Colab (upload the file, or *File → Open notebook → GitHub*) and run
 the cells top to bottom.
 
@@ -171,7 +171,7 @@ Lannister, Stark, Greyjoy, Tyrell or Martell — and to choose the opponent and
 checkpoint:
 
 ```powershell
-agot play --checkpoint checkpoints\run3
+agot play --checkpoint checkpoints\run4
 ```
 
 A run directory is convenient: the window resolves `agot-best.pt` when it
@@ -280,14 +280,12 @@ These are real deviations from the physical game. They are tracked in
 * **Neutral forces** (King's Landing 5, The Eyrie 6) defend with their printed
   strength; ties go to the attacker and they never use a House card or the
   Valyrian Steel Blade.
-* **Multi-destination marches.** Desktop play enables deferred battles: under
-  one March Order you choose all destinations first, then the one battle is
-  resolved when the order is finished. Python self-play training keeps
-  `deferred_battles=False` (the immediate-battle path); the frozen differential
-  fixtures pin that same path. The setting is copied through every training and
-  evaluation config, so an experiment can enable it without touching the
-  fixtures. The desktop picker puts the largest stack first and warns before
-  attacking with less than the full eligible force.
+* **Multi-destination marches.** Desktop and console play, training and
+  evaluation enable deferred battles: under one March Order you choose all
+  destinations first, then the one battle is resolved when the order is
+  finished. The frozen differential fixtures keep the immediate-battle path, so
+  they stay reproducible. The desktop picker puts the largest stack first and
+  warns before attacking with less than the full eligible force.
 
 The board data is also partly unverified; see [`PROVENANCE.md`](PROVENANCE.md)
 for exactly which values are trusted and which need checking against the

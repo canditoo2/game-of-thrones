@@ -25,6 +25,9 @@ the rules engine keeps working on a machine without torch.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import numpy as np
 import torch
 from torch import nn
@@ -208,7 +211,12 @@ class PolicyValueNet(nn.Module):
 
     # -- persistence -----------------------------------------------------
 
-    def save(self, path: str) -> None:
+    def save(self, path: str | Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic rename: a Colab/Drive disconnect during torch.save must not
+        # leave a truncated checkpoint that the next session tries to resume.
+        temporary = path.with_suffix(path.suffix + ".tmp")
         torch.save(
             {
                 "state_dict": self.state_dict(),
@@ -220,8 +228,9 @@ class PolicyValueNet(nn.Module):
                     "n_houses": self.n_houses,
                 },
             },
-            path,
+            temporary,
         )
+        os.replace(temporary, path)
 
     @classmethod
     def load(cls, path: str, map_location: str = "cpu") -> PolicyValueNet:

@@ -14,6 +14,7 @@ iterations, so a resumed run rebuilds it from fresh self-play.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,21 +49,30 @@ class RunState:
     def save(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Write beside the target and rename atomically: a Colab/Drive
+        # disconnect must never leave a half-written resume file.
+        temporary = path.with_suffix(path.suffix + ".tmp")
         torch.save(
             {
                 "iteration": self.iteration,
                 "best_rate": self.best_rate,
                 "trainer": self.trainer,
             },
-            path,
+            temporary,
         )
+        os.replace(temporary, path)
 
     @classmethod
     def load(cls, path: str | Path) -> RunState | None:
         path = Path(path)
         if not path.exists():
             return None
-        payload = torch.load(path, map_location="cpu", weights_only=False)
+        try:
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+        except Exception:
+            # A truncated file from an interrupted write is not a resumable
+            # state; let the caller start from the weights instead.
+            return None
         return cls(
             iteration=int(payload.get("iteration", 0)),
             best_rate=float(payload.get("best_rate", -1.0)),
@@ -80,9 +90,20 @@ class RunLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
+            handle.flush()
 
     def records(self) -> list[dict]:
         if not self.path.exists():
             return []
+        records: list[dict] = []
         with self.path.open("r", encoding="utf-8") as handle:
-            return [json.loads(line) for line in handle if line.strip()]
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    # A disconnect can truncate the last append; keep the
+                    # complete records and ignore the partial line.
+                    continue
+        return records
