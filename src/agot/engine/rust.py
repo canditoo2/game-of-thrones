@@ -197,6 +197,20 @@ class StateView:
         return self._game._inner.pending_battle()
 
     @property
+    def pending_choice(self) -> dict | None:
+        """The generic (card/Wildling) choice the engine is waiting for.
+
+        Older extensions do not expose it; the helper in
+        :mod:`agot.choice_context` then falls back to action context tags and
+        phase inference.
+        """
+        getter = getattr(self._game._inner, "pending_choice", None)
+        if getter is None:
+            return None
+        value = getter()
+        return dict(value) if isinstance(value, dict) else None
+
+    @property
     def westeros_waiting(self) -> bool:
         return bool(self._game._inner.westeros_waiting())
 
@@ -399,6 +413,8 @@ class RustGame:
             deferred_battles=config.deferred_battles,
             sequential_westeros=config.sequential_westeros,
             doran_choice=config.doran_choice,
+            wildling_tie_choice=config.wildling_tie_choice,
+            choice_choices=config.choice_choices,
         )
         return cls(inner, config)
 
@@ -454,6 +470,8 @@ class RustGame:
                 amount=action.amount,
                 units=action.units,
                 establish=action.establish,
+                card_house=getattr(action, "card_house", None),
+                choice_tag=getattr(action, "choice_tag", None),
                 _handle=action,
             )
             for action in self._inner.legal_actions()
@@ -478,13 +496,23 @@ class RustGame:
         keeps this honest: an action the engine did not offer cannot be played.
         """
         for candidate in self._inner.legal_actions():
+            candidate_card_house = getattr(candidate, "card_house", None)
+            action_card_house = getattr(action, "card_house", None)
+            candidate_choice_tag = getattr(candidate, "choice_tag", None)
+            action_choice_tag = getattr(action, "choice_tag", None)
+            order_matches = candidate.order == action.order or (
+                candidate_choice_tag is not None
+                and candidate_choice_tag == action_choice_tag
+            )
             if (
                 candidate.kind == action.kind.value
                 and candidate.house == action.house
                 and candidate.region == action.region
                 and candidate.target == action.target
-                and candidate.order == action.order
+                and order_matches
                 and candidate.card == action.card
+                and (action_card_house is None or candidate_card_house == action_card_house)
+                and (action_choice_tag is None or candidate_choice_tag == action_choice_tag)
                 and candidate.unit == action.unit
                 and candidate.side == action.side
                 and candidate.amount == action.amount

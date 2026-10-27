@@ -219,6 +219,30 @@ def _model_config(model) -> dict:
     }
 
 
+def configs_for(plan: SelfPlayPlan, base: GameConfig) -> list[GameConfig]:
+    """The per-game configs for a plan, preserving every option.
+
+    Copies must list every field explicitly: a new `GameConfig` flag silently
+    falls back to its default here otherwise, which is how training once lost
+    the desktop-only choice switches. Keep this in step with `GameConfig`.
+    """
+    return [
+        GameConfig(
+            houses=base.houses,
+            max_rounds=plan.max_rounds,
+            victory_castles=base.victory_castles,
+            seed=plan.seed + index,
+            use_westeros_decks=base.use_westeros_decks,
+            deferred_battles=base.deferred_battles,
+            sequential_westeros=base.sequential_westeros,
+            doran_choice=base.doran_choice,
+            wildling_tie_choice=base.wildling_tie_choice,
+            choice_choices=base.choice_choices,
+        )
+        for index in range(plan.games)
+    ]
+
+
 def parallel_self_play(
     model,
     plan: SelfPlayPlan,
@@ -234,17 +258,7 @@ def parallel_self_play(
     for this call exactly as before.
     """
     base = base_config or GameConfig()
-    configs = [
-        GameConfig(
-            houses=base.houses,
-            max_rounds=plan.max_rounds,
-            victory_castles=base.victory_castles,
-            seed=plan.seed + index,
-            use_westeros_decks=base.use_westeros_decks,
-            doran_choice=base.doran_choice,
-        )
-        for index in range(plan.games)
-    ]
+    configs = configs_for(plan, base)
     if not configs:
         return []
 

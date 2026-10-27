@@ -17,6 +17,12 @@ import random
 import numpy as np
 
 from agot.agents.base import Policy, one_hot_target
+from agot.choice_context import (
+    ChoiceContext,
+    card_choice_mode,
+    choice_track,
+    resolve_choice_context,
+)
 from agot.engine.actions import Action, ActionKind
 from agot.engine.enums import ORDERS_BY_KEY, OrderType, Phase, Track, UnitType
 from agot.engine.game import Game
@@ -58,6 +64,16 @@ def _unit_strength(state, region_id: str, house: str) -> int:
         for unit, count in region.units.items()
         if unit is not UnitType.SIEGE
     )
+
+
+def _unit_value(unit) -> float:
+    """Unit value, tolerant of a missing or already-parsed unit type."""
+    if isinstance(unit, UnitType):
+        return _UNIT_VALUE.get(unit, 1.0)
+    try:
+        return _UNIT_VALUE.get(UnitType(unit), 1.0)
+    except (TypeError, ValueError):
+        return 1.0
 
 
 def _order_modifier(state, region_id: str, house: str, side: str) -> int:
@@ -102,6 +118,9 @@ class GreedyPolicy(Policy):
 
     def _score(self, game: Game, action: Action) -> float:
         kind = action.kind
+        context = resolve_choice_context(game, action)
+        if context is not None:
+            return self._score_choice(game, action, context)
         if kind is ActionKind.PASS:
             return -1.0
         if kind is ActionKind.PLACE_ORDER:
@@ -128,7 +147,7 @@ class GreedyPolicy(Policy):
             return self._score_support(game, action)
         if kind in (ActionKind.DISBAND, ActionKind.CHOOSE_CASUALTY):
             # Destroying a unit is a pure loss, so prefer the cheapest one.
-            return -_UNIT_VALUE.get(UnitType(action.unit), 1.0)
+            return -_unit_value(action.unit)
         return 0.0
 
     def _score_place_order(self, game: Game, action: Action) -> float:
@@ -350,6 +369,368 @@ class GreedyPolicy(Policy):
             return 1.0 + 0.6 * (enemy - own)
         return 0.5
 
+    def _score_choice(
+        self, game: Game, action: Action, context: ChoiceContext
+    ) -> float:
+        """Score a generic card/Wildling choice by what it actually does.
+
+        The same action kinds are reused for very different tasks, so scoring
+        them by kind (a ``PLAY_HOUSE_CARD`` is a card strength, a
+        ``CHOOSE_CASUALTY`` is a lost unit) is wrong. The pending choice says
+        which decision it is; these branches score the consequence instead.
+        """
+        purpose = context.purpose
+        if purpose == "doran":
+            return self._score_westeros_choice(game, action)
+        if purpose == "wildling_tie":
+            # The Iron Throne holder breaks the tie; every tied bidder is
+            # equivalent for this heuristic, so keep the choice neutral.
+            return 0.0
+        if action.kind is ActionKind.PASS:
+            return self._score_decline(context)
+        if purpose in ("queen_order", "cersei_order"):
+            return self._score_order_removal(game, action)
+        if purpose == "renly_footman":
+            return self._score_renly(game, action)
+        if purpose == "horde_fort":
+            return self._score_horde_fort(game, action, context)
+        if purpose == "horde_muster":
+            return self._score_horde_muster(game, action)
+        if purpose in ("king_beyond_other", "king_beyond_highest"):
+            return self._score_king_beyond(game, action, context)
+        if purpose == "preemptive_raid":
+            return self._score_preemptive(game, action)
+        if purpose == "preemptive_highest":
+            return self._score_preemptive_track(game, action, context)
+        if purpose == "crow_replace_knight":
+            return self._score_crow_knight(game, action)
+        if purpose == "crow_upgrade_footman":
+            return self._score_crow_upgrade(game, action)
+        if purpose == "generic_destroy":
+            return self._score_destroy(game, action)
+        if purpose == "tyrion_use":
+            option = action.amount if action.amount is not None else 0
+            return 0.3 if option else 0.0
+        if purpose == "tyrion_card":
+            return self._score_card_action(game, action, context, "replace")
+        if purpose == "aeron_card":
+            return self._score_card_action(game, action, context, "aeron")
+        if purpose == "robb_retreat":
+            option = action.amount if action.amount is not None else 0
+            return 0.3 if option else 0.0
+        if purpose == "card_discard_or_retrieve":
+            mode = card_choice_mode(context, action, game) or "discard"
+            return self._score_card_action(game, action, context, mode)
+        # A payload this version does not recognise: fall back on the kind.
+        if context.kind == "card":
+            mode = card_choice_mode(context, action, game) or "discard"
+            return self._score_card_action(game, action, context, mode)
+        if context.kind == "unit":
+            return self._score_destroy(game, action)
+        if context.kind == "region":
+            return self._score_region_choice(game, action, context)
+        if context.kind == "track":
+            return self._score_king_beyond(game, action, context)
+        if context.kind == "option":
+            return self._score_preemptive(game, action)
+        if context.kind == "muster":
+            return self._score_horde_muster(game, action)
+        return 0.0
+
+    def _score_decline(self, context: ChoiceContext) -> float:
+        """An optional decline is neutral; it can beat a harmful choice."""
+        if context.purpose in (
+            "horde_fort",
+            "preemptive_raid",
+            "king_beyond_other",
+            "king_beyond_highest",
+        ):
+            return -5.0
+        if context.allow_none:
+            return 0.0
+        if context.purpose in (
+            "crow_replace_knight",
+            "crow_upgrade_footman",
+            "generic_destroy",
+        ):
+            return -2.0
+        return 0.0
+
+    def _score_order_removal(self, game: Game, action: Action) -> float:
+        state = game.state
+        region_id = action.region or ""
+        region = state.regions.get(region_id)
+        if region is None or region.order is None:
+            return -0.5
+        if region.order_house == action.house:
+            return -2.0
+        order_type = ORDERS_BY_KEY[region.order].order_type
+        base = {
+            OrderType.SUPPORT: 3.0,
+            OrderType.CONSOLIDATE_POWER: 2.0,
+            OrderType.DEFEND: 1.5,
+            OrderType.MARCH: 1.0,
+            OrderType.RAID: 0.5,
+        }.get(order_type, 0.5)
+        static = game.map.regions.get(region_id)
+        if static is not None and static.is_fortification:
+            base += 0.5
+        if any(
+            state.regions.get(neighbour) is not None
+            and state.regions[neighbour].controller == action.house
+            for neighbour in game.map.neighbours_of(region_id)
+        ):
+            base += 0.2
+        return base
+
+    def _score_renly(self, game: Game, action: Action) -> float:
+        gain = _UNIT_VALUE[UnitType.KNIGHT] - _UNIT_VALUE[UnitType.FOOTMAN]
+        region_id = action.region or ""
+        static = game.map.regions.get(region_id)
+        if static is not None and static.is_fortification:
+            gain += 0.5
+        gain += 0.08 * min(self._threat(game, region_id, action.house), 6.0)
+        return gain
+
+    def _score_horde_fort(
+        self, game: Game, action: Action, context: ChoiceContext
+    ) -> float:
+        region_id = action.region or ""
+        region = game.state.regions.get(region_id)
+        if region is None:
+            return -5.0
+        count = context.count or context.remaining or 1
+        values: list[float] = []
+        for unit, amount in region.units.items():
+            values.extend([_UNIT_VALUE.get(unit, 1.0)] * amount)
+        for unit, amount in region.routed.items():
+            values.extend([_UNIT_VALUE.get(unit, 1.0) * 0.7] * amount)
+        values.sort()
+        loss = sum(values[:count])
+        if len(values) < count:
+            # The card falls back to destroying anywhere; we lose control of
+            # where the remaining losses land.
+            loss += 0.5 * (count - len(values))
+        # Take losses where the enemy is not massing on the border.
+        loss += 0.06 * min(self._threat(game, region_id, action.house), 6.0)
+        return -loss
+
+    def _score_horde_muster(self, game: Game, action: Action) -> float:
+        if action.kind is ActionKind.PASS:
+            return 0.0
+        if action.kind is ActionKind.MUSTER:
+            return self._score_muster(game, action) + 1.0
+        if action.kind is ActionKind.UPGRADE:
+            return self._score_upgrade(game, action) + 1.0
+        region_id = action.region or ""
+        region = game.state.regions.get(region_id)
+        static = game.map.regions.get(region_id)
+        if region is None or static is None:
+            return -1.0
+        score = 1.5 * region.mustering_points
+        if static.is_fortification:
+            score += 1.0
+        if region.controller == action.house:
+            score += 2.0
+        return score
+
+    def _score_region_choice(
+        self, game: Game, action: Action, context: ChoiceContext
+    ) -> float:
+        region_id = action.region or ""
+        region = game.state.regions.get(region_id)
+        static = game.map.regions.get(region_id)
+        if region is None or static is None:
+            return -1.0
+        score = 0.0
+        if static.is_fortification:
+            score += 1.0
+        if region.controller == action.house:
+            score += 0.5
+        if context.purpose == "horde_muster":
+            score += 1.5 * region.mustering_points
+        return score
+
+    def _score_king_beyond(
+        self, game: Game, action: Action, context: ChoiceContext
+    ) -> float:
+        track = choice_track(context, action)
+        if track is None:
+            return 0.0
+        house = action.house or context.house or ""
+        position = game.state.track_position(house, track)
+        if position <= 0:
+            return 0.0
+        value = _TRACK_VALUE.get(track.value, 1.0)
+        if context.purpose == "king_beyond_highest":
+            # Moving to the top gains one position per step (position 1 is top).
+            gain = 0.35 * (position - 1) * value
+            if position > 1:
+                gain += self._track_leader_bonus(track, 1)
+            return gain
+        # Moving to the bottom costs one position per step away from the top.
+        loss = 0.35 * (6 - position) * value
+        loss += self._track_leader_bonus(track, position) * 1.5
+        return -loss
+
+    @staticmethod
+    def _track_leader_bonus(track: Track, position: int) -> float:
+        """Extra value of holding the top of a track."""
+        if position > 2:
+            return 0.0
+        if track is Track.FIEFDOMS:
+            return 1.2 if position == 1 else 0.5
+        if track is Track.KINGS_COURT:
+            return 1.0 if position == 1 else 0.4
+        return 0.8 if position == 1 else 0.3
+
+    def _score_preemptive(self, game: Game, action: Action) -> float:
+        house = action.house or ""
+        option = action.amount if action.amount is not None else -1
+        if option == 0:
+            return -self._destroy_cost(game, house, 2)
+        if option == 1:
+            positions = [
+                (game.state.track_position(house, track), track)
+                for track in Track
+            ]
+            positions = [(position, track) for position, track in positions if position > 0]
+            if not positions:
+                return -1.0
+            position, track = min(positions, key=lambda item: item[0])
+            value = _TRACK_VALUE.get(track.value, 1.0)
+            loss = 0.7 * value
+            loss += self._track_leader_bonus(track, position)
+            return -loss
+        return 0.0
+
+    def _score_preemptive_track(
+        self, game: Game, action: Action, context: ChoiceContext
+    ) -> float:
+        track = choice_track(context, action)
+        if track is None:
+            return -1.0
+        house = action.house or context.house or ""
+        position = game.state.track_position(house, track)
+        value = _TRACK_VALUE.get(track.value, 1.0)
+        loss = 0.7 * value
+        loss += self._track_leader_bonus(track, position)
+        return -loss
+
+    def _destroy_cost(self, game: Game, house: str, count: int) -> float:
+        """Cheapest way to lose ``count`` units anywhere the house controls."""
+        values: list[float] = []
+        for region_id in game.state.controlled_regions(house):
+            region = game.state.regions[region_id]
+            for unit, amount in region.units.items():
+                values.extend([_UNIT_VALUE.get(unit, 1.0)] * amount)
+            for unit, amount in region.routed.items():
+                values.extend([_UNIT_VALUE.get(unit, 1.0) * 0.7] * amount)
+        values.sort()
+        return sum(values[:count])
+
+    def _score_crow_knight(self, game: Game, action: Action) -> float:
+        loss = _UNIT_VALUE[UnitType.KNIGHT] - _UNIT_VALUE[UnitType.FOOTMAN]
+        region_id = action.region or ""
+        if action.amount == 1:
+            # The routed Knight was already fighting at 0 strength.
+            loss *= 0.7
+        static = game.map.regions.get(region_id)
+        if static is not None and static.is_fortification:
+            loss += 0.2
+        loss += 0.06 * min(self._threat(game, region_id, action.house), 6.0)
+        region = game.state.regions.get(region_id)
+        if region is not None:
+            other_knights = region.units.get(UnitType.KNIGHT, 0)
+            loss -= 0.1 * min(other_knights, 3)
+        return -max(0.0, loss)
+
+    def _score_crow_upgrade(self, game: Game, action: Action) -> float:
+        gain = _UNIT_VALUE[UnitType.KNIGHT] - _UNIT_VALUE[UnitType.FOOTMAN]
+        if action.amount == 1:
+            gain *= 0.8  # a routed Knight starts routed
+        region_id = action.region or ""
+        static = game.map.regions.get(region_id)
+        if static is not None and static.is_fortification:
+            gain += 0.5
+        gain += 0.08 * min(self._threat(game, region_id, action.house), 6.0)
+        return gain
+
+    def _score_destroy(self, game: Game, action: Action) -> float:
+        value = _unit_value(action.unit)
+        if action.amount == 1:
+            value *= 0.7
+        region_id = action.region or ""
+        value += 0.05 * min(self._threat(game, region_id, action.house), 6.0)
+        return -value
+
+    def _score_card_action(
+        self,
+        game: Game,
+        action: Action,
+        context: ChoiceContext,
+        mode: str,
+    ) -> float:
+        if action.kind is ActionKind.PASS:
+            return self._score_decline(context)
+        card = action.card
+        if not card or card == "none":
+            return -0.5
+        house = self._card_owner(game, action, context)
+        value = self._card_value(house, card)
+        if mode == "retrieve":
+            return value + 0.5
+        if mode == "replace":
+            return value + 0.2
+        if mode == "discard":
+            detail = context.detail or ""
+            if "massing" in detail or context.wildling_card in (
+                "massing_milkwater",
+                "mammoth_riders",
+            ):
+                # Massing: lose the weakest card. (Mammoth never reaches discards.)
+                return -value
+            target = context.target
+            if target and target != (action.house or context.house):
+                # Patchface: discarding an opponent's strong card is a gain.
+                return value + 0.15 * self._victory_points(game, target)
+            # Massing: lose the weakest card.
+            return -value
+        if mode == "aeron":
+            return value - 1.2  # 2 Power is not free
+        return -value
+
+    def _card_owner(
+        self, game: Game, action: Action, context: ChoiceContext
+    ) -> str:
+        house = getattr(action, "card_house", None)
+        if house:
+            return house
+        if context.target:
+            return context.target
+        if action.house:
+            return action.house
+        card = action.card
+        for house_id, record in game.state.houses.items():
+            if card in record.house_cards_available or card in record.house_cards_used:
+                return house_id
+        return ""
+
+    def _card_value(self, house: str, card_id: str) -> float:
+        from agot.engine.map import load_house_cards
+
+        data = load_house_cards()
+        decks = [data.deck(house)] if house in data.cards else list(data.cards.values())
+        for deck in decks:
+            for card in deck:
+                if card["id"] == card_id:
+                    return (
+                        float(card["strength"])
+                        + 0.8 * float(card["swords"])
+                        + 0.5 * float(card["forts"])
+                    )
+        return 0.0
+
     def _score_retreat(self, game: Game, action: Action) -> float:
         game_map = game.map
         target_id = action.target or ""
@@ -399,6 +780,8 @@ class GreedyPolicy(Policy):
 
     def _threat(self, game: Game, region_id: str, house: str | None) -> float:
         """Rough enemy combat strength adjacent to a region."""
+        if region_id not in game.map.neighbours:
+            return 0.0
         threat = 0.0
         for neighbour in game.map.neighbours_of(region_id):
             region = game.state.regions[neighbour]

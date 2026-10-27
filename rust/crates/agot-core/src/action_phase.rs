@@ -21,7 +21,10 @@ use crate::combat::{self, BattleRequest};
 use crate::enums::{ActionStep, HouseId, OrderType, Phase, RegionId, Terrain, Track, UnitType};
 use crate::game::{EngineError, Game};
 use crate::house_cards;
-use crate::state::{BattleStage, PendingBattle, PendingMarch};
+use crate::state::{
+    BattleStage, CardChoice, ChoiceKind, ChoiceResume, ChoiceTask, OptionChoice, PendingBattle,
+    PendingMarch, RegionChoice,
+};
 
 /// A house's supply limits plus the current size of every area it controls.
 ///
@@ -415,7 +418,9 @@ impl Game {
         region.neutral_force > 0
             || (region.controller.is_some()
                 && region.controller != Some(house)
-                && (!region.is_empty() || region.garrison > 0))
+                // Routed units still defend: they fight at 0 strength rather
+                // than making the area empty for combat purposes (FFG ruling).
+                && (region.total(true) > 0 || region.garrison > 0))
     }
 
     fn march_targets(&self, house: HouseId, origin: RegionId) -> SmallVec<[RegionId; 16]> {
@@ -597,7 +602,9 @@ impl Game {
         let target = self.state.region(target_id);
         let enemy_here = target.controller.is_some()
             && target.controller != Some(house)
-            && (!target.is_empty() || target.garrison > 0);
+            // A province containing only routed units is still defended; the
+            // routed units contribute 0 Combat Strength but the battle happens.
+            && (target.total(true) > 0 || target.garrison > 0);
         let neutral = target.neutral_force > 0;
 
         if neutral {
@@ -623,6 +630,7 @@ impl Game {
                 defender_card: None,
                 attacker_card_chosen: false,
                 defender_card_chosen: false,
+                pre_choices_done: false,
                 doran_owner: None,
                 doran_track: None,
                 prepared: None,
@@ -697,6 +705,7 @@ impl Game {
                 defender_card: None,
                 attacker_card_chosen: false,
                 defender_card_chosen: false,
+                pre_choices_done: false,
                 doran_owner: None,
                 doran_track: None,
                 prepared: None,
@@ -980,6 +989,103 @@ impl Game {
     // Combat Phase
     // ==================================================================
 
+    /// Queue the pre-battle choices of House-card text.
+    ///
+    /// The direct low-level helpers keep their deterministic defaults; an
+    /// interactive Game calls this after both cards are revealed and pauses
+    /// for Tyrion's controller (who then makes the target choose), Aeron's
+    /// owner and the Queen of Thorns.
+    fn queue_pre_battle_choices(&mut self) -> Option<HouseId> {
+        let snapshot = self.state.pending_battle.as_ref()?.clone();
+        let mut tasks: Vec<ChoiceTask> = Vec::new();
+        for (house, card) in [
+            (snapshot.attacker, snapshot.attacker_card),
+            (
+                snapshot.defender.unwrap_or(snapshot.attacker),
+                snapshot.defender_card,
+            ),
+        ] {
+            let ability = house_cards::ability_of(&self.data.house_cards, house, card);
+            match ability {
+                "tyrion_lannister" => {
+                    let target = if house == snapshot.attacker {
+                        snapshot.defender.unwrap_or(house)
+                    } else {
+                        snapshot.attacker
+                    };
+                    // The controller decides first, and may decline: the card
+                    // text says the target *may* be forced to swap, not that it
+                    // is automatic. The target's mandatory card task is queued
+                    // by the handler only when the card is used.
+                    tasks.push(ChoiceTask {
+                        house,
+                        kind: ChoiceKind::Option {
+                            purpose: OptionChoice::TyrionUse { target },
+                            options: SmallVec::from_slice(&[0, 1]),
+                        },
+                    });
+                }
+                "aeron_damphair" => {
+                    let (cards, power) = self
+                        .state
+                        .house(house)
+                        .map(|state| (state.house_cards_available.clone(), state.power))
+                        .unwrap_or_default();
+                    if power >= 2 && !cards.is_empty() {
+                        tasks.push(ChoiceTask {
+                            house,
+                            kind: ChoiceKind::Card {
+                                purpose: CardChoice::AeronSwap,
+                                cards,
+                                allow_none: true,
+                            },
+                        });
+                    }
+                }
+                "queen_of_thorns" => {
+                    let opponent = if house == snapshot.attacker {
+                        snapshot.defender.unwrap_or(house)
+                    } else {
+                        snapshot.attacker
+                    };
+                    let mut regions: SmallVec<[RegionId; 8]> = self
+                        .data
+                        .map
+                        .neighbours_of(snapshot.region)
+                        .iter()
+                        .copied()
+                        .filter(|region| {
+                            *region != snapshot.origin.unwrap_or(snapshot.region)
+                                && self.state.region(*region).order_house == Some(opponent)
+                        })
+                        .collect();
+                    combat::sort_region_ids(&self.data.map, &mut regions);
+                    if !regions.is_empty() {
+                        tasks.push(ChoiceTask {
+                            house,
+                            kind: ChoiceKind::Region {
+                                purpose: RegionChoice::QueenOrder { opponent },
+                                regions,
+                                allow_none: false,
+                            },
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(battle) = self.state.pending_battle.as_mut() {
+            battle.pre_choices_done = true;
+        }
+        if tasks.is_empty() {
+            return None;
+        }
+        let first = tasks[0].house;
+        self.push_choice_tasks(tasks);
+        self.state.choice_resume = Some(ChoiceResume::BattlePre);
+        Some(first)
+    }
+
     fn doran_owner(&self, battle: &PendingBattle) -> Option<HouseId> {
         for house in [Some(battle.attacker), battle.defender]
             .into_iter()
@@ -1024,7 +1130,7 @@ impl Game {
         // The battle is read as a snapshot and written back in short bursts: a
         // `&mut` into `pending_battle` cannot be held while the rest of the
         // state is queried.
-        let snapshot = self.state.pending_battle.as_ref()?;
+        let snapshot = self.state.pending_battle.as_ref()?.clone();
         match snapshot.stage {
             BattleStage::Support => {
                 if let Some(region) = snapshot.support_queue.get(snapshot.support_index).copied() {
@@ -1049,8 +1155,13 @@ impl Game {
                 if !snapshot.defender_card_chosen {
                     return snapshot.defender;
                 }
+                if self.choice_choices && !snapshot.pre_choices_done {
+                    if let Some(house) = self.queue_pre_battle_choices() {
+                        return Some(house);
+                    }
+                }
                 if self.doran_choice && snapshot.doran_track.is_none() {
-                    if let Some(owner) = self.doran_owner(snapshot) {
+                    if let Some(owner) = self.doran_owner(&snapshot) {
                         if let Some(battle) = self.state.pending_battle.as_mut() {
                             battle.stage = BattleStage::Doran;
                             battle.doran_owner = Some(owner);
@@ -1151,16 +1262,13 @@ impl Game {
                     return Vec::new();
                 };
                 let pool = result.context.units_of(result.loser);
-                [
-                    UnitType::Footman,
-                    UnitType::Knight,
-                    UnitType::Siege,
-                    UnitType::Ship,
-                ]
-                .into_iter()
-                .filter(|unit| pool[unit.index()] > 0)
-                .map(|unit| Action::choose_casualty(house, result.region, unit))
-                .collect()
+                // Siege Engines are already destroyed automatically by FFG's
+                // ruling, so they are never a legal casualty choice.
+                [UnitType::Footman, UnitType::Knight, UnitType::Ship]
+                    .into_iter()
+                    .filter(|unit| pool[unit.index()] > 0)
+                    .map(|unit| Action::choose_casualty(house, result.region, unit))
+                    .collect()
             }
             BattleStage::Retreat => battle
                 .retreat_options
@@ -1256,6 +1364,9 @@ impl Game {
         let Some(unit) = action.unit else {
             return Ok(());
         };
+        if unit == UnitType::Siege {
+            return Ok(());
+        }
         let Some(battle) = self.state.pending_battle.as_mut() else {
             return Ok(());
         };
@@ -1369,7 +1480,7 @@ impl Game {
             support_choices: Some(battle.support_choices.clone()),
         };
         let prepared = battle.prepared.clone();
-        let result = match prepared.as_ref() {
+        let mut result = match prepared.as_ref() {
             Some(context) => combat::finish_battle(&self.state, &request, context.clone()),
             None => combat::resolve_battle(
                 &self.state,
@@ -1380,6 +1491,17 @@ impl Game {
         };
         if prepared.is_none() {
             house_cards::commit_deferred(&mut self.state, &self.data.house_cards, &result.context);
+        }
+        // FFG ruling: participating Siege Engines are removed automatically,
+        // in addition to the ordinary casualties, before the loser picks a
+        // unit. They can therefore never appear in the casualty action list.
+        let siege = result.context.remove_siege_engines(result.loser);
+        if siege > 0 {
+            self.state.note(format!(
+                "{} Siege Engine(s) destroyed automatically in {}",
+                result.loser,
+                self.data.map.id_of(result.region)
+            ));
         }
         // Remember the defender's Order token: if the attacker wins, the battle
         // clears it from the board and it returns to its owner's pool.
@@ -1428,6 +1550,8 @@ impl Game {
             self.set_battle_stage(BattleStage::Finalize);
             return;
         }
+        let winner = result.winner;
+        let loser = result.loser;
         let mut options = combat::retreat_options(
             &self.state,
             &self.data.map,
@@ -1438,9 +1562,8 @@ impl Game {
         );
         // Robb Stark lets the winner choose, but only among the legal areas
         // where the loser loses the fewest units.
-        let robb =
-            house_cards::robb_chose_retreat(&result.context, &self.data.house_cards, result.winner);
-        if robb && !options.is_empty() {
+        let robb = house_cards::robb_chose_retreat(&result.context, &self.data.house_cards, winner);
+        if robb && !options.is_empty() && !self.choice_choices {
             let minimal: SmallVec<[RegionId; 8]> = options
                 .iter()
                 .copied()
@@ -1449,7 +1572,7 @@ impl Game {
                         &self.state,
                         &self.data.map,
                         *option,
-                        result.loser,
+                        loser,
                         surviving,
                     )
                 })
@@ -1462,7 +1585,32 @@ impl Game {
             self.set_battle_stage(BattleStage::Finalize);
             return;
         }
-        let retreat_house = if robb { result.winner } else { result.loser };
+        if robb && self.choice_choices {
+            // Interactive play: Robb's controller gets a real decline/use
+            // choice. The full legal set stays on the battle so declining can
+            // hand the decision back to the defeated player; the handler
+            // narrows it to the minimal-loss areas when the card is used.
+            if let Some(battle) = self.state.pending_battle.as_mut() {
+                battle.retreat_options = options;
+                battle.retreat_house = None;
+                battle.stage = BattleStage::Retreat;
+            }
+            self.state.choice_queue.insert(
+                0,
+                ChoiceTask {
+                    house: winner,
+                    kind: ChoiceKind::Option {
+                        purpose: OptionChoice::RobbRetreat,
+                        options: SmallVec::from_slice(&[0, 1]),
+                    },
+                },
+            );
+            self.state.note(format!(
+                "{winner} may choose {loser}'s retreat with Robb Stark"
+            ));
+            return;
+        }
+        let retreat_house = if robb { winner } else { loser };
         if let Some(battle) = self.state.pending_battle.as_mut() {
             battle.retreat_options = options;
             battle.retreat_house = Some(retreat_house);
@@ -1490,6 +1638,19 @@ impl Game {
         let defender = battle.defender;
         let region_id = battle.region;
         self.state.phase = Phase::Action;
+        // The real game asks the owner which units to disband after a retreat
+        // breaks Supply. The low-level resolve_and_apply convenience path keeps
+        // its automatic trim.
+        self.state.supply_choice = true;
+
+        // A player who has just played their seventh House card draws the other
+        // six back *before* post-combat card text such as Patchface resolves
+        // (FFG ruling). Doing this here also lets Roose Bolton's "return the
+        // discard" see the same hand the physical game would.
+        self.recycle_house_cards_for(attacker);
+        if let Some(defender) = defender {
+            self.recycle_house_cards_for(defender);
+        }
 
         combat::apply_battle_result(
             &mut self.state,

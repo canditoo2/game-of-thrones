@@ -13,7 +13,10 @@ use smallvec::SmallVec;
 use crate::action::Action;
 use crate::enums::{CardId, HouseId, Phase, RegionId, Track, UnitType, MUSTER_COST, SUPPLY_LIMITS};
 use crate::game::{EngineError, Game};
-use crate::state::{DeckState, WesterosChoice, WildlingAttack};
+use crate::state::{
+    CardChoice, ChoiceKind, ChoiceResume, ChoiceTask, DeckState, OptionChoice, RegionChoice,
+    TrackChoice, UnitChoice, WesterosChoice, WildlingAttack,
+};
 
 impl Game {
     // ==================================================================
@@ -104,12 +107,20 @@ impl Game {
     /// `pending_westeros` and are drained once that step finishes, because all
     /// three cards must still resolve.
     pub(crate) fn drain_westeros(&mut self) -> Result<(), EngineError> {
+        if !self.state.supply_queue.is_empty() {
+            self.state.active_house = self.state.supply_queue.first().copied();
+            return Ok(());
+        }
         while let Some(card_id) = self
             .state
             .pending_westeros
             .as_ref()
             .and_then(|queue| queue.first().copied())
         {
+            if !self.state.supply_queue.is_empty() {
+                self.state.active_house = self.state.supply_queue.first().copied();
+                return Ok(());
+            }
             let card = self.data.westeros.card(card_id).clone();
             let effect = card["effect"].as_str().unwrap_or("none").to_string();
 
@@ -190,10 +201,18 @@ impl Game {
     }
 
     fn pop_pending_westeros(&mut self) {
-        if let Some(queue) = self.state.pending_westeros.as_mut() {
+        let empty = if let Some(queue) = self.state.pending_westeros.as_mut() {
             if !queue.is_empty() {
                 queue.remove(0);
             }
+            queue.is_empty()
+        } else {
+            false
+        };
+        if empty {
+            // `run_westeros_phase` uses `is_none` to decide whether it must
+            // draw. An empty queue must not masquerade as a pending card.
+            self.state.pending_westeros = None;
         }
     }
 
@@ -208,6 +227,16 @@ impl Game {
         match effect {
             "mustering" => {
                 self.grant_mustering_points();
+                // In the one-card-at-a-time sequence the mustering step is
+                // part of *this* card: it must finish before the next Westeros
+                // card is revealed, or players would muster knowing cards they
+                // have not seen yet.
+                if self.sequential_westeros && self.any_mustering_points() {
+                    self.state.return_phase = Some(Phase::Westeros);
+                    self.state.phase = Phase::Mustering;
+                    self.state.westeros_waiting = false;
+                    return Ok(true);
+                }
             }
             "supply" => {
                 self.recalculate_supply();
@@ -429,40 +458,80 @@ impl Game {
             .sum()
     }
 
-    /// Disband units until a house is within its supply limits.
+    /// Queue a house for Supply disbanding, if it exceeds its limits.
     ///
-    /// The real game asks the player which units to remove. Here the engine
-    /// removes from the largest army, cheapest unit first, and will remove
-    /// routed units as well (they still count towards Supply).
+    /// The actual removal is a player decision: [`Game::advance`] pauses on the
+    /// first queued house and [`Game::legal_actions`] offers its units.
     pub(crate) fn enforce_supply(&mut self, house: HouseId) {
-        let mut guard = 0;
-        while !self.state.within_supply(house) && guard < 200 {
-            guard += 1;
-            let mut best: Option<(u32, RegionId)> = None;
-            for region in self.state.controlled_regions(house) {
-                let total = self.state.region(region).total(true);
-                if total < 2 {
-                    continue;
+        if !self.state.within_supply(house) && !self.state.supply_queue.contains(&house) {
+            self.state.supply_queue.push(house);
+        }
+    }
+
+    /// One legal `Disband` action per removable unit type in each controlled
+    /// area. Routed units count towards Supply and may be removed too.
+    pub(crate) fn disband_actions(&self, house: HouseId) -> Vec<Action> {
+        let mut actions = Vec::new();
+        for region in self.state.controlled_regions(house) {
+            let state = self.state.region(region);
+            for unit in UnitType::ALL {
+                if state.unit_count(unit) > 0 {
+                    actions.push(Action::disband_state(house, region, unit, false));
                 }
-                // Python's `max((size, region_id))` breaks ties on the id string.
-                let key = (total, self.data.map.id_of(region).to_string());
-                match &best {
-                    None => best = Some((total, region)),
-                    Some((best_total, best_region)) => {
-                        let best_key = (*best_total, self.data.map.id_of(*best_region).to_string());
-                        if key > best_key {
-                            best = Some((total, region));
-                        }
-                    }
+                if state.routed_count(unit) > 0 {
+                    actions.push(Action::disband_state(house, region, unit, true));
                 }
-            }
-            let Some((_, region)) = best else {
-                break;
-            };
-            if !self.remove_one_unit(region) {
-                break;
             }
         }
+        actions
+    }
+
+    /// Remove one chosen unit for Supply.
+    pub(crate) fn apply_disband(&mut self, action: Action) -> Result<(), EngineError> {
+        let house = action
+            .house
+            .ok_or_else(|| EngineError::IllegalAction("disband without a house".into()))?;
+        let region = action
+            .region
+            .ok_or_else(|| EngineError::IllegalAction("disband without a region".into()))?;
+        let unit = action
+            .unit
+            .ok_or_else(|| EngineError::IllegalAction("disband without a unit".into()))?;
+        if self.state.region(region).controller != Some(house) {
+            return Ok(());
+        }
+        {
+            let state = self.state.region_mut(region);
+            let routed = action.amount == Some(1);
+            if routed {
+                if state.routed_count(unit) == 0 {
+                    return Ok(());
+                }
+                state.routed[unit.index()] -= 1;
+            } else if state.unit_count(unit) > 0 {
+                state.units[unit.index()] -= 1;
+            } else if state.routed_count(unit) > 0 {
+                // Backwards-compatible action without the flag: remove a ready
+                // unit when possible, otherwise the routed copy.
+                state.routed[unit.index()] -= 1;
+            } else {
+                return Ok(());
+            }
+            state.settle_control();
+        }
+        if self.state.within_supply(house) {
+            if let Some(position) = self.state.supply_queue.iter().position(|h| *h == house) {
+                self.state.supply_queue.remove(position);
+            }
+        } else if self.disband_actions(house).is_empty() {
+            if let Some(position) = self.state.supply_queue.iter().position(|h| *h == house) {
+                self.state.supply_queue.remove(position);
+            }
+        }
+        let region_text = self.data.map.id_of(region).to_string();
+        self.state
+            .note(format!("{house} disbands a {unit} in {region_text}"));
+        Ok(())
     }
 
     /// Remove one unit, cheapest first, and settle control if the area empties.
@@ -831,7 +900,11 @@ impl Game {
     }
 
     /// Port or adjacent sea areas where a Ship may be mustered.
-    fn ship_muster_targets(&self, house: HouseId, source: RegionId) -> SmallVec<[RegionId; 8]> {
+    pub(crate) fn ship_muster_targets(
+        &self,
+        house: HouseId,
+        source: RegionId,
+    ) -> SmallVec<[RegionId; 8]> {
         let mut targets: SmallVec<[RegionId; 8]> = SmallVec::new();
         if let Some(port_id) = self.data.map.port_of(source) {
             let port = self.state.region(port_id);
@@ -983,12 +1056,15 @@ impl Game {
     }
 
     pub(crate) fn setup_wildling_attack(&mut self, strength: u8, excluded: SmallVec<[HouseId; 6]>) {
-        let card = self.draw_wildling();
+        // The top Wildling card stays face down during the Power bids: the
+        // Messenger Raven may peek at it, and the card is only revealed once
+        // the bids are in (and before the Iron Throne holder breaks a tie).
+        self.state.pending_wildling_tie = None;
         self.state.wildling_attack = Some(WildlingAttack {
             strength,
             bids: SmallVec::new(),
             excluded,
-            card,
+            card: None,
             return_phase: Phase::Westeros,
             second_attack: None,
             second_strength: 6,
@@ -999,6 +1075,9 @@ impl Game {
     }
 
     pub(crate) fn next_wildling_bidder(&self) -> Option<HouseId> {
+        if self.state.pending_wildling_tie.is_some() {
+            return None;
+        }
         let attack = self.state.wildling_attack.as_ref()?;
         for house in self.state.track_order(Track::IronThrone) {
             if self
@@ -1030,6 +1109,21 @@ impl Game {
             .collect()
     }
 
+    /// The Iron Throne holder's alternatives for a tied highest/lowest bid.
+    pub(crate) fn wildling_tie_actions(&self, house: HouseId) -> Vec<Action> {
+        let Some(tie) = self.state.pending_wildling_tie.as_ref() else {
+            return Vec::new();
+        };
+        if house != tie.chooser {
+            return Vec::new();
+        }
+        tie.candidates
+            .iter()
+            .enumerate()
+            .map(|(index, _)| Action::wildling_tie_choice(house, index as u8))
+            .collect()
+    }
+
     pub(crate) fn apply_wildling_bid(&mut self, house: HouseId, amount: u8) {
         let power = self
             .state
@@ -1042,19 +1136,73 @@ impl Game {
     }
 
     /// Compare the Night's Watch and Wildling strengths, then the card.
+    ///
+    /// If the rewarded/penalised bid is tied, the Iron Throne holder is asked
+    /// to choose the affected bidder *after* the card has been revealed and
+    /// before any consequence resolves (FFG ruling). The choice is taken on
+    /// [`Game::apply_wildling_tie`] and resolution then resumes here.
     pub(crate) fn resolve_wildling_attack(&mut self) -> Result<(), EngineError> {
-        let Some(mut attack) = self.state.wildling_attack.take() else {
+        self.finish_wildling_attack(None)
+    }
+
+    fn finish_wildling_attack(&mut self, forced: Option<HouseId>) -> Result<(), EngineError> {
+        let Some(mut attack) = self.state.wildling_attack.clone() else {
             self.state.phase = Phase::Westeros;
             return Ok(());
         };
-        // All bid Power is discarded, win or lose.
+        let nights_watch: u32 = attack.bids.iter().map(|(_, amount)| *amount as u32).sum();
+        let wildlings_win = nights_watch < attack.strength as u32;
+        let participants: SmallVec<[HouseId; 6]> = self
+            .state
+            .track_order(Track::IronThrone)
+            .iter()
+            .copied()
+            .filter(|house| attack.bid_of(*house).is_some())
+            .collect();
+        // The bids are public now; reveal the top Wildling card before the
+        // Iron Throne holder chooses between tied bidders (FFG ruling).
+        if attack.card.is_none() {
+            attack.card = self.draw_wildling();
+            if let Some(state_attack) = self.state.wildling_attack.as_mut() {
+                state_attack.card = attack.card;
+            }
+        }
+        let highest = !wildlings_win;
+        let tied = self.extreme_bidders(&participants, &attack, highest);
+
+        let chosen = match forced {
+            Some(house) if tied.contains(&house) => Some(house),
+            Some(_) => {
+                return Err(EngineError::IllegalAction(
+                    "the chosen Wildling bidder is not part of the tie".to_string(),
+                ));
+            }
+            None if self.wildling_tie_choice && tied.len() > 1 => {
+                if let Some(chooser) = self.state.track_order(Track::IronThrone).first().copied() {
+                    self.state.pending_wildling_tie = Some(crate::state::WildlingTie {
+                        candidates: tied,
+                        highest,
+                        chooser,
+                    });
+                    self.state.active_house = Some(chooser);
+                    return Ok(());
+                }
+                // No Iron Throne holder is present: keep the historical
+                // deterministic fallback rather than stalling the attack.
+                tied.first().copied()
+            }
+            None => tied.first().copied(),
+        };
+
+        // The tie is settled (or none existed): discard the bid Power before
+        // resolving rewards/penalties. This happens once, after the tie choice.
+        let mut attack = self.state.wildling_attack.take().expect("checked above");
+        self.state.pending_wildling_tie = None;
         for (house, amount) in &attack.bids {
             if let Some(state) = self.state.house_mut(*house) {
                 state.power = state.power.saturating_sub(*amount);
             }
         }
-        let nights_watch: u32 = attack.bids.iter().map(|(_, amount)| *amount as u32).sum();
-        let wildlings_win = nights_watch < attack.strength as u32;
         self.state.wildling_threat = if wildlings_win {
             attack.strength.saturating_sub(2)
         } else {
@@ -1071,13 +1219,6 @@ impl Game {
         ));
 
         if let Some(card_id) = attack.card {
-            let participants: SmallVec<[HouseId; 6]> = self
-                .state
-                .track_order(Track::IronThrone)
-                .iter()
-                .copied()
-                .filter(|house| attack.bid_of(*house).is_some())
-                .collect();
             let card = self.data.wildlings.card(card_id).clone();
             let branch = if wildlings_win {
                 "wildling_victory"
@@ -1085,7 +1226,6 @@ impl Game {
                 "nights_watch_victory"
             };
             let spec = card[branch].clone();
-            let chosen = self.extreme_bidder(&participants, &attack, !wildlings_win);
             let others: SmallVec<[HouseId; 6]> = participants
                 .iter()
                 .copied()
@@ -1093,7 +1233,7 @@ impl Game {
                 .collect();
             // The effect may amend *this* attack (Preemptive Raid adds a second
             // one); Python mutates the resolved card's local dict the same way.
-            self.apply_wildling_effect(&spec, chosen, &others, &mut attack)?;
+            let paused = self.apply_wildling_effect(&spec, chosen, &others, &mut attack)?;
             self.state.wildling_discard.push(card_id);
             let name = card["name"].as_str().unwrap_or("card").to_string();
             let effect = spec["effect"].as_str().unwrap_or("nothing").to_string();
@@ -1103,6 +1243,11 @@ impl Game {
                     .map(|house| house.name().to_string())
                     .unwrap_or("nobody".into())
             ));
+            if paused {
+                self.state.wildling_attack = Some(attack);
+                self.state.choice_resume = Some(ChoiceResume::Wildling);
+                return Ok(());
+            }
         }
 
         if let Some(second) = attack.second_attack.clone() {
@@ -1115,53 +1260,226 @@ impl Game {
         Ok(())
     }
 
-    /// The highest (or lowest) bidder, breaking ties by Iron Throne seat.
-    fn extreme_bidder(
+    /// The tied highest (or lowest) bidders, in Iron Throne order.
+    fn extreme_bidders(
         &self,
         participants: &[HouseId],
         attack: &WildlingAttack,
         highest: bool,
-    ) -> Option<HouseId> {
-        if participants.is_empty() {
-            return None;
-        }
+    ) -> SmallVec<[HouseId; 6]> {
+        let mut tied: SmallVec<[HouseId; 6]> = SmallVec::new();
         let value = |house: HouseId| attack.bid_of(house).unwrap_or(0);
-        let target = if highest {
-            participants.iter().map(|house| value(*house)).max()?
+        let Some(target) = (if highest {
+            participants.iter().map(|house| value(*house)).max()
         } else {
-            participants.iter().map(|house| value(*house)).min()?
+            participants.iter().map(|house| value(*house)).min()
+        }) else {
+            return tied;
         };
         let throne = self.state.track_order(Track::IronThrone);
-        participants
-            .iter()
-            .copied()
-            .filter(|house| value(*house) == target)
-            .min_by_key(|house| {
-                throne
-                    .iter()
-                    .position(|candidate| candidate == house)
-                    .unwrap_or(99)
-            })
+        tied.extend(
+            participants
+                .iter()
+                .copied()
+                .filter(|house| value(*house) == target),
+        );
+        tied.sort_by_key(|house| {
+            throne
+                .iter()
+                .position(|candidate| candidate == house)
+                .unwrap_or(99)
+        });
+        tied
+    }
+
+    /// Continue a Wildling attack after its generic card choices finish.
+    pub(crate) fn complete_wildling_after_choices(&mut self) -> Result<(), EngineError> {
+        let Some(attack) = self.state.wildling_attack.take() else {
+            self.state.phase = Phase::Westeros;
+            return Ok(());
+        };
+        if let Some(second) = attack.second_attack.clone() {
+            self.setup_wildling_attack(attack.second_strength, second);
+            return Ok(());
+        }
+        self.state.phase = attack.return_phase;
+        Ok(())
+    }
+
+    /// Apply the Iron Throne holder's tie-break choice.
+    pub(crate) fn apply_wildling_tie(&mut self, action: Action) -> Result<(), EngineError> {
+        let Some(tie) = self.state.pending_wildling_tie.clone() else {
+            return Ok(());
+        };
+        if action.house != Some(tie.chooser) {
+            return Ok(());
+        }
+        let index = action.amount.ok_or_else(|| {
+            EngineError::IllegalAction("Wildling tie choice has no candidate index".to_string())
+        })? as usize;
+        let chosen = *tie.candidates.get(index).ok_or_else(|| {
+            EngineError::IllegalAction("Wildling tie candidate out of range".to_string())
+        })?;
+        self.state.pending_wildling_tie = None;
+        self.finish_wildling_attack(Some(chosen))
     }
 
     /// Apply one Wildling card consequence.
     ///
-    /// The printed cards let the rewarded player make several sub-choices; the
-    /// engine resolves them with a deterministic default (largest army first,
-    /// strongest House card, best Iron Throne seat).
+    /// Interactive play queues the printed sub-choices as generic
+    /// [`ChoiceTask`]s; the direct low-level path keeps deterministic defaults
+    /// for the frozen regression corpus.
     fn apply_wildling_effect(
         &mut self,
         spec: &serde_json::Value,
         chosen: Option<HouseId>,
         others: &[HouseId],
         attack: &mut WildlingAttack,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         let effect = spec["effect"].as_str().unwrap_or("nothing");
         let Some(chosen) = chosen else {
-            return Ok(());
+            return Ok(false);
         };
         if effect == "nothing" {
-            return Ok(());
+            return Ok(false);
+        }
+        if self.state.choice_choices {
+            match effect {
+                "replace_knights" => {
+                    let chosen_count = spec["chosen"].as_u64().map(|value| value as u8);
+                    self.queue_replace_knights(chosen, chosen_count);
+                    let others_count = spec["others"].as_u64().map(|value| value as u8);
+                    for house in others {
+                        self.queue_replace_knights(*house, others_count);
+                    }
+                }
+                "upgrade_footmen" => {
+                    let count = spec["chosen"].as_u64().unwrap_or(0) as u8;
+                    self.queue_upgrade_footmen(chosen, count);
+                }
+                "destroy_units" => {
+                    let count = spec["chosen"].as_u64().unwrap_or(0) as u8;
+                    self.queue_destroy_units(chosen, count, None);
+                    let others_count = spec["others"].as_u64().unwrap_or(0) as u8;
+                    for house in others {
+                        self.queue_destroy_units(*house, others_count, None);
+                    }
+                }
+                "destroy_units_at_fort" => {
+                    let count = spec["chosen"].as_u64().unwrap_or(0) as u8;
+                    self.queue_destroy_at_fort(chosen, count);
+                    let others_count = spec["others"].as_u64().unwrap_or(0) as u8;
+                    for house in others {
+                        self.queue_destroy_units(*house, others_count, None);
+                    }
+                }
+                "muster_at_fort" => self.queue_muster_at_fort(chosen),
+                "influence_to_bottom" => {
+                    for name in influence_targets(&spec["chosen"]) {
+                        if let Some(track) = Track::from_name(name) {
+                            self.move_influence(track, chosen, false);
+                        }
+                    }
+                    // The card lets each other house choose Fiefdoms or
+                    // King's Court; the old data field is only a default.
+                    for house in others {
+                        self.state.choice_queue.push(ChoiceTask {
+                            house: *house,
+                            kind: ChoiceKind::Track {
+                                purpose: TrackChoice::KingBeyondOther,
+                                tracks: SmallVec::from_slice(&[Track::Fiefdoms, Track::KingsCourt]),
+                            },
+                        });
+                    }
+                }
+                "influence_to_top" => {
+                    self.state.choice_queue.push(ChoiceTask {
+                        house: chosen,
+                        kind: ChoiceKind::Track {
+                            purpose: TrackChoice::KingBeyondHighest,
+                            tracks: Track::ALL.into_iter().collect(),
+                        },
+                    });
+                }
+                "retrieve_house_card" => {
+                    if let Some(hand) = self
+                        .state
+                        .house(chosen)
+                        .map(|state| state.house_cards_used.clone())
+                    {
+                        if !hand.is_empty() {
+                            self.state.choice_queue.push(ChoiceTask {
+                                house: chosen,
+                                kind: ChoiceKind::Card {
+                                    purpose: CardChoice::MammothRetrieve,
+                                    cards: hand,
+                                    allow_none: true,
+                                },
+                            });
+                        }
+                    }
+                }
+                "return_discard_pile" => self.return_discard_pile(chosen),
+                "discard_house_cards" => {
+                    let mode = spec["chosen"].as_str().unwrap_or("one");
+                    self.discard_house_cards(chosen, mode);
+                    for house in others {
+                        let hand = self
+                            .state
+                            .house(*house)
+                            .map(|state| state.house_cards_available.clone())
+                            .unwrap_or_default();
+                        if hand.len() > 1 {
+                            self.state.choice_queue.push(ChoiceTask {
+                                house: *house,
+                                kind: ChoiceKind::Card {
+                                    purpose: CardChoice::MassingDiscard,
+                                    cards: hand,
+                                    allow_none: false,
+                                },
+                            });
+                        }
+                    }
+                }
+                "adjust_supply" => {
+                    let delta = spec["chosen"].as_i64().unwrap_or(0) as i16;
+                    self.adjust_supply(chosen, delta);
+                    let others_delta = spec["others"].as_i64().unwrap_or(0) as i16;
+                    for house in others {
+                        self.adjust_supply(*house, others_delta);
+                    }
+                }
+                "discard_power" => {
+                    let amount = spec["chosen"].as_u64().unwrap_or(0) as u8;
+                    self.discard_power(chosen, amount);
+                    let others_amount = spec["others"].as_u64().unwrap_or(0) as u8;
+                    for house in others {
+                        self.discard_power(*house, others_amount);
+                    }
+                }
+                "preemptive_raid" => {
+                    self.state.choice_queue.push(ChoiceTask {
+                        house: chosen,
+                        kind: ChoiceKind::Option {
+                            purpose: OptionChoice::PreemptiveRaid,
+                            options: SmallVec::from_slice(&[0, 1]),
+                        },
+                    });
+                }
+                "second_attack" => {
+                    let strength = spec["strength"].as_u64().unwrap_or(6) as u8;
+                    attack.second_attack = Some(SmallVec::from_slice(&[chosen]));
+                    attack.second_strength = strength;
+                }
+                "refund_bid" => {
+                    let refund = attack.bid_of(chosen).unwrap_or(0);
+                    if let Some(state) = self.state.house_mut(chosen) {
+                        state.power = state.power.saturating_add(refund);
+                    }
+                }
+                _ => {}
+            }
+            return Ok(!self.state.choice_queue.is_empty());
         }
         match effect {
             "replace_knights" => {
@@ -1176,7 +1494,7 @@ impl Game {
                 let count = spec["chosen"].as_u64().unwrap_or(0) as u8;
                 self.upgrade_footmen(chosen, count);
             }
-            "destroy_units" => {
+            "destroy_units" | "preemptive_raid" => {
                 let count = spec["chosen"].as_u64().unwrap_or(0) as u8;
                 self.destroy_units_anywhere(chosen, count);
                 let others_count = spec["others"].as_u64().unwrap_or(0) as u8;
@@ -1255,7 +1573,142 @@ impl Game {
             }
             _ => {}
         }
-        Ok(())
+        Ok(false)
+    }
+
+    /// Queue one unit-destruction task, optionally restricted to one area.
+    fn queue_destroy_units(&mut self, house: HouseId, count: u8, area: Option<RegionId>) {
+        if count == 0 {
+            return;
+        }
+        let areas: SmallVec<[RegionId; 8]> = match area {
+            Some(region) => SmallVec::from_slice(&[region]),
+            None => self.state.controlled_regions(house).into_iter().collect(),
+        };
+        if areas.is_empty() {
+            return;
+        }
+        self.state.choice_queue.push(ChoiceTask {
+            house,
+            kind: ChoiceKind::Unit {
+                purpose: UnitChoice::Destroy,
+                areas,
+                remaining: count,
+                allow_none: false,
+            },
+        });
+    }
+
+    /// The Horde's lowest bidder chooses one fort before destroying there.
+    ///
+    /// The card only falls back to "destroy anywhere" when *no* controlled
+    /// Castle or Stronghold can take the full penalty: a fort holding one unit
+    /// is not a legal choice for a two-unit penalty, so it must not be offered
+    /// as a way to dodge the card's wording.
+    fn queue_destroy_at_fort(&mut self, house: HouseId, count: u8) {
+        if count == 0 {
+            return;
+        }
+        let mut forts: Vec<RegionId> = self
+            .state
+            .controlled_regions(house)
+            .into_iter()
+            .filter(|region| {
+                self.data.map.region(*region).is_fortification()
+                    && self.state.region(*region).total(true) >= u32::from(count)
+            })
+            .collect();
+        forts.sort_by_key(|region| self.data.map.id_of(*region));
+        if forts.is_empty() {
+            // No fort can take the whole penalty: the card's own fallback
+            // destroys the units anywhere instead.
+            self.queue_destroy_units(house, count, None);
+            return;
+        }
+        self.state.choice_queue.push(ChoiceTask {
+            house,
+            kind: ChoiceKind::Region {
+                purpose: RegionChoice::HordeFort { count },
+                regions: SmallVec::from_vec(forts),
+                allow_none: false,
+            },
+        });
+    }
+
+    /// The Horde's highest bidder may muster in one controlled Castle or
+    /// Stronghold. Areas with zero mustering points cannot be chosen: a castle
+    /// that prints no mustering value (or a region the data flags as a
+    /// fortification without points) gives the card nothing to spend.
+    fn queue_muster_at_fort(&mut self, house: HouseId) {
+        let mut forts: Vec<RegionId> = self
+            .state
+            .controlled_regions(house)
+            .into_iter()
+            .filter(|region| {
+                let spec = self.data.map.region(*region);
+                spec.is_fortification() && spec.mustering > 0
+            })
+            .collect();
+        forts.sort_by_key(|region| self.data.map.id_of(*region));
+        if forts.is_empty() {
+            return;
+        }
+        self.state.choice_queue.push(ChoiceTask {
+            house,
+            kind: ChoiceKind::Region {
+                purpose: RegionChoice::HordeMusterFort,
+                regions: SmallVec::from_vec(forts),
+                allow_none: true,
+            },
+        });
+    }
+
+    fn queue_replace_knights(&mut self, house: HouseId, count: Option<u8>) {
+        let areas: SmallVec<[RegionId; 8]> =
+            self.state.controlled_regions(house).into_iter().collect();
+        if areas.is_empty() {
+            return;
+        }
+        let available: u8 = areas
+            .iter()
+            .map(|region| {
+                let region = self.state.region(*region);
+                region.unit_count(UnitType::Knight) + region.routed_count(UnitType::Knight)
+            })
+            .sum();
+        if available == 0 {
+            return;
+        }
+        let remaining = count.unwrap_or(available).min(available);
+        self.state.choice_queue.push(ChoiceTask {
+            house,
+            kind: ChoiceKind::Unit {
+                purpose: UnitChoice::ReplaceKnight,
+                areas,
+                remaining,
+                allow_none: false,
+            },
+        });
+    }
+
+    fn queue_upgrade_footmen(&mut self, house: HouseId, count: u8) {
+        if count == 0 {
+            return;
+        }
+        let areas: SmallVec<[RegionId; 8]> =
+            self.state.controlled_regions(house).into_iter().collect();
+        if areas.is_empty() {
+            return;
+        }
+        self.state.choice_queue.push(ChoiceTask {
+            house,
+            kind: ChoiceKind::Unit {
+                purpose: UnitChoice::UpgradeFootman,
+                areas,
+                remaining: count,
+                allow_none: true,
+            },
+        });
     }
 
     /// Destroy up to `count` units, taking from the largest force first.
@@ -1637,6 +2090,367 @@ mod tests {
     }
 
     #[test]
+    fn sequential_mustering_happens_before_the_next_card_is_drawn() {
+        let mut game = game(1);
+        let mustering = game
+            .data
+            .westeros
+            .card_index("mustering")
+            .expect("Mustering card");
+        let game_of_thrones = game
+            .data
+            .westeros
+            .card_index("game_of_thrones")
+            .expect("Game of Thrones card");
+        game.sequential_westeros = true;
+        game.state.round = 2;
+        game.state.phase = Phase::Westeros;
+        game.state.active_house = None;
+        game.state.pending_westeros = None;
+        game.state.westeros_next_deck = 0;
+        game.state.westeros_waiting = false;
+        game.state.westeros_decks[0] = DeckState::new([mustering]);
+        game.state.westeros_decks[1] = DeckState::new([game_of_thrones]);
+
+        game.advance().unwrap();
+        assert!(game.state.westeros_waiting);
+
+        game.continue_westeros().unwrap();
+        assert_eq!(
+            game.state.phase,
+            Phase::Mustering,
+            "the Mustering card opens its own step before the next draw"
+        );
+        assert_eq!(game.state.westeros_next_deck, 1);
+        assert!(
+            game.state.westeros_decks[1].drawn.is_none(),
+            "the next Westeros card must stay face down while players muster"
+        );
+
+        let mut guard = 0;
+        while game.state.phase == Phase::Mustering {
+            guard += 1;
+            assert!(guard < 12, "mustering must terminate");
+            let house = game.state.active_house.expect("a mustering house");
+            game.step(Action::pass(house)).unwrap();
+        }
+
+        assert!(game.state.westeros_waiting);
+        assert_eq!(
+            game.state.pending_westeros.as_deref(),
+            Some(&[game_of_thrones][..]),
+            "only after mustering does the next card appear"
+        );
+    }
+
+    #[test]
+    fn sequential_clash_of_kings_bids_before_the_next_card() {
+        let mut game = game(1);
+        let clash = game
+            .data
+            .westeros
+            .card_index("clash_of_kings")
+            .expect("Clash of Kings");
+        let game_of_thrones = game
+            .data
+            .westeros
+            .card_index("game_of_thrones")
+            .expect("Game of Thrones");
+        game.sequential_westeros = true;
+        game.state.round = 2;
+        game.state.phase = Phase::Westeros;
+        game.state.active_house = None;
+        game.state.pending_westeros = None;
+        game.state.westeros_next_deck = 0;
+        game.state.westeros_waiting = false;
+        game.state.westeros_decks[0] = DeckState::new([clash]);
+        game.state.westeros_decks[1] = DeckState::new([game_of_thrones]);
+
+        game.advance().unwrap();
+        assert!(game.state.westeros_waiting);
+        game.continue_westeros().unwrap();
+        assert_eq!(game.state.phase, Phase::Bidding);
+        assert_eq!(game.state.westeros_next_deck, 1);
+        assert!(
+            game.state.westeros_decks[1].drawn.is_none(),
+            "the next card must stay face down during the auction"
+        );
+
+        let mut guard = 0;
+        while game.state.phase == Phase::Bidding {
+            guard += 1;
+            assert!(guard < 80, "the auction must terminate");
+            let house = game.state.active_house.expect("a bidder");
+            game.step(Action::bid(house, 0)).unwrap();
+        }
+        assert_eq!(game.state.phase, Phase::Westeros);
+        assert!(
+            game.state.westeros_waiting,
+            "the auction pauses before revealing the next card"
+        );
+        assert_eq!(game.state.westeros_next_deck, 1);
+        assert!(game.state.westeros_decks[1].drawn.is_none());
+
+        game.continue_westeros().unwrap();
+        assert_eq!(
+            game.state.pending_westeros.as_deref(),
+            Some(&[game_of_thrones][..])
+        );
+    }
+
+    #[test]
+    fn sequential_dark_wings_clash_auction_resolves_before_the_next_card() {
+        let mut game = game(1);
+        let dark_wings = game
+            .data
+            .westeros
+            .card_index("dark_wings_dark_words")
+            .expect("Dark Wings, Dark Words");
+        let clash = game
+            .data
+            .westeros
+            .card_index("clash_of_kings")
+            .expect("Clash of Kings");
+        let game_of_thrones = game
+            .data
+            .westeros
+            .card_index("game_of_thrones")
+            .expect("Game of Thrones");
+        game.sequential_westeros = true;
+        game.state.round = 2;
+        game.state.phase = Phase::Westeros;
+        game.state.active_house = None;
+        game.state.pending_westeros = None;
+        game.state.westeros_next_deck = 0;
+        game.state.westeros_waiting = false;
+        game.state.westeros_decks[0] = DeckState::new([dark_wings]);
+        game.state.westeros_decks[1] = DeckState::new([game_of_thrones]);
+
+        game.advance().unwrap();
+        assert!(game.state.westeros_waiting);
+        game.continue_westeros().unwrap();
+        assert_eq!(game.state.phase, Phase::WesterosChoice);
+        let holder = game
+            .state
+            .westeros_choice
+            .as_ref()
+            .expect("the Raven holder chooses")
+            .holder;
+        game.step(Action::westeros_choice(holder, CardId(clash as u8)))
+            .unwrap();
+        assert_eq!(game.state.phase, Phase::Bidding);
+        assert_eq!(game.state.westeros_next_deck, 1);
+        assert!(
+            game.state.westeros_decks[1].drawn.is_none(),
+            "the auction must finish before the next card is drawn"
+        );
+
+        let mut guard = 0;
+        while game.state.phase == Phase::Bidding {
+            guard += 1;
+            assert!(guard < 80, "the auction must terminate");
+            let house = game.state.active_house.expect("a bidder");
+            game.step(Action::bid(house, 0)).unwrap();
+        }
+        assert!(game.state.westeros_waiting);
+        assert!(game.state.westeros_decks[1].drawn.is_none());
+        game.continue_westeros().unwrap();
+        assert_eq!(
+            game.state.pending_westeros.as_deref(),
+            Some(&[game_of_thrones][..])
+        );
+    }
+
+    #[test]
+    fn sequential_wildling_icon_attack_resolves_before_the_next_card() {
+        let mut game = game(1);
+        let icon_card = game
+            .data
+            .westeros
+            .card_index("last_days_of_summer")
+            .expect("Last Days of Summer");
+        let game_of_thrones = game
+            .data
+            .westeros
+            .card_index("game_of_thrones")
+            .expect("Game of Thrones");
+        game.sequential_westeros = true;
+        game.wildling_tie_choice = false;
+        game.state.choice_choices = false;
+        game.state.round = 2;
+        game.state.phase = Phase::Westeros;
+        game.state.active_house = None;
+        game.state.pending_westeros = None;
+        game.state.westeros_next_deck = 0;
+        game.state.westeros_waiting = false;
+        game.state.westeros_decks[0] = DeckState::new([icon_card]);
+        game.state.westeros_decks[1] = DeckState::new([game_of_thrones]);
+        game.state.wildling_threat = game.data.wildlings.track_max.saturating_sub(1);
+
+        game.advance().unwrap();
+        assert_eq!(
+            game.state.phase,
+            Phase::WildlingAttack,
+            "the icon pushes the threat over the top"
+        );
+        assert_eq!(game.state.westeros_next_deck, 1);
+        assert!(
+            game.state.westeros_decks[1].drawn.is_none(),
+            "the attack must resolve before the next Westeros card"
+        );
+        assert_eq!(
+            game.state.pending_westeros.as_deref(),
+            Some(&[icon_card][..]),
+            "the card that triggered the attack is still waiting for its own effect"
+        );
+
+        let mut guard = 0;
+        while game.state.phase == Phase::WildlingAttack {
+            guard += 1;
+            assert!(guard < 40, "the Wildling attack must terminate");
+            let house = game.state.active_house.expect("a Wildling bidder");
+            game.step(Action::bid(house, 0)).unwrap();
+        }
+        assert_eq!(game.state.phase, Phase::Westeros);
+        assert_eq!(game.state.westeros_next_deck, 1);
+        assert!(game.state.westeros_decks[1].drawn.is_none());
+
+        game.continue_westeros().unwrap();
+        assert!(game.state.westeros_waiting);
+        assert!(
+            game.state.westeros_decks[1].drawn.is_none(),
+            "the card that carried the icon still resolves first"
+        );
+        game.continue_westeros().unwrap();
+        assert_eq!(
+            game.state.pending_westeros.as_deref(),
+            Some(&[game_of_thrones][..])
+        );
+    }
+
+    #[test]
+    fn sequential_supply_disbands_before_the_next_card() {
+        let mut game = game(1);
+        let supply = game
+            .data
+            .westeros
+            .card_index("supply")
+            .expect("Supply card");
+        let game_of_thrones = game
+            .data
+            .westeros
+            .card_index("game_of_thrones")
+            .expect("Game of Thrones card");
+        let house = HouseId(2);
+        let region = game.state.controlled_regions(house)[0];
+        game.state.region_mut(region).units[UnitType::Footman.index()] = 8;
+        game.sequential_westeros = true;
+        game.state.round = 2;
+        game.state.phase = Phase::Westeros;
+        game.state.active_house = None;
+        game.state.pending_westeros = None;
+        game.state.westeros_next_deck = 0;
+        game.state.westeros_waiting = false;
+        game.state.westeros_decks[0] = DeckState::new([supply]);
+        game.state.westeros_decks[1] = DeckState::new([game_of_thrones]);
+
+        game.advance().unwrap();
+        assert!(game.state.westeros_waiting);
+        game.continue_westeros().unwrap();
+        assert!(
+            !game.state.supply_queue.is_empty(),
+            "eight Footmen must exceed the setup Supply"
+        );
+        assert!(
+            game.state.westeros_decks[1].drawn.is_none(),
+            "the next card must not be revealed while Supply is being enforced"
+        );
+
+        let mut guard = 0;
+        while !game.state.supply_queue.is_empty() {
+            guard += 1;
+            assert!(guard < 30, "Supply disbanding must terminate");
+            let action = game
+                .legal_actions()
+                .into_iter()
+                .find(|action| action.kind == ActionKind::Disband)
+                .expect("a Supply disband action");
+            game.step(action).unwrap();
+        }
+
+        assert!(
+            game.state.westeros_decks[1].drawn.is_none(),
+            "the next card stays face down until Supply is fully resolved"
+        );
+        game.continue_westeros().unwrap();
+        assert_eq!(
+            game.state.pending_westeros.as_deref(),
+            Some(&[game_of_thrones][..])
+        );
+    }
+
+    #[test]
+    fn throne_of_blades_mustering_choice_resolves_before_the_next_card() {
+        let mut game = game(1);
+        let throne = game
+            .data
+            .westeros
+            .card_index("throne_of_blades")
+            .expect("A Throne of Blades");
+        let mustering = game
+            .data
+            .westeros
+            .card_index("mustering")
+            .expect("Mustering card");
+        let game_of_thrones = game
+            .data
+            .westeros
+            .card_index("game_of_thrones")
+            .expect("Game of Thrones card");
+        let holder = game.state.first_player().expect("an Iron Throne holder");
+        game.sequential_westeros = true;
+        game.state.round = 2;
+        game.state.phase = Phase::Westeros;
+        game.state.active_house = None;
+        game.state.pending_westeros = None;
+        game.state.westeros_next_deck = 0;
+        game.state.westeros_waiting = false;
+        game.state.westeros_decks[0] = DeckState::new([throne]);
+        game.state.westeros_decks[1] = DeckState::new([game_of_thrones]);
+
+        game.advance().unwrap();
+        assert!(game.state.westeros_waiting);
+        game.continue_westeros().unwrap();
+        assert_eq!(game.state.phase, Phase::WesterosChoice);
+
+        game.step(Action::westeros_choice(holder, CardId(mustering as u8)))
+            .unwrap();
+        assert_eq!(
+            game.state.phase,
+            Phase::Mustering,
+            "choosing Mustering must open the mustering step immediately"
+        );
+        assert_eq!(game.state.westeros_next_deck, 1);
+        assert!(
+            game.state.westeros_decks[1].drawn.is_none(),
+            "the next card must not be revealed before the mustering step"
+        );
+
+        let mut guard = 0;
+        while game.state.phase == Phase::Mustering {
+            guard += 1;
+            assert!(guard < 12);
+            let house = game.state.active_house.expect("a mustering house");
+            game.step(Action::pass(house)).unwrap();
+        }
+        assert!(game.state.westeros_waiting);
+        assert_eq!(
+            game.state.pending_westeros.as_deref(),
+            Some(&[game_of_thrones][..])
+        );
+    }
+
+    #[test]
     fn cleanup_recovers_routed_units_and_returns_orders() {
         let mut game = game(1);
         let house = game.current_player().unwrap();
@@ -1799,6 +2613,38 @@ mod tests {
     }
 
     #[test]
+    fn the_wildling_card_stays_hidden_until_the_bids_are_in() {
+        let mut game = game(1);
+        let card = game
+            .data
+            .wildlings
+            .card_index("crow_killers")
+            .expect("the card exists");
+        game.state.wildling_deck = DeckState {
+            cards: SmallVec::from_slice(&[card]),
+            position: 0,
+            drawn: None,
+        };
+        game.state.wildling_threat = 6;
+        game.wildling_tie_choice = false;
+        game.resolve_wildlings().unwrap();
+        assert_eq!(game.state.phase, Phase::WildlingAttack);
+        assert!(
+            game.state.wildling_attack.as_ref().unwrap().card.is_none(),
+            "the top Wildling card is face down while the Power bids are made"
+        );
+
+        for house in game.state.present_houses() {
+            game.apply_wildling_bid(house, 0);
+        }
+        game.resolve_wildling_attack().unwrap();
+        assert!(
+            game.state.wildling_discard.contains(&card),
+            "the card is revealed and resolved after the bids"
+        );
+    }
+
+    #[test]
     fn a_westeros_choice_asks_only_its_holder() {
         let mut game = game(1);
         let holder = HouseId(1);
@@ -1827,5 +2673,116 @@ mod tests {
         game.move_influence(Track::KingsCourt, house, false);
         let track = &game.state.tracks[Track::KingsCourt.index()];
         assert_eq!(*track.last().unwrap(), house);
+    }
+
+    /// Empty every area so a Horde test controls exactly the regions it sets up.
+    fn clear_board(game: &mut Game) {
+        let ids: Vec<RegionId> = game.state.region_ids().collect();
+        for id in ids {
+            let region = game.state.region_mut(id);
+            region.units = [0; 4];
+            region.routed = [0; 4];
+            region.controller = None;
+            region.order = None;
+            region.order_house = None;
+            region.garrison = 0;
+            region.mustering_points = 0;
+            region.neutral_force = 0;
+        }
+    }
+
+    #[test]
+    fn horde_destroy_at_fort_skips_forts_that_cannot_take_the_penalty() {
+        let mut game = game(1);
+        let house = HouseId(2);
+        let winterfell = game.data.map.lookup("winterfell").unwrap();
+        let white_harbor = game.data.map.lookup("white_harbor").unwrap();
+        let stony_shore = game.data.map.lookup("the_stony_shore").unwrap();
+        clear_board(&mut game);
+        for region in [winterfell, white_harbor, stony_shore] {
+            game.state.region_mut(region).controller = Some(house);
+        }
+        // A two-unit penalty can only be taken at White Harbor: Winterfell has
+        // a single unit and the Stony Shore is not a Castle/Stronghold.
+        game.state.region_mut(winterfell).units = [1, 0, 0, 0];
+        game.state.region_mut(white_harbor).units = [2, 0, 0, 0];
+        game.state.region_mut(stony_shore).units = [3, 0, 0, 0];
+
+        game.queue_destroy_at_fort(house, 2);
+        let task = game.state.choice_queue.first().expect("a Horde choice");
+        match &task.kind {
+            ChoiceKind::Region {
+                purpose: RegionChoice::HordeFort { count },
+                regions,
+                allow_none,
+            } => {
+                assert_eq!(*count, 2);
+                assert!(!allow_none);
+                assert_eq!(regions.as_slice(), &[white_harbor]);
+            }
+            other => panic!("expected a Horde fort choice, got {other:?}"),
+        }
+
+        // With every fort reduced to one unit the card falls back to "destroy
+        // anywhere" rather than letting the player pick an undersized fort.
+        game.state.choice_queue.clear();
+        game.state.region_mut(white_harbor).units = [1, 0, 0, 0];
+        game.queue_destroy_at_fort(house, 2);
+        let task = game.state.choice_queue.first().expect("a destroy choice");
+        match &task.kind {
+            ChoiceKind::Unit {
+                purpose: UnitChoice::Destroy,
+                areas,
+                remaining,
+                allow_none,
+            } => {
+                assert_eq!(*remaining, 2);
+                assert!(!allow_none);
+                for region in [winterfell, white_harbor, stony_shore] {
+                    assert!(areas.contains(&region), "anywhere includes {region:?}");
+                }
+            }
+            other => panic!("expected an anywhere destroy choice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn horde_muster_only_offers_forts_with_mustering_points() {
+        let mut game = game(1);
+        let house = HouseId(2);
+        let winterfell = game.data.map.lookup("winterfell").unwrap();
+        let stony_shore = game.data.map.lookup("the_stony_shore").unwrap();
+        clear_board(&mut game);
+        game.state.region_mut(winterfell).controller = Some(house);
+        game.state.region_mut(stony_shore).controller = Some(house);
+
+        game.queue_muster_at_fort(house);
+        let task = game
+            .state
+            .choice_queue
+            .first()
+            .expect("a Horde muster choice");
+        match &task.kind {
+            ChoiceKind::Region {
+                purpose: RegionChoice::HordeMusterFort,
+                regions,
+                allow_none,
+            } => {
+                assert!(*allow_none);
+                assert_eq!(regions.as_slice(), &[winterfell]);
+                assert!(regions
+                    .iter()
+                    .all(|region| game.data.map.region(*region).mustering > 0));
+                assert!(!regions.contains(&stony_shore));
+            }
+            other => panic!("expected a Horde muster choice, got {other:?}"),
+        }
+
+        // A house with no mustering area gets no decision at all, not an empty
+        // "may muster" task that would stall the choice queue.
+        game.state.choice_queue.clear();
+        game.state.region_mut(winterfell).controller = None;
+        game.queue_muster_at_fort(house);
+        assert!(game.state.choice_queue.is_empty());
     }
 }

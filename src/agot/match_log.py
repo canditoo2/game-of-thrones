@@ -30,6 +30,10 @@ def _action_record(action: Action) -> dict:
         "target": action.target,
         "order": action.order,
         "card": action.card,
+        # A generic choice may play a card from another house's deck
+        # (Patchface's discard) and carries a synthetic context tag.
+        "card_house": action.card_house,
+        "choice_tag": action.choice_tag,
         "unit": action.unit,
         "side": action.side,
         "amount": action.amount,

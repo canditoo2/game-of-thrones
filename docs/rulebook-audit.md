@@ -43,6 +43,14 @@ facts extracted from them are stored.
 | 11 | Cross-house support | Support was automatic and only ever helped its owner | Combat opens with a Support step: each adjacent Support order's owner, in Iron Throne order, declares `attacker`, `defender` or `refuse`. A player may never support an opponent against their own units; Neutral Forces can never be supported | Rulebook pp. 17-18 and p. 26 |
 | 12 | Siege Engine support | Counted only when the *supporting* area was a Castle/Stronghold | Counts only when the *embattled* area is a Castle/Stronghold, which is what the rulebook means | Rulebook p. 18 |
 | 13 | Combat card-text / blade timing | Immediate House-card effects were applied with the final comparison, after the blade step | Card text and immediate effects resolve first; Doran can move the Fiefdoms leader before the blade decision. A new blade holder may use an unused blade; a blade used earlier remains used when it changes hands. Existing starred orders remain on the board when King's Court changes. | Rulebook combat steps; FFG forum archive topic 291514 |
+| 14 | Siege Engines as casualties | A Siege Engine could be picked as a casualty, saving a Footman | Siege Engines cannot be chosen as casualties; the loser removes every participating Siege Engine automatically before picking the ordinary casualties | Official FFG responses, BGG thread 752416 |
+| 15 | Battles against routed units | A province containing only routed units was not a battle target | The province still fights; routed units contribute 0 Combat Strength, and a routed unit can support at 0 plus the Support order's bonus. Routed units cannot be casualties and are destroyed automatically after a loss. Kevan/Victarion do not upgrade their 0 strength because their text says "instead of +1". | Official FFG responses, BGG thread 752416 |
+| 16 | Wildling bid ties | Tied highest/lowest bidders were broken by Iron Throne position | After the card is revealed, the Iron Throne holder chooses among the tied bidders before rewards or penalties resolve. The choice is a real action in training and desktop play. | Official FFG responses, BGG thread 752416 |
+| 17 | Salladhor Saan vs Victarion | Salladhor removed only the printed Ship strength, leaving Victarion's +1-per-Ship bonus | Salladhor's "reduce to 0" is an override: it removes both the printed Ship strength and Victarion's extra bonus; Order and House-card modifiers are untouched | Official FFG responses, BGG thread 752416 |
+| 18 | Arianne Martell's token and Mace Tyrell's Order | Arianne could leave the defender's Power token in the area; an emptied area always released its Order | Arianne prevents occupation but the winner still removes the Order/Power token and resolves other winner effects. If Mace removes the last unit but the defender still wins, the defender's March/Consolidate Order remains on the empty area | Official FFG responses, BGG thread 752416 |
+| 19 | House-card secrecy | The second chooser's PIMC search could see the first chooser's card | The second chooser's determinized worlds resample the first card (the physical reveal is simultaneous); the GUI/snapshot hides both cards until both players commit | Official FFG responses, BGG thread 752416 |
+| 20 | Supply disbanding | Excess units were removed automatically (largest army, cheapest first) | The affected owner chooses one unit at a time from any controlled area, including routed units; the same pause handles Supply cards, Wildling Supply loss and other Supply enforcement paths | Rulebook p. 24 (Supply) |
+| 21 | Wildling card reveal timing | The top Wildling card was drawn and exposed before the Power bids | It stays face down during the bids, is revealed before the Iron Throne tie-break, and resolves only then; PIMC draws its own card from the resampled deck | Rulebook Wildling attack steps; Messenger Raven: "Look in the Wildling Deck" |
 
 Correction 2 also carries a (non-mechanical) fact: House Stark is the only house
 to open with **both** a Stronghold (Winterfell) and a Castle (White Harbor).
@@ -92,33 +100,60 @@ Everything in the table above is verified at **High** confidence.
 ## Fidelity of the multi-choice effects
 
 The physical game asks a player to choose inside several effects (which unit
-dies, which area is retreated to, which card is played). The engine keeps the
-game *decidable* by auto-resolving those sub-choices with deterministic
-defaults, **except** for battle casualties, battle support declarations and a
-defeated defender's retreat, which are now genuine player decisions (the Combat
-phase pauses for them; see `docs/roadmap.md`). The chosen defaults are:
+dies, which area is retreated to, which card is played). Interactive play now
+pauses for all of these choices through a generic choice queue. The extension's
+`Game.new` leaves `choice_choices` off by default for the frozen fixtures;
+Python training/evaluation and desktop play construct every game with
+`choice_choices=True`, and the same actions are exposed to native self-play and
+the neural policy. The low-level `combat.resolve_and_apply` test convenience
+path (used only by the frozen regression corpus) retains deterministic
+fallbacks; it is not the path used by the game or training.
+
+Supply disbanding is offered one unit at a time, including separate ready and
+routed copies of the same unit type, and is used after a Supply card, a Wildling
+Supply loss and an interactive post-retreat check.
+
+One printed "may" is deliberately not a decision: capturing a land area replaces
+the enemy Port Ships up to the Port's capacity and the captor's Supply. Taking
+fewer Ships has no upside (Ships add combat strength and never a penalty), so
+the engine always takes the maximum rather than spending a policy action on a
+dominated option.
 
 ### House cards
 
-| Card | Sub-choice and default |
-| ---- | ---------------------- |
-| Renly Baratheon | Upgrade a participating Footman if present, otherwise a supporting Baratheon Footman in a neighbouring Support area. |
-| Tyrion Lannister | The opponent plays their strongest remaining card; the ability is used only when that card's value is lower than the one being replaced. With no other card, the opponent fights with none. |
-| Cersei Lannister | Removes the first opponent Order found scanning regions in id order. |
-| Robb Stark | The winner chooses the defender's retreat among the legal areas that keep the loser within Supply (the opponent's fewest-loss options). |
-| Aeron Damphair | Pays 2 Power and swaps in the strongest card when it is worth more than Aeron (0). |
-| Mace Tyrell | Destroys one opposing participating Footman. |
-| Queen of Thorns | Removes the first opposing Order in a neighbouring area (id order), never the attacker's origin March. |
-| Doran Martell | Three legal track choices. Desktop play prompts the card's owner; Python training/evaluation expose the same three actions (encoded in the action amount field) so the policy learns the choice. Doran resolves before the Valyrian Steel Blade step, so a new holder may use an unused blade. |
-| Patchface | Discards the opponent's strongest card in hand. |
-
-All other card abilities are fully determined (no sub-choice).
+| Card | Real choice |
+| ---- | ---------- |
+| Renly Baratheon | If the winner may upgrade, choose a participating Footman or a supporting Baratheon Footman. |
+| Tyrion Lannister | The opponent chooses a different card from their hand; with no other card they fight with none. |
+| Cersei Lannister | The winner chooses which opponent Order to remove. |
+| Robb Stark | The winner chooses the defender's retreat among the legal fewest-loss areas. |
+| Aeron Damphair | The owner chooses whether to pay 2 Power and which replacement card to play. |
+| Mace Tyrell | Destroys one opposing participating Footman; all participating Footmen are equivalent, so no sub-choice is needed. |
+| Queen of Thorns | The owner chooses which adjacent opposing Order to remove, never the March origin. |
+| Doran Martell | Three legal track choices. Desktop play prompts the card's owner; Python training/evaluation expose the same actions. Doran resolves before the Valyrian Steel Blade step, so a new holder may use an unused blade. |
+| Patchface | The owner chooses which opponent card to discard, after the opponent has drawn back a recycled six-card hand. |
 
 ### Wildling cards
 
-The unit(s) destroyed, the Influence track moved to and the House card
-discarded are chosen by a deterministic default; a tie for highest or lowest
-bidder is broken by **Iron Throne position** rather than asking the holder.
+All player-facing sub-choices are real decisions in interactive play and
+training:
+
+* **Crow Killers:** which Knights to replace and which Footmen to upgrade.
+* **The Horde Descends:** which Castle/Stronghold to use, which units are
+  destroyed, and how the highest bidder musters.
+* **King Beyond the Wall:** each other house chooses Fiefdoms or King's Court;
+  the highest bidder chooses any Influence track.
+* **Mammoth Riders:** which units are destroyed and which discarded House card
+  is retrieved.
+* **Massing at Milkwater:** each other house chooses which card to discard.
+* **Preemptive Raid:** the lowest bidder chooses between destroying two units
+  and dropping two positions on their highest Influence track.
+* **Rattleshirt's Raiders:** Supply losses use the normal real Supply-disband
+  queue.
+
+A tied highest/lowest bidder is likewise a real decision for the Iron Throne
+holder, taken after the card is revealed and before any reward or penalty
+resolves.
 
 ## How to re-verify
 

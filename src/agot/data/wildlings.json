@@ -4,13 +4,16 @@
   "notes": [
     "The nine Wildling card names match the physical component list.",
     "Win/loss effects were transcribed from the bundled scans (Rulebook/wildling-cards1..3.webp).",
-    "Each branch names one effect the engine resolves automatically. Where the printed card",
-    "lets the rewarded player choose (which units to destroy, which track to move to, which",
-    "House card to discard, etc.) the engine picks a deterministic default; see docs/roadmap.md.",
+    "Each branch names one effect the engine resolves. Where the printed card",
+    "lets the rewarded player choose (which units to destroy, which track to move to,",
+    "which House card to discard or retrieve, the Preemptive Raid A/B option) that",
+    "choice is a real action in Python training/evaluation and desktop play; only",
+    "the low-level fixture/test helpers keep a deterministic default.",
     "'chosen' is the lowest bidder when the Wildlings win and the highest bidder when the",
     "Night's Watch wins. 'others' applies to every other participant. A null 'chosen' means",
     "'all' for replace_knights; 999 power means 'all available power'.",
-    "Ties for highest/lowest bidder are broken by Iron Throne position (the holder would decide)."
+    "Ties for highest/lowest bidder are a real decision for the Iron Throne holder, made",
+    "after the card is revealed and before its rewards or penalties resolve."
   ],
   "track_max": 12,
   "start_threat": 2,
@@ -85,7 +88,7 @@
     "preemptive_raid": {
       "name": "Preemptive Raid",
       "wildling_victory": {
-        "effect": "destroy_units",
+        "effect": "preemptive_raid",
         "chosen": 2,
         "others": 0,
         "text": "LOWEST BIDDER: chooses one of the following: A) destroys 2 of his units anywhere, or B) is reduced 2 positions on his highest Influence track. EVERYONE ELSE: nothing happens."

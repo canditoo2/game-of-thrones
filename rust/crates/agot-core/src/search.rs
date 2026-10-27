@@ -243,6 +243,8 @@ struct Node {
     deferred_battles: bool,
     sequential_westeros: bool,
     doran_choice: bool,
+    wildling_tie_choice: bool,
+    choice_choices: bool,
     /// The position, or `None` while the node is still pending.
     ///
     /// Boxed deliberately: most nodes are pending children created by an
@@ -282,6 +284,8 @@ impl Node {
             deferred_battles: game.deferred_battles,
             sequential_westeros: game.sequential_westeros,
             doran_choice: game.doran_choice,
+            wildling_tie_choice: game.wildling_tie_choice,
+            choice_choices: game.choice_choices,
             state: Some(Box::new(game.state.clone())),
             rng: source.fork(),
             pending: None,
@@ -305,6 +309,7 @@ impl Node {
 /// Puts a moved-out position back when it goes out of scope.
 struct RestoreGame<'a> {
     slot: &'a mut Option<Box<State>>,
+    rng_slot: &'a mut Rng,
     game: Option<Game>,
 }
 
@@ -312,6 +317,9 @@ impl Drop for RestoreGame<'_> {
     fn drop(&mut self) {
         if let Some(game) = self.game.take() {
             *self.slot = Some(Box::new(game.state));
+            // A continued reveal may have consumed the stream (Winter is
+            // Coming reshuffles a deck); keep the node reproducible.
+            *self.rng_slot = game.rng;
         }
     }
 }
@@ -321,7 +329,7 @@ impl Drop for RestoreGame<'_> {
 /// The state is *moved* into the temporary game and moved back when the body
 /// returns — even if it panics — so no copy of the board is made and the arena
 /// keeps the only copy throughout. The node must be materialized.
-fn with_node_game<R>(nodes: &mut [Node], index: u32, body: impl FnOnce(&Game) -> R) -> R {
+fn with_node_game<R>(nodes: &mut [Node], index: u32, body: impl FnOnce(&mut Game) -> R) -> R {
     let node = &mut nodes[index as usize];
     let game = Game {
         data: Arc::clone(&node.data),
@@ -336,13 +344,17 @@ fn with_node_game<R>(nodes: &mut [Node], index: u32, body: impl FnOnce(&Game) ->
         deferred_battles: node.deferred_battles,
         sequential_westeros: node.sequential_westeros,
         doran_choice: node.doran_choice,
+        wildling_tie_choice: node.wildling_tie_choice,
+        choice_choices: node.choice_choices,
         rng: node.rng.clone(),
     };
-    let restore = RestoreGame {
-        slot: &mut nodes[index as usize].state,
+    let node = &mut nodes[index as usize];
+    let mut restore = RestoreGame {
+        slot: &mut node.state,
+        rng_slot: &mut node.rng,
         game: Some(game),
     };
-    body(restore.game.as_ref().expect("the guard owns the game"))
+    body(restore.game.as_mut().expect("the guard owns the game"))
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +530,15 @@ impl<E: Evaluator> Mcts<E> {
         let mut index = root;
         loop {
             self.materialize(index)?;
+            // A sequential Westeros reveal is not a decision: resolve the
+            // revealed card (and its mustering/supply/bidding/Wildling step)
+            // before the search treats this node as a leaf.
+            if self.state_of(index).phase == Phase::Westeros
+                && self.state_of(index).westeros_waiting
+            {
+                with_node_game(&mut self.nodes, index, |game| game.continue_westeros())?;
+                continue;
+            }
             if self.state_of(index).phase == Phase::GameOver {
                 let value = outcome_vector(self.state_of(index));
                 return Ok(Simulation {
@@ -740,6 +761,8 @@ impl<E: Evaluator> Mcts<E> {
             deferred_battles: node.deferred_battles,
             sequential_westeros: node.sequential_westeros,
             doran_choice: node.doran_choice,
+            wildling_tie_choice: node.wildling_tie_choice,
+            choice_choices: node.choice_choices,
             rng: node.rng.clone(),
         })
     }
@@ -797,6 +820,8 @@ impl<E: Evaluator> Mcts<E> {
                 deferred_battles: parent.deferred_battles,
                 sequential_westeros: parent.sequential_westeros,
                 doran_choice: parent.doran_choice,
+                wildling_tie_choice: parent.wildling_tie_choice,
+                choice_choices: parent.choice_choices,
                 rng: parent.rng.clone(),
             }
         };
@@ -896,7 +921,16 @@ impl<E: Evaluator> Mcts<E> {
                 *prior = (1.0 - weight) * *prior + weight * sample;
             }
         }
-        let (data, config, rng, deferred_battles, sequential_westeros, doran_choice) = {
+        let (
+            data,
+            config,
+            rng,
+            deferred_battles,
+            sequential_westeros,
+            doran_choice,
+            wildling_tie_choice,
+            choice_choices,
+        ) = {
             let parent = &self.nodes[index as usize];
             (
                 Arc::clone(&parent.data),
@@ -905,6 +939,8 @@ impl<E: Evaluator> Mcts<E> {
                 parent.deferred_battles,
                 parent.sequential_westeros,
                 parent.doran_choice,
+                parent.wildling_tie_choice,
+                parent.choice_choices,
             )
         };
         let first_child = self.nodes.len() as u32;
@@ -915,6 +951,8 @@ impl<E: Evaluator> Mcts<E> {
                 deferred_battles,
                 sequential_westeros,
                 doran_choice,
+                wildling_tie_choice,
+                choice_choices,
                 state: None,
                 rng: rng.clone(),
                 pending: Some((index, *action)),
@@ -1023,8 +1061,11 @@ fn sample_gamma(rng: &mut Rng, alpha: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action::ActionKind;
+    use crate::enums::UnitType;
     use crate::fingerprint::state_fingerprint;
     use crate::setup::GameConfig;
+    use crate::state::{ChoiceKind, ChoiceResume, ChoiceTask, UnitChoice};
 
     fn data() -> Arc<DataSet> {
         Arc::new(DataSet::load_default().expect("bundled data must load"))
@@ -1032,6 +1073,40 @@ mod tests {
 
     fn opening(seed: u64) -> Game {
         Game::new(data(), GameConfig::with_seed(seed)).expect("game must start")
+    }
+
+    #[test]
+    fn search_continues_through_a_sequential_westeros_reveal() {
+        let mut game = opening(1);
+        game.sequential_westeros = true;
+        game.state.round = 2;
+        game.state.phase = Phase::Westeros;
+        game.state.active_house = None;
+        game.state.pending_westeros = None;
+        game.state.westeros_next_deck = 0;
+        game.state.westeros_waiting = false;
+        game.state.wildling_threat = 0;
+        game.advance().expect("the first card is revealed");
+        assert!(game.state.westeros_waiting);
+
+        let mut search = Mcts::with_seed(UniformEvaluator, 3);
+        search.simulations = 2;
+        let roots = search.open_search_worlds(&game);
+        let root = *roots.first().expect("a root");
+        let simulation = search
+            .prepare_simulation(root)
+            .expect("the reveal is resolved, not treated as terminal");
+
+        assert!(
+            simulation.leaf.is_some(),
+            "a sequential reveal must be continued before the search expands"
+        );
+        assert!(!simulation.actions.is_empty());
+        let leaf = search.leaf_game(&simulation).expect("a materialized leaf");
+        assert!(
+            !(leaf.state.phase == Phase::Westeros && leaf.state.westeros_waiting),
+            "the search leaf must be a real decision"
+        );
     }
 
     #[test]
@@ -1043,6 +1118,73 @@ mod tests {
             "Node is {} bytes, State is {}",
             std::mem::size_of::<Node>(),
             std::mem::size_of::<State>()
+        );
+    }
+
+    /// A pending generic choice is a real decision: PIMC builds one root per
+    /// world, every world keeps the queue, and the search offers exactly the
+    /// choice actions instead of skipping past them.
+    #[test]
+    fn search_keeps_the_pending_choice_queue() {
+        let mut game = opening(11);
+        game.deferred_battles = true;
+        game.sequential_westeros = true;
+        game.choice_choices = true;
+        game.state.choice_choices = true;
+        game.state.phase = Phase::Action;
+        game.state.supply_queue.clear();
+        game.state.choice_resume = Some(ChoiceResume::BattlePre);
+        let winterfell = game.data.map.lookup("winterfell").expect("winterfell");
+        game.state.choice_queue.push(ChoiceTask {
+            house: HouseId(2),
+            kind: ChoiceKind::Unit {
+                purpose: UnitChoice::Destroy,
+                areas: smallvec::smallvec![winterfell],
+                remaining: 1,
+                allow_none: true,
+            },
+        });
+        let actions = game.legal_actions();
+        assert!(
+            !actions.is_empty()
+                && actions.iter().all(|action| matches!(
+                    action.kind,
+                    ActionKind::ChooseCasualty | ActionKind::Pass
+                )),
+            "the position asks the choice, not a phase action: {actions:?}"
+        );
+
+        let mut searcher = Mcts::with_seed(UniformEvaluator, 3);
+        searcher.determinizations = 4;
+        let roots = searcher.open_search_worlds(&game);
+        assert_eq!(roots.len(), 4, "one root per determinized world");
+        for root in &roots {
+            let simulation = searcher.prepare_simulation(*root).expect("a simulation");
+            assert_eq!(simulation.actions, actions);
+            let leaf = searcher
+                .leaf_game(&simulation)
+                .expect("a materialized leaf");
+            assert_eq!(leaf.state.choice_queue, game.state.choice_queue);
+            assert_eq!(leaf.state.choice_resume, game.state.choice_resume);
+            assert!(leaf.state.choice_choices && leaf.choice_choices);
+            assert!(leaf.deferred_battles && leaf.sequential_westeros);
+            assert_eq!(
+                leaf.state.region(winterfell).units[UnitType::Footman.index()],
+                game.state.region(winterfell).units[UnitType::Footman.index()],
+                "determinization must not touch the chooser's own area"
+            );
+        }
+
+        // The search also expands and steps *through* the choice: a simulated
+        // child applies the chosen unit and resumes the queued sequence.
+        searcher
+            .run(roots[0], 3)
+            .expect("the choice can be simulated");
+        let result = searcher.result_from_root(roots[0]);
+        assert_eq!(result.actions, actions);
+        assert!(
+            result.visits.iter().sum::<f64>() > 0.0,
+            "the choice actions were visited"
         );
     }
 

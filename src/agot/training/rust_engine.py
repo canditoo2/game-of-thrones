@@ -91,7 +91,11 @@ def spec_for(plan: SelfPlayPlan, base_config: GameConfig | None = None) -> dict:
         "max_rounds": plan.max_rounds,
         "victory_castles": base.victory_castles,
         "use_westeros_decks": base.use_westeros_decks,
+        "deferred_battles": base.deferred_battles,
+        "sequential_westeros": base.sequential_westeros,
         "doran_choice": base.doran_choice,
+        "wildling_tie_choice": base.wildling_tie_choice,
+        "choice_choices": base.choice_choices,
         "houses": list(base.houses),
     }
 
@@ -209,7 +213,11 @@ def try_batched_self_play(
         first.max_rounds,
         first.victory_castles,
         first.use_westeros_decks,
+        first.deferred_battles,
+        first.sequential_westeros,
         first.doran_choice,
+        first.wildling_tie_choice,
+        first.choice_choices,
         tuple(first.houses),
     )
     for config in configs:
@@ -217,7 +225,11 @@ def try_batched_self_play(
             config.max_rounds,
             config.victory_castles,
             config.use_westeros_decks,
+            config.deferred_battles,
+            config.sequential_westeros,
             config.doran_choice,
+            config.wildling_tie_choice,
+            config.choice_choices,
             tuple(config.houses),
         ) != shared:
             return None
@@ -243,7 +255,11 @@ def try_batched_self_play(
         "max_rounds": first.max_rounds,
         "victory_castles": first.victory_castles,
         "use_westeros_decks": first.use_westeros_decks,
+        "deferred_battles": first.deferred_battles,
+        "sequential_westeros": first.sequential_westeros,
         "doran_choice": first.doran_choice,
+        "wildling_tie_choice": first.wildling_tie_choice,
+        "choice_choices": first.choice_choices,
         "houses": list(first.houses),
         "step_limit": step_limit,
         "scripted": scripted,

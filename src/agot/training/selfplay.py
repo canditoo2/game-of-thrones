@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from agot.agents.base import Policy, outcome_vector
 from agot.agents.mcts import MCTS
+from agot.engine.enums import Phase
 from agot.engine.game import Game, GameConfig
 from agot.engine.observation import HOUSE_ORDER, observe
 from agot.training.replay import Example
@@ -75,6 +76,13 @@ def play_game(
     steps = 0
 
     while not game.is_terminal() and steps < step_limit:
+        # A sequential Westeros phase pauses after each reveal. Training has
+        # no table to click Continue, but the pause must still happen: resolve
+        # this card (and its mustering/supply/bidding step) before revealing
+        # the next one.
+        if game.state.phase is Phase.WESTEROS and game.state.westeros_waiting:
+            game.continue_westeros()
+            continue
         house = game.current_player()
         if house is None:  # pragma: no cover - engine always advances to someone
             break
@@ -240,12 +248,17 @@ def batched_self_play(
 
     while True:
         active: list[int] = []
+        advanced = False
         for index, game in enumerate(games):
             if finished[index]:
                 continue
             if game.is_terminal() or steps[index] >= step_limit:
                 finished[index] = True
                 winners[index] = game.winner()
+                continue
+            if game.state.phase is Phase.WESTEROS and game.state.westeros_waiting:
+                game.continue_westeros()
+                advanced = True
                 continue
             house = game.current_player()
             if house is None:  # pragma: no cover - engine always advances
@@ -266,6 +279,8 @@ def batched_self_play(
                 active_search[index] = policy
             active.append(index)
         if not active:
+            if advanced:
+                continue
             break
 
         searching = [index for index in active if active_search[index] is not None]

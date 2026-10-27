@@ -16,6 +16,7 @@
 
 pub mod action;
 pub mod action_phase;
+pub mod choices;
 pub mod combat;
 pub mod enums;
 pub mod fingerprint;
@@ -38,8 +39,9 @@ pub use action::{Action, ActionKind, Side};
 pub use combat::{
     apply_battle_result, apply_casualties, destroy_army, legal_retreats, order_modifier,
     potential_support_strength, resolve_and_apply, resolve_battle, retreat, retreat_keeps_supply,
-    retreat_options, support_detail, support_from_choices, support_orders, support_strength,
-    unit_strength, units_strength, BattleRequest, BattleResult, BattleSide, SupportTotals,
+    retreat_options, support_detail, support_from_choices, support_orders, support_present,
+    support_strength, unit_strength, units_strength, BattleRequest, BattleResult, BattleSide,
+    SupportTotals,
 };
 pub use enums::{
     ActionStep, CardId, HouseId, OrderKey, OrderType, Phase, RegionId, Terrain, Track, UnitType,

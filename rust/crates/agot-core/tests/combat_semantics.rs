@@ -31,8 +31,8 @@ use agot_core::action::Side;
 use agot_core::combat::{
     apply_battle_result, apply_casualties, destroy_army, legal_retreats, order_modifier,
     potential_support_strength, resolve_and_apply, resolve_battle, retreat, retreat_keeps_supply,
-    retreat_options, support_from_choices, support_orders, unit_strength, units_strength,
-    BattleRequest,
+    retreat_options, support_from_choices, support_orders, support_present, unit_strength,
+    units_strength, BattleRequest,
 };
 use agot_core::enums::{CardId, HouseId, OrderKey, RegionId, Track, UnitType};
 use agot_core::house_cards::{self, BattleContext};
@@ -393,6 +393,43 @@ fn refused_support_leaves_the_attacker_short() {
     assert_eq!(result.winner, baratheon);
     // The attack failed; the defender keeps the area.
     assert_eq!(state.region(target).controller, Some(baratheon));
+}
+
+#[test]
+fn routed_units_support_at_zero_plus_the_order_bonus() {
+    let board = Board::new();
+    let mut state = board.clean_state();
+    let (stark, baratheon, tyrell) = (
+        board.house("stark"),
+        board.house("baratheon"),
+        board.house("tyrell"),
+    );
+    let (origin, target, support) = (
+        board.region("the_reach"),
+        board.region("highgarden"),
+        board.region("searoad_marches"),
+    );
+    state.region_mut(origin).controller = Some(stark);
+    state.region_mut(target).controller = Some(baratheon);
+    place_support(&mut state, tyrell, support, [0, 0, 0, 0], "support_plus");
+    state.region_mut(support).routed = [0, 2, 0, 0];
+
+    let totals = support_from_choices(&state, board.map(), target, &[(support, Side::Attacker)]);
+    assert_eq!(
+        totals.attacker_strength, 1,
+        "routed Knights contribute 0, but support_plus still adds its printed +1"
+    );
+    assert_eq!(
+        totals.attacker_units, [0; 4],
+        "routed units are not counted for Kevan/Victarion-style boosts"
+    );
+    assert!(totals.attacker_present, "the side is still being supported");
+    assert!(support_present(&state, board.map(), target, tyrell));
+
+    // The order token alone does not support once the area is empty.
+    state.region_mut(support).routed = [0; 4];
+    let empty = support_from_choices(&state, board.map(), target, &[(support, Side::Attacker)]);
+    assert_eq!(empty.attacker_strength, 0);
 }
 
 #[test]

@@ -334,6 +334,138 @@ pub struct WesterosChoice {
     pub options: SmallVec<[u16; 3]>,
 }
 
+/// A tied highest/lowest Wildling bid, waiting for the Iron Throne holder.
+///
+/// FFG's ruling is that the holder chooses between the tied bidders after the
+/// Wildling card has been revealed but before its penalties or rewards resolve.
+/// The choice is exposed as a [`crate::action::ActionKind::WesterosChoice`]
+/// carrying the candidate index in `amount`, so the frozen action-feature
+/// layout (and therefore existing checkpoints) does not change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WildlingTie {
+    /// The tied bidders, in Iron Throne order.
+    pub candidates: SmallVec<[HouseId; N_HOUSES]>,
+    /// True when the Night's Watch won and the *highest* bidder is rewarded.
+    pub highest: bool,
+    /// The current Iron Throne holder, who makes the choice.
+    pub chooser: HouseId,
+}
+
+/// What to resume once the generic choice queue is empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChoiceResume {
+    /// Continue the battle at the Cards stage (Doran/prepare follow).
+    BattlePre,
+    /// Finish the current Wildling attack after its card choices.
+    Wildling,
+    /// Post-battle card choices have been made; no extra resume is needed.
+    PostBattle,
+}
+
+/// Which unit a generic unit-choice task is asking for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnitChoice {
+    /// Remove one unit from an allowed area.
+    Destroy,
+    /// Replace one Knight with a Footman.
+    ReplaceKnight,
+    /// Replace one Footman with a Knight.
+    UpgradeFootman,
+}
+
+/// Which card a generic card-choice task is asking for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CardChoice {
+    TyrionSwap { target: HouseId },
+    AeronSwap,
+    PatchfaceDiscard { target: HouseId },
+    MassingDiscard,
+    MammothRetrieve,
+}
+
+/// Which area a generic region-choice task is asking for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegionChoice {
+    QueenOrder { opponent: HouseId },
+    CerseiOrder { opponent: HouseId },
+    RenlyFootman,
+    HordeFort { count: u8 },
+    HordeMusterFort,
+}
+
+/// Which Influence track a generic track-choice task is asking for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackChoice {
+    KingBeyondHighest,
+    KingBeyondOther,
+    /// Preemptive Raid option B: the house tied for its highest position on
+    /// several tracks, so its controller picks which one to fall on.
+    PreemptiveHighest,
+}
+
+/// Which either/or choice a generic option task is asking for.
+///
+/// The chosen option travels in [`crate::action::Action::amount`]: `0` always
+/// means "decline" and `1` always means "use", so the two tasks below read the
+/// same way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionChoice {
+    /// Preemptive Raid: destroy two units (`0`) or fall two positions (`1`).
+    PreemptiveRaid,
+    /// Tyrion Lannister's controller decides whether to use the card (`1`) or
+    /// leave the battle as it is (`0`). Using it queues a **mandatory**
+    /// [`CardChoice::TyrionSwap`] task for `target`.
+    TyrionUse { target: HouseId },
+    /// Robb Stark's controller may take over the loser's retreat (`1`) or let
+    /// the loser choose (`0`).
+    RobbRetreat,
+}
+
+/// The payload of one pending generic choice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChoiceKind {
+    /// Pick one unit. The action carries the unit's state in
+    /// [`crate::action::Action::amount`] (0 = ready, 1 = routed), so a ready and
+    /// a routed copy of the same unit type are separate decisions.
+    Unit {
+        purpose: UnitChoice,
+        areas: SmallVec<[RegionId; 8]>,
+        remaining: u8,
+        allow_none: bool,
+    },
+    /// Pick one card from `cards`. The ids normally belong to the choosing
+    /// house's deck; a Patchface task names the target's cards instead, and the
+    /// emitted actions carry that deck in
+    /// [`crate::action::Action::card_house`].
+    Card {
+        purpose: CardChoice,
+        cards: SmallVec<[CardId; 7]>,
+        allow_none: bool,
+    },
+    Region {
+        purpose: RegionChoice,
+        regions: SmallVec<[RegionId; 8]>,
+        allow_none: bool,
+    },
+    Track {
+        purpose: TrackChoice,
+        tracks: SmallVec<[Track; 3]>,
+    },
+    Option {
+        purpose: OptionChoice,
+        options: SmallVec<[u8; 4]>,
+    },
+    /// A Wildling reward musters normally in one chosen Castle/Stronghold.
+    Muster { region: RegionId, points: u8 },
+}
+
+/// One player decision that is not tied to a dedicated phase.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChoiceTask {
+    pub house: HouseId,
+    pub kind: ChoiceKind,
+}
+
 /// Set while a March Order is being resolved across several destinations.
 ///
 /// The order token stays on the board until the march ends, so its bonus still
@@ -393,6 +525,9 @@ pub struct PendingBattle {
     pub defender_card: Option<CardId>,
     pub attacker_card_chosen: bool,
     pub defender_card_chosen: bool,
+    /// Pre-battle card-text choices (Tyrion, Aeron, Queen of Thorns) have
+    /// already been offered, so they must not be queued again.
+    pub pre_choices_done: bool,
     /// Set while Doran Martell pauses for his owner's Influence-track choice.
     pub doran_owner: Option<HouseId>,
     pub doran_track: Option<Track>,
@@ -487,6 +622,9 @@ pub struct State {
 
     pub wildling_threat: u8,
     pub wildling_attack: Option<WildlingAttack>,
+    /// Set when the current attack's extreme bid is tied and the Iron Throne
+    /// holder must choose the affected bidder.
+    pub pending_wildling_tie: Option<WildlingTie>,
     pub westeros_decks: [DeckState; 3],
     /// Westeros card effects still to resolve this round.
     pub pending_westeros: Option<SmallVec<[u16; 3]>>,
@@ -504,6 +642,20 @@ pub struct State {
     pub order_restrictions: SmallVec<[Restriction; 4]>,
     /// Houses that still have to place order tokens this planning phase.
     pub pending_planning: SmallVec<[HouseId; N_HOUSES]>,
+    /// Houses whose armies exceed their Supply limits and must disband.
+    /// The first entry is the house currently choosing a unit.
+    pub supply_queue: SmallVec<[HouseId; N_HOUSES]>,
+    /// A completed interactive battle queues post-retreat Supply excess for the
+    /// owner's disband choice; the low-level `combat::resolve_and_apply`
+    /// convenience path keeps its automatic trim. Supply-card and Wildling
+    /// excess always use [`State::supply_queue`].
+    pub supply_choice: bool,
+    /// Generic player choices from House cards and Wildling consequences.
+    pub choice_queue: SmallVec<[ChoiceTask; 8]>,
+    pub choice_resume: Option<ChoiceResume>,
+    /// Interactive games expose all card/Wildling sub-choices; the low-level
+    /// direct battle helpers retain their deterministic defaults for tests.
+    pub choice_choices: bool,
     /// Pending bids for the current bidding round, keyed by house.
     pub pending_bids: SmallVec<[(HouseId, u8); N_HOUSES]>,
     pub pending_battle: Option<PendingBattle>,
@@ -543,6 +695,7 @@ impl State {
             houses: std::array::from_fn(|_| None),
             wildling_threat: 0,
             wildling_attack: None,
+            pending_wildling_tie: None,
             westeros_decks: std::array::from_fn(|_| DeckState::default()),
             pending_westeros: None,
             westeros_next_deck: 0,
@@ -553,6 +706,11 @@ impl State {
             wildling_discard: SmallVec::new(),
             order_restrictions: SmallVec::new(),
             pending_planning: SmallVec::new(),
+            supply_queue: SmallVec::new(),
+            supply_choice: false,
+            choice_queue: SmallVec::new(),
+            choice_resume: None,
+            choice_choices: false,
             pending_bids: SmallVec::new(),
             pending_battle: None,
             deferred_battle: None,

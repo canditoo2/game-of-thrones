@@ -17,10 +17,11 @@ how much it matters for learning a strong agent. It doubles as the project plan.
   side or refuse. A player may never support an opponent against their own
   units, and Support orders are not consumed by a battle.
 * All 42 House cards' special abilities (see
-  `rust/crates/agot-core/src/house_cards.rs`); the
-  player sub-choices inside an ability are auto-resolved with documented
-  deterministic defaults.
-* Supply recalculation and enforcement, including on marches.
+  `rust/crates/agot-core/src/house_cards.rs`); every player sub-choice inside a
+  House-card ability is a real action in interactive play and training.
+* Supply recalculation and enforcement, including on marches. Excess units are
+  disbanded by their owner one at a time (including routed units) rather than
+  removed by a fixed largest-army/cheapest-unit rule.
 * Action-Phase turn order cycles one order per house; declining an individual
   order, choosing which units march, establishing control with a Power token,
   Special Consolidate Power mustering, the Messenger Raven and the Valyrian
@@ -122,9 +123,10 @@ they should be fixed before expecting a strong agent.
    information either: `engine/hidden.py:determinize` resamples face-down orders
    and secret Power bids from the observer's belief, respecting public Order
    restrictions and the starred-token allowance, and `MCTS(determinizations=N)`
-   runs PIMC over N worlds and aggregates the root visits. The one known
-   remaining leak is the first chooser's House card inside a battle, which the
-   physical game reveals simultaneously.
+   runs PIMC over N worlds and aggregates the root visits. The second chooser's
+   PIMC worlds also resample the first chooser's House card, because the
+   physical game reveals both simultaneously; the snapshot hides both cards
+   until both players have committed.
 
 2. **Cross-house support.** *(done)* A Support order may help *either* side in
    an adjacent battle, and the supporting player chooses. Combat opens with a
@@ -139,33 +141,38 @@ they should be fixed before expecting a strong agent.
    offered and is cancelled if the support is refused. This is where most of
    the game's diplomacy lives.
 
-3. **Player-chosen casualties and retreats.** *(done)* After the strength
-   comparison the Combat phase pauses: the defeated player destroys one unit at a
-   time of their own choosing, then (if defending) picks the legal adjacent area
-   to retreat to. A defeated attacker always returns to where it marched from.
+3. **Player-chosen casualties, retreats and Supply disbanding.** *(done)* After
+   the strength comparison the Combat phase pauses: the defeated player destroys
+   one unit at a time of their own choosing, then (if defending) picks the legal
+   adjacent area to retreat to. A defeated attacker always returns to where it
+   marched from. Supply excess pauses the current phase and offers one
+   `Disband` action per removable unit type and area.
    Robb Stark's controller picks the defender's retreat instead, restricted to
-   areas that keep the loser within Supply. The non-interactive
-   `combat.resolve_and_apply` path still removes cheapest-first for callers that
-   do not run the phase machine.
+   areas that keep the loser within Supply. The low-level
+   `combat.resolve_and_apply` helpers still remove cheapest-first, but they are
+   the frozen fixture/test path and are not used by interactive play or
+   training.
 
 4. **House-card abilities.** *(done)* All 42 cards' text effects are modelled
    in `rust/crates/agot-core/src/house_cards.rs`: passive strength/icon
-   modifiers, immediate
-   destruction/Order/track effects, and post-combat effects. Doran Martell's
-   Influence-track choice is three legal actions and is included in Python
-   training/evaluation; desktop play prompts the human. In both modes card text
-   resolves before the blade step, and a used blade stays used if Doran changes
-   its holder. The remaining choices (which Footman, which Order, which
-   alternate card, which retreat) use documented deterministic defaults; see
-   the module docstring.
+   modifiers, immediate destruction/Order/track effects, and post-combat
+   effects. The player sub-choices (Tyrion's replacement, Aeron's pay/swap,
+   Renly's Footman, Cersei's Order, Queen of Thorns' Order, Patchface's card,
+   Doran's track, Robb's retreat) are real actions in Python training/evaluation
+   and desktop play. In both modes card text resolves before the blade step, and
+   a used blade stays used if Doran changes its holder. Direct low-level
+   `combat.resolve_and_apply` helpers keep deterministic fallbacks for the
+   frozen regression corpus.
 
 5. **Wildlings.** *(done)* The track, the per-round icon advance (all icons
    counted before card effects resolve), the secret Power bid and all nine
-   Wildling cards' consequences are modelled. Sub-choices *inside* a card's
-   consequence (which units are destroyed, which Influence track is moved to,
-   which House card is discarded) use a deterministic default, and a tie for
-   highest/lowest bidder is broken by Iron Throne position rather than asking
-   the holder.
+   Wildling cards' consequences are modelled. A tie for highest/lowest bidder
+   is a real decision for the Iron Throne holder, made after the card is
+   revealed and before its consequences. Sub-choices inside a consequence
+   (which Knights/Footmen/units are changed, which Fort is used, which Influence
+   track a house chooses, which House card is discarded or retrieved, and the
+   Preemptive Raid A/B choice) are real actions in Python training/evaluation
+   and desktop play.
 
 6. **Holders' choice Westeros cards.** *(done)* The three cards whose text
    names an Influence token (A Throne of Blades, Dark Wings Dark Words, Put to
@@ -181,8 +188,12 @@ they should be fixed before expecting a strong agent.
    Ties go to the attacker, and neither House cards nor the Valyrian Steel
    Blade may be used against them (rulebook page 26). The 3-player
    "insurmountable" tokens are out of scope for the six-player base game.
-9. **Siege Engines.** *(done)* Modelled at their printed strength 4 when
-   attacking an area with a Castle or Stronghold.
+9. **Siege Engines and routed units.** *(done)* Modelled at their printed
+   strength 4 when attacking an area with a Castle or Stronghold. A loser's
+   participating Siege Engines are removed automatically and are never a
+   casualty choice. A province with only routed units is still a battle target;
+   routed units fight at 0, may support at 0 plus the Support order's bonus,
+   cannot be casualties, and are destroyed automatically after a loss.
 10. **Order restrictions.** *(done)* Cards such as *Web of Lies* and *Sea of
     Storms* actually forbid placing the restricted order type.
 11. **Recycling and deck exhaustion.** The physical decks are finite across ten
@@ -191,16 +202,22 @@ they should be fixed before expecting a strong agent.
     `deferred_battles` option: under one March Order the engine queues the one
     battle, allows further non-battle destinations or a finish action, then
     resolves the battle after the order is consumed. The desktop GUI enables
-    it; training and the frozen parity fixtures keep the legacy immediate-battle
-    default until a new reference is recorded. Ports, port capture and ship
-    mustering are done.
+    it; Python self-play training keeps it off by default, and the frozen
+    parity fixtures pin that immediate-battle path. Every config copy and
+    native driver spec carries the flag, so a training experiment can enable it
+    without changing the fixtures. Ports, port capture and ship mustering are
+    done.
 
-13. **Sequential Westeros reveal.** *(done for desktop play)* `GameConfig` has a
-    `sequential_westeros` option: in rounds 2-10 the desktop GUI reveals Deck I,
-    resolves it, then Deck II, resolves it, then Deck III, resolving it, with a
-    short pause between steps. The pre-card Combat Strength shown to both sides
-    includes units, Order, declared Support and defending garrison. Training and
-    the frozen parity fixtures keep the simultaneous draw/resolution default.
+13. **Sequential Westeros reveal.** *(done for desktop, console, training and
+    evaluation)* `GameConfig` has a `sequential_westeros` option: in rounds 2-10
+    each deck is revealed and resolved before the next card is drawn. A card's
+    own step (mustering, supply, bidding or a Wildling attack) finishes before
+    the next reveal, so nobody musters, bids or chooses with knowledge of cards
+    that are still face down. Desktop, console, training and evaluation enable
+    it; the frozen parity fixtures keep the simultaneous path. The pre-card
+    Combat Strength shown to both sides includes units, Order, declared Support
+    and defending garrison. The option is copied through every config and native
+    spec.
 
 ## Priority 3 — learning quality
 

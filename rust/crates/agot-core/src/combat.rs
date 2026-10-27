@@ -241,6 +241,12 @@ pub fn support_detail(
         if spec.order_type != OrderType::Support {
             continue;
         }
+        // An Order token alone does not support: there must still be a unit
+        // (ready or routed) in the area. Routed units contribute 0 strength
+        // but the Support order's printed bonus still applies (FFG ruling).
+        if region.total(true) == 0 {
+            continue;
+        }
         let contributing = contributing_units(
             state,
             map,
@@ -258,6 +264,22 @@ pub fn support_detail(
     // Support orders never carry a negative bonus; the clamp only guards
     // malformed board data.
     (total.max(0) as u16, units)
+}
+
+/// Whether any adjacent Support order of `house` has at least one unit.
+///
+/// Public support totals are 0 when only routed units support with a plain
+/// (non-starred) Support order, but the side is still "being supported" for
+/// House-card text such as Salladhor Saan.
+pub fn support_present(state: &State, map: &GameMap, region_id: RegionId, house: HouseId) -> bool {
+    map.neighbours_of(region_id).iter().any(|neighbour| {
+        let region = state.region(*neighbour);
+        region.order_house == Some(house)
+            && region.order.is_some_and(|order| {
+                order_spec(order).is_some_and(|spec| spec.order_type == OrderType::Support)
+            })
+            && region.total(true) > 0
+    })
 }
 
 /// Adjacent Support orders as `(region, owner)` in declaration order.
@@ -312,6 +334,9 @@ pub fn potential_support_strength(
     let mut total: i32 = 0;
 
     for (neighbour, _owner) in support_orders(state, map, region_id) {
+        if state.region(neighbour).total(true) == 0 {
+            continue;
+        }
         let contributing = contributing_units(
             state,
             map,
@@ -339,6 +364,10 @@ pub struct SupportTotals {
     pub attacker_units: [u8; 4],
     pub defender_strength: u16,
     pub defender_units: [u8; 4],
+    /// True when at least one declared Support order actually has a unit,
+    /// even if routed units make its combat contribution 0.
+    pub attacker_present: bool,
+    pub defender_present: bool,
 }
 
 /// Build each side's support from explicit `area -> side` declarations.
@@ -377,6 +406,11 @@ pub fn support_from_choices(
         if spec.order_type != OrderType::Support {
             continue;
         }
+        // A Support order with no unit left in its area supports nothing;
+        // routed units still support at 0 plus the order bonus.
+        if region.total(true) == 0 {
+            continue;
+        }
         let contributing = contributing_units(
             state,
             map,
@@ -389,11 +423,13 @@ pub fn support_from_choices(
             + spec.strength as i32;
         if supporting_attacker {
             attacker_total += strength;
+            totals.attacker_present = true;
             for unit in UnitType::ALL {
                 totals.attacker_units[unit.index()] += contributing[unit.index()];
             }
         } else {
             defender_total += strength;
+            totals.defender_present = true;
             for unit in UnitType::ALL {
                 totals.defender_units[unit.index()] += contributing[unit.index()];
             }
@@ -604,6 +640,13 @@ pub fn resolve_battle(
 /// commits the immediate board changes before asking the blade holder whether
 /// to use the blade. [`finish_battle`] later compares the already-modified
 /// sides. Keeping the context also means card effects are not applied twice.
+///
+/// Support is built from the board before those deferred effects are
+/// committed, but a Support order removed by the Queen of Thorns must not keep
+/// contributing: the FAQ requires recalculating the Initial Combat Strength.
+/// [`drop_support_from_removed_orders`] applies that correction, so the
+/// deterministic path matches the interactive one, which chooses the Order
+/// before this function runs. See `house_cards::queen_of_thorns`.
 pub fn prepare_battle(
     state: &State,
     map: &GameMap,
@@ -615,30 +658,40 @@ pub fn prepare_battle(
     let is_fortification = map.region(region_id).is_fortification();
     let region = state.region(region_id);
 
-    let (attacker_support, attacker_support_units, defender_support, defender_support_units) =
-        match &request.support_choices {
-            None => {
-                let (attacker_total, attacker_units) =
-                    support_detail(state, map, region_id, request.attacker, true);
-                let (defender_total, defender_units) =
-                    support_detail(state, map, region_id, request.defender, false);
-                (
-                    attacker_total,
-                    attacker_units,
-                    defender_total,
-                    defender_units,
-                )
-            }
-            Some(choices) => {
-                let totals = support_from_choices(state, map, region_id, choices);
-                (
-                    totals.attacker_strength,
-                    totals.attacker_units,
-                    totals.defender_strength,
-                    totals.defender_units,
-                )
-            }
-        };
+    let (
+        attacker_support,
+        attacker_support_units,
+        defender_support,
+        defender_support_units,
+        attacker_supported,
+        defender_supported,
+    ) = match &request.support_choices {
+        None => {
+            let (attacker_total, attacker_units) =
+                support_detail(state, map, region_id, request.attacker, true);
+            let (defender_total, defender_units) =
+                support_detail(state, map, region_id, request.defender, false);
+            (
+                attacker_total,
+                attacker_units,
+                defender_total,
+                defender_units,
+                support_present(state, map, region_id, request.attacker),
+                support_present(state, map, region_id, request.defender),
+            )
+        }
+        Some(choices) => {
+            let totals = support_from_choices(state, map, region_id, choices);
+            (
+                totals.attacker_strength,
+                totals.attacker_units,
+                totals.defender_strength,
+                totals.defender_units,
+                totals.attacker_present,
+                totals.defender_present,
+            )
+        }
+    };
 
     let attacker_side = build_side(
         cards,
@@ -672,8 +725,9 @@ pub fn prepare_battle(
         defender_units: request.defender_units,
         attacker_card: request.attacker_card,
         defender_card: request.defender_card,
-        attacker_supported: has_units(&attacker_support_units) || attacker_support > 0,
-        defender_supported: has_units(&defender_support_units) || defender_support > 0,
+        attacker_supported,
+        defender_supported,
+        support_choices: request.support_choices.clone(),
         attacker_support_units,
         defender_support_units,
         attacker_order: request.attacker_order,
@@ -689,7 +743,106 @@ pub fn prepare_battle(
         notes: Vec::new(),
     };
     house_cards::apply_pre_battle(&mut ctx, state, map, cards);
+    // Queen of Thorns removes an Order *after* support was locked in as part of
+    // the Initial Combat Strength; the FAQ requires recalculating that strength,
+    // so drop the support the removed area provided. The interactive path makes
+    // the Order choice before this function runs, so its context has nothing to
+    // drop and is unaffected.
+    drop_support_from_removed_orders(&mut ctx, state, map, cards);
     ctx
+}
+
+/// Remove one supporting area's contribution after the Queen of Thorns.
+///
+/// The removed Order belongs to the opponent of the card's owner, but the area
+/// may have declared for either side (or refused). The declaration list, when
+/// present, is the authority; otherwise the legacy self-directed support of the
+/// area's owner decides which side loses the strength. Kevan Lannister and
+/// Victarion Greyjoy upgrade supporting Footmen/Ships, so their extra bonus is
+/// removed from `units_strength` as well (the area no longer supports).
+fn drop_support_from_removed_orders(
+    ctx: &mut BattleContext,
+    state: &State,
+    map: &GameMap,
+    cards: &HouseCardData,
+) {
+    if ctx.orders_to_remove.is_empty() {
+        return;
+    }
+    let battle_is_sea = map.region(ctx.region_id).is_sea();
+    let is_fort = map.region(ctx.region_id).is_fortification();
+    let removed_orders = ctx.orders_to_remove.clone();
+    for removed in removed_orders {
+        let region = state.region(removed);
+        let Some(order) = region.order else {
+            continue;
+        };
+        let Some(spec) = order_spec(order) else {
+            continue;
+        };
+        if spec.order_type != OrderType::Support || region.total(true) == 0 {
+            continue;
+        }
+        let supporting_attacker = match &ctx.support_choices {
+            Some(choices) => match choices
+                .iter()
+                .find(|(area, _)| *area == removed)
+                .map(|(_, side)| *side)
+            {
+                Some(Side::Attacker) => true,
+                Some(Side::Defender) => false,
+                // Refused (or never declared): it contributed no support.
+                _ => continue,
+            },
+            None => {
+                if region.order_house == Some(ctx.attacker) {
+                    true
+                } else if region.order_house == Some(ctx.defender) {
+                    false
+                } else {
+                    continue;
+                }
+            }
+        };
+        let contributing = contributing_units(
+            state,
+            map,
+            removed,
+            battle_is_sea,
+            supporting_attacker,
+            is_fort,
+        );
+        let strength = units_strength(&contributing, supporting_attacker && is_fort) as i16
+            + i16::from(spec.strength);
+        // The supported house's card may have already upgraded these very
+        // support units; that extra lives in `units_strength`, not in the
+        // Support order's printed bonus.
+        let supporting_house = if supporting_attacker {
+            ctx.attacker
+        } else {
+            ctx.defender
+        };
+        let upgraded = if supporting_attacker {
+            match house_cards::ability_of(cards, supporting_house, ctx.card_of(supporting_house)) {
+                "kevan_lannister" => contributing[UnitType::Footman.index()],
+                "victarion_greyjoy" => contributing[UnitType::Ship.index()],
+                _ => 0,
+            }
+        } else {
+            0
+        };
+        let (side, support_units) = if supporting_attacker {
+            (&mut ctx.attacker_side, &mut ctx.attacker_support_units)
+        } else {
+            (&mut ctx.defender_side, &mut ctx.defender_support_units)
+        };
+        side.support_strength = (side.support_strength - strength).max(0);
+        side.units_strength = (side.units_strength - i16::from(upgraded)).max(0);
+        for unit in UnitType::ALL {
+            support_units[unit.index()] =
+                support_units[unit.index()].saturating_sub(contributing[unit.index()]);
+        }
+    }
 }
 
 /// Compare the prepared sides and build the final battle result.
@@ -793,10 +946,20 @@ pub fn resolve_and_apply(
     cards: &HouseCardData,
     request: &BattleRequest,
 ) -> BattleResult {
-    let result = resolve_battle(state, map, cards, request);
+    let mut result = resolve_battle(state, map, cards, request);
     // Card swaps, Order removals and Doran's influence move are deferred until
     // now so that resolve_battle stays free of state mutation.
     house_cards::commit_deferred(state, cards, &result.context);
+    // FFG ruling: a losing force loses its participating Siege Engines
+    // automatically, in addition to the normal casualties.
+    let siege = result.context.remove_siege_engines(result.loser);
+    if siege > 0 {
+        state.note(format!(
+            "{} Siege Engine(s) destroyed automatically in {}",
+            result.loser,
+            map.id_of(result.region)
+        ));
+    }
     apply_battle_result(state, map, cards, &result, result.casualties, None);
     result
 }
@@ -829,12 +992,40 @@ pub fn apply_battle_result(
     let mut attacker_units = ctx.attacker_units;
     let mut defender_units = ctx.defender_units;
 
+    // Draw back a just-completed seven-card House deck before post-combat text
+    // such as Patchface (FFG ruling). The phase machine also does this before
+    // calling here; a populated hand makes the helper a no-op.
+    recycle_house_cards(state, attacker);
+    if defender != attacker {
+        recycle_house_cards(state, defender);
+    }
+
+    // Cards and the convenience path normally strip the loser's Siege Engines
+    // before this point. Keep the rule here too so a direct caller cannot
+    // accidentally let one survive as a casualty.
+    let auto_siege = if result.loser == attacker {
+        let siege = attacker_units[UnitType::Siege.index()];
+        attacker_units[UnitType::Siege.index()] = 0;
+        siege
+    } else {
+        let siege = defender_units[UnitType::Siege.index()];
+        defender_units[UnitType::Siege.index()] = 0;
+        siege
+    };
+
     let pre_routed = state.region(region_id).routed;
 
     let robb = house_cards::robb_chose_retreat(ctx, cards, result.winner);
     let arianne = house_cards::arianne_holds(ctx, cards, result.loser);
 
     let mut notes: Vec<String> = result.notes.clone();
+    if auto_siege > 0 {
+        notes.push(format!(
+            "{} Siege Engine(s) destroyed automatically in {}",
+            result.loser,
+            map.id_of(region_id)
+        ));
+    }
 
     if result.loser == attacker {
         remove_units(&mut attacker_units, remaining_casualties);
@@ -869,11 +1060,13 @@ pub fn apply_battle_result(
         }
         if arianne {
             // Arianne Martell: the attacker may not move in; it returns to the
-            // area it marched from. The defender still retreats.
+            // area it marched from. The defender still retreats, but the
+            // winner's other effects (including removing the Power token) apply.
             return_attacker(state, attacker, &attacker_units, ctx.attacker_origin);
             let region = state.region_mut(region_id);
             region.units = [0; 4];
             region.routed = [0; 4];
+            region.influence_token = None;
         } else {
             let region = state.region_mut(region_id);
             region.units = attacker_units;
@@ -902,7 +1095,10 @@ pub fn apply_battle_result(
 
     let needs_release = {
         let region = state.region(region_id);
-        region.is_empty() && !has_routed(region) && region.garrison == 0
+        // Mace Tyrell can remove the last unit while its owner still wins the
+        // battle; the March/Consolidate Order then remains on the empty area
+        // (FFG ruling). A surviving Order therefore blocks the release.
+        region.is_empty() && !has_routed(region) && region.garrison == 0 && region.order.is_none()
     };
     if needs_release {
         release_region(state, region_id);
@@ -972,7 +1168,15 @@ fn return_attacker(state: &mut State, house: HouseId, units: &[u8; 4], origin: O
             target.controller = Some(house);
         }
     }
-    enforce_supply_at(state, origin, house);
+    if !state.within_supply(house) {
+        if state.supply_choice {
+            if !state.supply_queue.contains(&house) {
+                state.supply_queue.push(house);
+            }
+        } else {
+            enforce_supply_at(state, origin, house);
+        }
+    }
 }
 
 /// Loras Tyrell re-places the March order in the conquered area.
@@ -1156,7 +1360,15 @@ fn move_routed(state: &mut State, destination: RegionId, house: HouseId, units: 
             target.controller = Some(house);
         }
     }
-    enforce_supply_at(state, destination, house);
+    if !state.within_supply(house) {
+        if state.supply_choice {
+            if !state.supply_queue.contains(&house) {
+                state.supply_queue.push(house);
+            }
+        } else {
+            enforce_supply_at(state, destination, house);
+        }
+    }
 }
 
 /// Destroy routed/ready units in a region until Supply is satisfied.
@@ -1387,6 +1599,32 @@ pub fn destroy_army(state: &mut State, _map: &GameMap, region_id: RegionId) {
     release_region(state, region_id);
 }
 
+/// Return six cards after a house plays the last card of its House deck.
+///
+/// The just-played card stays in the discard pile; the other six return to the
+/// hand. Kept local to combat so the convenience `resolve_and_apply` path and
+/// the phase machine share the same pre-Patchface timing.
+fn recycle_house_cards(state: &mut State, house: HouseId) {
+    let Some(house_state) = state.house_mut(house) else {
+        return;
+    };
+    if !house_state.house_cards_available.is_empty() || house_state.house_cards_used.is_empty() {
+        return;
+    }
+    let last_played = *house_state
+        .house_cards_used
+        .last()
+        .expect("checked non-empty");
+    house_state.house_cards_available = house_state
+        .house_cards_used
+        .iter()
+        .copied()
+        .filter(|card| *card != last_played)
+        .collect();
+    house_state.house_cards_used.clear();
+    house_state.house_cards_used.push(last_played);
+}
+
 /// Drop control and any order token from a now-empty region.
 fn release_region(state: &mut State, region_id: RegionId) {
     let region = state.region_mut(region_id);
@@ -1527,5 +1765,55 @@ mod tests {
         assert_eq!(units, [0, 1, 0, 1]);
         remove_units(&mut units, 5);
         assert_eq!(units, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn queen_of_thorns_removes_the_support_it_takes() {
+        // FAQ v2.0: when the Queen removes a Support order, the supporting
+        // area's strength is recalculated out of the Initial Combat Strength.
+        let data = data();
+        let map = &data.map;
+        let cards = &data.house_cards;
+        let (target, support) = (
+            map.lookup("highgarden").unwrap(),
+            map.lookup("searoad_marches").unwrap(),
+        );
+        assert!(map.neighbours_of(target).contains(&support));
+        let (tyrell, stark) = (
+            HouseId::from_name("tyrell").unwrap(),
+            HouseId::from_name("stark").unwrap(),
+        );
+        let queen = cards.card_index(tyrell, "queen_of_thorns").unwrap();
+
+        let build_state = || {
+            let mut state = State::blank();
+            state.region_count = map.region_count() as u8;
+            {
+                let region = state.region_mut(support);
+                region.controller = Some(stark);
+                region.units = [0, 2, 0, 0];
+                region.order = Some(OrderKey::from_name("support_a").unwrap());
+                region.order_house = Some(stark);
+            }
+            state
+        };
+        let mut request = BattleRequest::new(target, tyrell, stark, [2, 0, 0, 0], [1, 0, 0, 0]);
+        request.attacker_card = Some(queen);
+
+        // Explicit declaration: the defender loses the area's support.
+        let state = build_state();
+        let mut declared = request.clone();
+        declared.support_choices = Some(SmallVec::from_slice(&[(support, Side::Defender)]));
+        let result = resolve_battle(&state, map, cards, &declared);
+        assert_eq!(result.context.orders_to_remove.as_slice(), &[support]);
+        assert_eq!(result.defender.support_strength, 0);
+        assert_eq!(result.context.defender_support_units, [0; 4]);
+        assert_eq!(result.winner, tyrell);
+
+        // Legacy self-directed support uses the Order's owner.
+        let state = build_state();
+        let result = resolve_battle(&state, map, cards, &request);
+        assert_eq!(result.defender.support_strength, 0);
+        assert_eq!(result.winner, tyrell);
     }
 }

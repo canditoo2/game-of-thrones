@@ -13,7 +13,7 @@ strongest.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
-- Tests: `.venv\Scripts\python -m pytest -q` (120 tests; the rules/combat/encoder
+- Tests: `.venv\Scripts\python -m pytest -q` (179 tests; the rules/combat/encoder
   regressions live in Rust — see `cargo test --release` below). When piped in PowerShell
   the final summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`
@@ -23,10 +23,11 @@ strongest.
   --house stark` opens the local Tkinter desktop game: the setup screen chooses the human
   house, opponent and checkpoint, then the full board and action list are shown. When
   `Rulebook/board.jpg` is present (Pillow installed), the game uses the local scan as the
-  board; otherwise it falls back to the schematic region board. Desktop play enables
-  `deferred_battles`, so all March destinations are chosen before the one battle starts,
-  and `sequential_westeros`, which reveals and resolves each of the three cards one at a
-  time; `doran_choice` prompts for Doran Martell's Influence track. Combat card text
+  board; otherwise it falls back to the schematic region board. Desktop and console
+  play, training and evaluation enable `deferred_battles` (all March destinations are
+  chosen before the one battle starts) and `sequential_westeros`, which reveals each of
+  the three cards, resolves its own mustering/supply/bidding/Wildling step, and only then
+  draws the next card; `doran_choice` prompts for Doran Martell's Influence track. Combat card text
   resolves before the blade step. Python training/evaluation include Doran's choice as
   three legal actions; the raw Rust fixture default stays deterministic.
   AI seats default to 64 simulations over 2 determinizations (2 keeps face-down orders and bids
@@ -46,12 +47,15 @@ strongest.
   The differential fixture (`crates/agot-core/tests/data/engine_fixture.json`) and the encoder
   golden file are **frozen regression pins** — the Python generators that produced them were
   retired with the Python engine, so never hand-edit either file.
-- Packaging: `pyproject.toml` uses maturin; `pip install -e .` builds the abi3 extension into
-  `agot._core`. `rust/crates/agot-py` is not a default workspace member, so the engine's own
-  `cargo test` loop needs no PyO3 toolchain. On Windows a direct `maturin build` needs binutils
-  (`dlltool`) on `PATH` — WinLibs' UCRT build — plus `PYO3_PYTHON` pointing at the venv
-  interpreter; plain `pip install -e .` works with the toolchain on `PATH` as it is here. The
-  wheel is abi3 (Python ≥3.10), so one build covers the local venv, CI and Colab.
+- Packaging: `pyproject.toml` uses maturin. `pip install -e .` installs the editable
+  Python path (`agot.pth` -> `src`) and the console script; it does **not** refresh the
+  compiled extension. After any Rust change run `python -m maturin develop --release`
+  (cargo on `PATH`, `PYO3_PYTHON` pointing at the venv interpreter), which rebuilds and
+  copies `src/agot/_core.pyd`; a stale `.pyd` otherwise keeps the old engine alive while
+  the Rust tests still pass. `rust/crates/agot-py` is not a default workspace member, so
+  the engine's own `cargo test` loop needs no PyO3 toolchain. On Windows a direct
+  `maturin build` needs binutils (`dlltool`) on `PATH` - WinLibs' UCRT build. The wheel is
+  abi3 (Python >=3.10), so one build covers the local venv, CI and Colab.
 - Self-play: `agot.training.rust_engine` drives the batch tier and
   `selfplay.batched_self_play` takes it whenever the evaluator is model-backed and the configs
   share one game configuration, recording the path in `selfplay.LAST_BACKEND`. Scripted seats
@@ -81,9 +85,13 @@ strongest.
   temperature schedule (1.0 for 3 rounds, then 0.25). The recorded policy target is built from
   the temperature, so flat 1.0 or too few sims trains on near-uniform noise.
 - Hidden information: `agot.engine.hidden.determinize` delegates to the Rust resampling of
-  face-down orders and secret bids (PIMC); the encoder masks hidden orders. Known remaining
-  leak: the first chooser's House card in a battle (revealed simultaneously in the physical
-  game).
+  face-down orders, secret bids, the first chooser's House card while the second chooser
+  decides, and the order of the cards still face down in the Westeros and Wildling decks
+  (PIMC); the encoder masks hidden orders, and the snapshot hides both battle cards until
+  both players commit.
+- House-card and Wildling sub-choices are real actions in Python training/evaluation and
+  desktop play (`GameConfig.choice_choices=True`); the low-level Rust helpers keep their
+  deterministic `resolve_and_apply` fallbacks for the frozen parity fixtures.
 - Rulebook scans are local reference material: `Rulebook/` is gitignored and must never be
   committed or packaged. The desktop GUI reads `Rulebook/board.jpg` when it exists and
   otherwise falls back to the schematic region board; do not commit derived board images.
@@ -97,6 +105,8 @@ strongest.
   commit; the launch cell auto-resumes).
 - `checkpoints/run1` and `run2` are **void**: trained with the old broken policy head (policy loss
   flat at ~2.0 = uniform over candidates). Don't resume them; the loader refuses them.
+- `run3` predates the sequential Westeros resolution and the PIMC deck resampling; treat its
+  numbers as a pre-change baseline and start a fresh run rather than resuming it.
 - A run writes `agot.pt` (weights), `agot.state.pt` (iteration/best-eval/optimizer for
   `--resume`), `agot.log.jsonl` (one line per iteration) and `agot-best.pt` (best gauntlet eval).
   The replay buffer is deliberately not saved — a resumed run refills it and shows a transient

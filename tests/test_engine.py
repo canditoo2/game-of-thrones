@@ -54,6 +54,11 @@ def test_legal_actions_are_never_empty_while_not_terminal() -> None:
     game = Game.new(GameConfig(seed=3))
     steps = 0
     while not game.is_terminal() and steps < 400:
+        if game.state.phase is Phase.WESTEROS and game.state.westeros_waiting:
+            # A sequential reveal is a table pause, not a decision; the GUI
+            # and training drivers call continue_westeros here.
+            game.continue_westeros()
+            continue
         actions = game.legal_actions()
         assert actions, f"no legal actions in phase {game.state.phase}"
         game.step(actions[0])

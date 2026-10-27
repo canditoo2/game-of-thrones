@@ -45,6 +45,11 @@ real yardstick: **a trained agent must clear ~38% against random, and a
 meaningfully superhuman agent should approach the ceiling against the greedy
 field.**
 
+These anchors predate the sequential Westeros model. The default now resolves
+each card's mustering/supply step before the next reveal, and PIMC resamples the
+cards still face down, so re-run the same gauntlet before comparing a new run's
+numbers with this table.
+
 ## Methods considered
 
 Kept short; each entry is *what it is → pro → con → verdict*.
@@ -118,11 +123,12 @@ Kept short; each entry is *what it is → pro → con → verdict*.
    the planned "batched GPU inference" is realised as batched *CPU* inference
    plus multi-process self-play.
 3. **Hidden information.** Root determinization (PIMC) in MCTS: `engine/hidden.py`
-   resamples face-down Order tokens and secret Power bids, and the search
-   aggregates over `determinizations` worlds. Implemented and tested; the one
-   remaining leak is the first chooser's House card inside a battle (chosen and
-   revealed simultaneously in the physical game). SO-ISMCTS remains the
-   principled upgrade if PIMC proves insufficient.
+   resamples face-down Order tokens, secret Power bids and the first chooser's
+   House card while the second chooser is deciding, and the search aggregates
+   over `determinizations` worlds. The physical game reveals both House cards
+   simultaneously; the GUI/snapshot hides them until both commitments are made.
+   Implemented and tested. SO-ISMCTS remains the principled upgrade if PIMC
+   proves insufficient.
 4. **Scaled AlphaZero.** *(in progress)* Batched + parallel self-play with PIMC,
    scripted-opponent mixing (`--opponent-rate`, a first step toward a league),
    and periodic gauntlet evaluation with best-checkpoint selection are done. A

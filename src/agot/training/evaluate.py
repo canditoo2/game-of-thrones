@@ -96,7 +96,11 @@ def evaluate_match(
             victory_castles=base.victory_castles,
             seed=seed + game_index,
             use_westeros_decks=base.use_westeros_decks,
+            deferred_battles=base.deferred_battles,
+            sequential_westeros=base.sequential_westeros,
             doran_choice=base.doran_choice,
+            wildling_tie_choice=base.wildling_tie_choice,
+            choice_choices=base.choice_choices,
         )
         policies = seat_policies(
             factory_a, factory_b, houses, seed=seed + game_index * 7, swap=swap
@@ -180,7 +184,11 @@ def _game_config(
         victory_castles=base.victory_castles,
         seed=seed,
         use_westeros_decks=base.use_westeros_decks,
+        deferred_battles=base.deferred_battles,
+        sequential_westeros=base.sequential_westeros,
         doran_choice=base.doran_choice,
+        wildling_tie_choice=base.wildling_tie_choice,
+        choice_choices=base.choice_choices,
     )
 
 
@@ -240,7 +248,11 @@ def _play_model_games(
         "max_rounds": config.max_rounds,
         "victory_castles": config.victory_castles,
         "use_westeros_decks": config.use_westeros_decks,
+        "deferred_battles": config.deferred_battles,
+        "sequential_westeros": config.sequential_westeros,
         "doran_choice": config.doran_choice,
+        "wildling_tie_choice": config.wildling_tie_choice,
+        "choice_choices": config.choice_choices,
         "houses": list(houses),
         "step_limit": step_limit,
         "scripted": [list(policies) for policies in scripted],
@@ -533,7 +545,11 @@ def evaluate_net_vs_field(
         "max_rounds": base.max_rounds,
         "victory_castles": base.victory_castles,
         "use_westeros_decks": base.use_westeros_decks,
+        "deferred_battles": base.deferred_battles,
+        "sequential_westeros": base.sequential_westeros,
         "doran_choice": base.doran_choice,
+        "wildling_tie_choice": base.wildling_tie_choice,
+        "choice_choices": base.choice_choices,
         "houses": list(houses),
         "step_limit": step_limit,
         "scripted": scripted,

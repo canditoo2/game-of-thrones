@@ -62,7 +62,9 @@ published `agot` wheel does not.
 ```bash
 python -m venv .venv
 .venv\Scripts\activate          # Windows
-pip install -e ".[dev]"         # builds the Rust extension + tests + linter
+pip install -e ".[dev]"         # Python package + tests + linter
+pip install maturin             # build front-end for the Rust extension
+python -m maturin develop --release  # compile the Rust extension into src/agot/_core.pyd
 pip install -e ".[gui]"         # optional: Pillow, for the rulebook board scan
 pip install -e ".[rl]"          # optional: adds PyTorch
 ```
@@ -190,7 +192,11 @@ units, garrison, orders and neighbours. Select an action in the list and press
 picker: choose the order type (March, Defend, Support, Raid, Consolidate), then
 the specific strength/starred token, then the destination region. March moves
 list the largest unit stack first, and attack with fewer than all eligible
-units asks for confirmation. **Undo** returns to before your last decision;
+units asks for confirmation. Card and Wildling sub-choices are prompted
+explicitly too: the action list names the card's task (replace, discard,
+retrieve, upgrade or destroy), the target player, the area and the Influence
+track, so a sub-choice never reads as a generic "Play House card" or
+"option N". **Undo** returns to before your last decision;
 **New game** goes back to the house/settings screen. Python training and
 evaluation treat Doran Martell's track as three legal actions, so the policy
 learns which track to move. A battle panel shows the
@@ -201,9 +207,11 @@ support totals, card reveals, casualties, Raven choices and Westeros cards. In
 combat, card text resolves before the Valyrian Steel Blade step: Doran Martell's
 owner chooses the Influence track, a new blade holder may use an unused blade,
 and an already-used blade stays used if Doran moves it. Starred orders already on
-the board are not removed when a King's Court position changes. In desktop play
-the three Westeros cards are revealed and resolved one at a time, with a pause
-between each draw and its effect.
+the board are not removed when a King's Court position changes. In desktop
+play, console play, training and evaluation the three Westeros cards are
+revealed and resolved one at a time: each card's own step (mustering, supply,
+bidding or a Wildling attack) finishes before the next card is drawn, so nobody
+decides with knowledge of cards that are still face down.
 
 Every match also writes a local structured log under
 `checkpoints/play-logs/`:
@@ -246,23 +254,26 @@ These are real deviations from the physical game. They are tracked in
   down and Power bids are secret; the engine tracks reveal timing and the
   observation masks what a house may not see. The search uses PIMC
   (`--determinizations`): it resamples the face-down Orders and secret bids from
-  the observer's belief and averages the root visits over those worlds. The one
-  remaining leak is the first chooser's House card inside a battle, which the
-  physical game reveals simultaneously.
+  the observer's belief and averages the root visits over those worlds. The
+  second chooser's worlds also resample the first chooser's House card, which
+  the physical game reveals simultaneously.
 * **Support is a real choice across houses.** A Support order may back either
   side of an adjacent battle, and its owner decides in Iron Throne order.
 * **Casualty and retreat choices are player decisions.** The defeated player
-  picks their own casualties and, when defending, the retreat area. Only the
-  non-interactive `combat.resolve_and_apply` path falls back to cheapest-first.
+  picks their own casualties and, when defending, the retreat area. The
+  low-level `combat.resolve_and_apply` helpers keep a deterministic
+  cheapest-first fallback for the frozen regression fixtures; they are not used
+  by interactive play or training.
 * **Wildling attacks** model the secret Power bid, the Night's Watch strength
   and all nine cards' win/loss consequences. Sub-choices inside a consequence
-  (which units are destroyed, which track is moved, which House card is
-  discarded) use a deterministic default, and bidder ties are broken by Iron
-  Throne position rather than asking the holder.
-* **House-card special abilities are implemented**, but the sub-choices inside
-  an ability (which Footman to upgrade, which Order to remove, which alternate
-  card to play, which retreat area to pick) are auto-resolved with
-  deterministic defaults; see
+  (which units are destroyed, which Fort is used, which track each house picks,
+  which House card is discarded or retrieved, and Preemptive Raid's A/B choice)
+  are real actions in training and desktop play; bidder ties are decided by the
+  Iron Throne holder after the card is revealed.
+* **House-card special abilities are implemented**, with their sub-choices
+  exposed as real actions in training and desktop play: Tyrion's replacement,
+  Aeron's pay/swap, Renly's Footman, Cersei's Order, Queen of Thorns' Order,
+  Patchface's discard, Doran's track and Robb's retreat; see
   [`house_cards.rs`](rust/crates/agot-core/src/house_cards.rs).
 * **Siege Engines** contribute their printed strength 4 only when attacking (or
   supporting an attack against) an area containing a Castle or Stronghold.
@@ -271,10 +282,12 @@ These are real deviations from the physical game. They are tracked in
   Valyrian Steel Blade.
 * **Multi-destination marches.** Desktop play enables deferred battles: under
   one March Order you choose all destinations first, then the one battle is
-  resolved when the order is finished. The default training/evaluation engine
-  keeps the legacy immediate-battle path so the frozen differential fixtures
-  remain valid. The desktop picker puts the largest stack first and warns
-  before attacking with less than the full eligible force.
+  resolved when the order is finished. Python self-play training keeps
+  `deferred_battles=False` (the immediate-battle path); the frozen differential
+  fixtures pin that same path. The setting is copied through every training and
+  evaluation config, so an experiment can enable it without touching the
+  fixtures. The desktop picker puts the largest stack first and warns before
+  attacking with less than the full eligible force.
 
 The board data is also partly unverified; see [`PROVENANCE.md`](PROVENANCE.md)
 for exactly which values are trusted and which need checking against the

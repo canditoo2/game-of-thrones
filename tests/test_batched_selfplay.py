@@ -51,6 +51,17 @@ def test_batched_selfplay_produces_one_record_per_game() -> None:
             assert example.policy.sum() > 0
 
 
+def test_batched_sequential_westeros_does_not_truncate() -> None:
+    config = GameConfig(seed=6, max_rounds=4, sequential_westeros=True)
+
+    records = batched_self_play(
+        UniformEvaluator(), [config], simulations=2, seed=0
+    )
+
+    assert records[0].rounds > 2, "the sequential reveal must not end the game"
+    assert records[0].examples
+
+
 def test_worker_chunking_keeps_every_game_seed() -> None:
     """Round-robin chunks must not replay a neighbour's seed.
 

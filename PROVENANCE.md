@@ -9,7 +9,8 @@ The guiding policy for this project is: *implement something honest and mark
 what is uncertain, rather than invent a plausible-sounding rule.*
 
 For the audit trail behind these flags — what was checked, corrected or left
-open, and the deterministic defaults used for multi-choice effects — see
+open, how player sub-choices are exposed as real actions, and where the
+fixture-only deterministic fallbacks remain — see
 [`docs/rulebook-audit.md`](docs/rulebook-audit.md).
 
 ## Confidence summary
@@ -29,19 +30,25 @@ open, and the deterministic defaults used for multi-choice effects — see
 | Which Westeros cards carry a Wildling icon | **High** | Confirmed against the same file and the physical component list |
 | Holders'-choice Westeros cards (A Throne of Blades, Dark Wings Dark Words, Put to the Sword) | **High** | Text confirmed against `Rulebook/Westeros_card.txt`; modelled as holder decisions |
 | The 42 House card names and printed stats | **High** | Transcribed from the user-supplied `Rulebook/151060549-House-Cards-Reference-Sheet.txt` and cross-checked against community data sets |
-| House card ability texts | **High** | Transcribed from the same reference sheet; Doran's track is a learned action, other player sub-choices use a documented deterministic default |
+| House card ability texts | **High** | Transcribed from the same reference sheet; every player sub-choice (Tyrion's replacement, Aeron's swap, Renly's Footman, Cersei's and the Queen of Thorns' Orders, Patchface's discard, Doran's track, Robb's retreat) is a real action in training and desktop play |
 | House Martell's House cards | **High** | Included in the reference sheet; the earlier file was missing Darkstar and had wrong strengths |
 | House Martell's starting units | **High** | Confirmed by the user against the physical board (Sunspear 1 Footman + 1 Knight, Salt Shore 1 Footman, 1 Ship in the Sea of Dorne) |
 | Six-player influence track order | **High** | Corrected by the user against the physical board |
 | Starred-order allowance by King's Court position `(3, 3, 2, 1, 0, 0)` | **High** | Matches chibimagic's `KingsCourtTrack::FIVE_SIX_PLAYER_SPECIAL_ORDERS`; also printed on the board |
 | Wildling card names (9) | **High** | Match the physical component list |
-| Wildling card effects | **High** | Transcribed from the bundled scans (`Rulebook/wildling-cards1..3.webp`); player sub-choices use a documented deterministic default |
+| Wildling card effects | **High** | Transcribed from the bundled scans (`Rulebook/wildling-cards1..3.webp`); every player-facing sub-choice is a real action in training and desktop play |
 | Wildling attack procedure (bid, pooled strength, track reset) | **High** | Official 2E rulebook pages 22-23 |
 | Neutral forces (King's Landing 5, The Eyrie 6) | **High** | Official 2E rulebook page 26 and rulebook page 4 setup diagram |
 
 A machine-readable copy of these flags lives inside the JSON files themselves
 (under `verified`, `*_confidence` and `notes` keys). Those keys are the source of
 truth for tooling; the table above is a human summary.
+
+Player sub-choices are real actions in Python training/evaluation and desktop
+play. Low-level direct battle helpers (including `combat.resolve_and_apply`),
+used by the frozen Rust differential fixtures, are the only paths that keep
+deterministic fallbacks; they exist to pin the regression corpus and are not
+reached by a normal game.
 
 ## What to verify first
 

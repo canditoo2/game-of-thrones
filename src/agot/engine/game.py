@@ -50,13 +50,24 @@ class GameConfig:
     #: Desktop play enables this; training keeps the legacy immediate battle
     #: so the frozen reference fixtures stay valid.
     deferred_battles: bool = False
-    #: Reveal and resolve the three Westeros cards one at a time. Desktop play
-    #: enables this; training keeps the reference simultaneous draw.
-    sequential_westeros: bool = False
+    #: Reveal and resolve the three Westeros cards one at a time, resolving
+    #: each card's sub-phase (mustering, supply, bidding, a Wildling attack)
+    #: before drawing the next. This is the Python default for play, training
+    #: and evaluation, so nobody decides with knowledge of cards that have not
+    #: been revealed yet. The raw Rust fixture default stays simultaneous.
+    sequential_westeros: bool = True
     #: Ask the Doran Martell player which Influence track to move. Python
     #: training/evaluation include the decision; the raw Rust fixture default
     #: stays deterministic.
     doran_choice: bool = True
+    #: Ask the Iron Throne holder to break a tied highest/lowest Wildling bid.
+    #: Python training/evaluation include the decision; the raw Rust fixture
+    #: default stays deterministic.
+    wildling_tie_choice: bool = True
+    #: Expose House-card and Wildling sub-choices as real decisions. Python
+    #: training/evaluation enable them; the low-level Rust helpers keep their
+    #: deterministic defaults.
+    choice_choices: bool = True
 
     def __post_init__(self) -> None:
         unknown = set(self.houses) - set(load_houses().houses)

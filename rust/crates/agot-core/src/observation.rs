@@ -28,13 +28,18 @@
 
 use std::sync::OnceLock;
 
-use crate::action::{Action, Side, N_ACTION_KINDS, N_SIDES};
+use serde_json::{json, Map, Value};
+
+use crate::action::{Action, ActionKind, Side, N_ACTION_KINDS, N_SIDES};
 use crate::enums::{
     CardId, HouseId, RegionId, Track, UnitType, N_HOUSES, N_ORDERS, N_PHASES, N_STEPS,
     SUPPLY_LIMITS,
 };
 use crate::map::DataSet;
-use crate::state::{Region, State, MAX_REGIONS};
+use crate::state::{
+    CardChoice, ChoiceKind, ChoiceResume, ChoiceTask, OptionChoice, Region, RegionChoice, State,
+    TrackChoice, UnitChoice, MAX_REGIONS,
+};
 
 // ---------------------------------------------------------------------------
 // Canonical layout
@@ -502,6 +507,19 @@ fn fill_region_block(
     out[index + 3] = if tables.linked(id) { 1.0 } else { 0.0 };
 }
 
+/// The house whose deck owns `action.card`.
+///
+/// A [`CardId`] is a slot in *one house's* seven-card deck, so naming a card is
+/// only meaningful together with its deck. Normal actions take the card from the
+/// acting house's hand, but a generic card choice can name an opponent's card:
+/// Patchface discards from the target's hand, so the action's `house` is the
+/// chooser while the id indexes the opponent's deck. [`Action::card_house`]
+/// records that deck; `None` means the acting house's own deck.
+pub fn card_owner(action: &Action) -> Option<HouseId> {
+    action.card?;
+    action.card_house.or(action.house)
+}
+
 /// Encode one candidate action, allocating the result.
 ///
 /// Thin wrapper over [`encode_action_into`]; batched callers fill preallocated
@@ -564,15 +582,34 @@ pub fn encode_action_into(
         offset += REGION_BLOCK;
     }
 
-    if let (Some(house), Some(card)) = (action.house, action.card) {
-        let block = tables.card_features(house, card);
-        out[offset..offset + CARD_BLOCK].copy_from_slice(&block);
+    // The card id is a slot in the deck that *owns* the card, which is not
+    // always the acting house's deck: a generic card choice can name an
+    // opponent's card (Patchface discards from the target's hand), and the
+    // action records that deck in `card_house`. Normal actions leave it `None`,
+    // so ordinary card encoding is unchanged.
+    if let Some(card) = action.card {
+        if let Some(house) = card_owner(action) {
+            let block = tables.card_features(house, card);
+            out[offset..offset + CARD_BLOCK].copy_from_slice(&block);
+        }
     }
     offset += CARD_BLOCK;
 
+    // A generic choice packs its context tag in `order`. The tags are numbered
+    // inside the order table, so they light up an ORDER_BLOCK slot and
+    // different choice tasks become distinguishable without growing
+    // `ACTION_DIM`. The engine never treats them as tokens (`apply_choice`
+    // dispatches on the pending task). A tag appended past the table has no
+    // slot: ignore it rather than writing into the amount block.
     if let Some(order) = action.order {
-        out[offset + order.index()] = 1.0;
-        out[offset + N_ORDERS] = (f64::from(order.strength()) / 2.0) as f32;
+        if order.index() < N_ORDERS {
+            out[offset + order.index()] = 1.0;
+            // Only a real order token carries its combat modifier; a context
+            // tag reusing an order slot must not fabricate one.
+            if matches!(action.kind, ActionKind::PlaceOrder | ActionKind::RavenSwap) {
+                out[offset + N_ORDERS] = (f64::from(order.strength()) / 2.0) as f32;
+            }
+        }
     }
     offset += ORDER_BLOCK;
 
@@ -666,6 +703,229 @@ pub fn observe(
         actions: actions.to_vec(),
         state_features: encode_state(state, data, actor),
         action_features: matrix,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pending generic choice (read-only decision context)
+// ---------------------------------------------------------------------------
+
+/// What the current generic choice task is asking for, as plain JSON data.
+///
+/// The frozen [`STATE_DIM`] vector cannot grow a choice block: a checkpoint is
+/// tied to the layout, and `state_fingerprint` is a parity pin. The desktop game
+/// and the training loop still need to *label* the decision they are asking a
+/// player about ("Destroy 2 units", "Discard a Lannister card"), so this is a
+/// separate read-only view of the first pending [`ChoiceTask`]. It is derived
+/// data: nothing here is written back into the state, and it never reaches the
+/// encoded observation.
+///
+/// `None` means the position is not waiting on a generic choice. The dict always
+/// carries `kind`, `purpose`, `house` and `queued` (how many tasks are pending);
+/// `resume` appears when the queue will resume a battle or Wildling sequence,
+/// and the remaining keys depend on the kind:
+///
+/// | kind     | keys                                              |
+/// |----------|---------------------------------------------------|
+/// | `unit`   | `areas`, `remaining`, `allow_none`                |
+/// | `card`   | `cards`, `allow_none`, `target`, `detail`         |
+/// | `region` | `regions`, `allow_none`, `target`/`count`         |
+/// | `track`  | `tracks`                                          |
+/// | `option` | `options`, `target` for Tyrion                    |
+/// | `muster` | `region`, `points`                                |
+///
+/// `purpose` uses the cross-agent vocabulary of
+/// `agot.choice_context.CHOICE_TAGS` (`generic_destroy`, `crow_replace_knight`,
+/// `tyrion_card`, `card_discard_or_retrieve`, ...) so the GUI, the greedy
+/// baseline and the labels all describe a choice the same way. Where several
+/// card texts share one purpose, `detail` keeps the engine's own name
+/// (`patchface_discard`, `massing_discard`, ...) for a more specific label.
+pub fn pending_choice(state: &State, data: &DataSet) -> Option<Value> {
+    let task = state.choice_queue.first()?;
+    let mut entry = Map::new();
+    entry.insert("house".to_string(), json!(task.house.name()));
+    entry.insert("queued".to_string(), json!(state.choice_queue.len()));
+    if let Some(resume) = state.choice_resume {
+        entry.insert("resume".to_string(), json!(resume_name(resume)));
+    }
+
+    let kind = match &task.kind {
+        ChoiceKind::Unit {
+            purpose,
+            areas,
+            remaining,
+            allow_none,
+        } => {
+            entry.insert("areas".to_string(), json!(region_names(data, areas)));
+            entry.insert("remaining".to_string(), json!(remaining));
+            entry.insert("allow_none".to_string(), json!(allow_none));
+            entry.insert("purpose".to_string(), json!(unit_purpose_name(*purpose)));
+            "unit"
+        }
+        ChoiceKind::Card {
+            purpose,
+            cards,
+            allow_none,
+        } => {
+            let owner = card_task_house(task);
+            let names: Vec<&str> = cards
+                .iter()
+                .filter_map(|card| {
+                    data.house_cards
+                        .deck(owner)
+                        .get(card.0 as usize)
+                        .map(|spec| spec.id.as_str())
+                })
+                .collect();
+            entry.insert("cards".to_string(), json!(names));
+            entry.insert("allow_none".to_string(), json!(allow_none));
+            if let Some(target) = card_purpose_target(purpose) {
+                entry.insert("target".to_string(), json!(target.name()));
+            }
+            entry.insert("purpose".to_string(), json!(card_purpose_name(purpose)));
+            entry.insert("detail".to_string(), json!(card_purpose_detail(purpose)));
+            "card"
+        }
+        ChoiceKind::Region {
+            purpose,
+            regions,
+            allow_none,
+        } => {
+            entry.insert("regions".to_string(), json!(region_names(data, regions)));
+            entry.insert("allow_none".to_string(), json!(allow_none));
+            match purpose {
+                RegionChoice::QueenOrder { opponent } | RegionChoice::CerseiOrder { opponent } => {
+                    entry.insert("target".to_string(), json!(opponent.name()));
+                }
+                RegionChoice::HordeFort { count } => {
+                    entry.insert("count".to_string(), json!(count));
+                }
+                RegionChoice::RenlyFootman | RegionChoice::HordeMusterFort => {}
+            }
+            entry.insert("purpose".to_string(), json!(region_purpose_name(purpose)));
+            "region"
+        }
+        ChoiceKind::Track { purpose, tracks } => {
+            let names: Vec<&str> = tracks.iter().map(|track| track.as_str()).collect();
+            entry.insert("tracks".to_string(), json!(names));
+            entry.insert("purpose".to_string(), json!(track_purpose_name(*purpose)));
+            "track"
+        }
+        ChoiceKind::Option { purpose, options } => {
+            entry.insert(
+                "options".to_string(),
+                json!(options.iter().copied().collect::<Vec<u8>>()),
+            );
+            if let OptionChoice::TyrionUse { target } = purpose {
+                entry.insert("target".to_string(), json!(target.name()));
+            }
+            entry.insert("purpose".to_string(), json!(option_purpose_name(*purpose)));
+            "option"
+        }
+        ChoiceKind::Muster { region, points } => {
+            entry.insert("region".to_string(), json!(data.map.id_of(*region)));
+            entry.insert("points".to_string(), json!(points));
+            entry.insert("purpose".to_string(), json!("muster"));
+            "muster"
+        }
+    };
+    entry.insert("kind".to_string(), json!(kind));
+    Some(Value::Object(entry))
+}
+
+fn region_names<'a>(data: &'a DataSet, regions: &[RegionId]) -> Vec<&'a str> {
+    regions
+        .iter()
+        .map(|region| data.map.id_of(*region))
+        .collect()
+}
+
+/// The deck a card-choice task draws from.
+///
+/// Patchface and Tyrion name the opponent whose hand is offered; every other
+/// card task offers the chooser's own hand. `Action::card_house` carries the
+/// same answer to the encoder.
+fn card_task_house(task: &ChoiceTask) -> HouseId {
+    match &task.kind {
+        ChoiceKind::Card {
+            purpose: CardChoice::PatchfaceDiscard { target } | CardChoice::TyrionSwap { target },
+            ..
+        } => *target,
+        _ => task.house,
+    }
+}
+
+fn card_purpose_target(purpose: &CardChoice) -> Option<HouseId> {
+    match purpose {
+        CardChoice::TyrionSwap { target } | CardChoice::PatchfaceDiscard { target } => {
+            Some(*target)
+        }
+        CardChoice::AeronSwap | CardChoice::MassingDiscard | CardChoice::MammothRetrieve => None,
+    }
+}
+
+fn unit_purpose_name(purpose: UnitChoice) -> &'static str {
+    match purpose {
+        UnitChoice::Destroy => "generic_destroy",
+        UnitChoice::ReplaceKnight => "crow_replace_knight",
+        UnitChoice::UpgradeFootman => "crow_upgrade_footman",
+    }
+}
+
+fn card_purpose_name(purpose: &CardChoice) -> &'static str {
+    match purpose {
+        CardChoice::TyrionSwap { .. } => "tyrion_card",
+        CardChoice::AeronSwap => "aeron_card",
+        CardChoice::PatchfaceDiscard { .. }
+        | CardChoice::MassingDiscard
+        | CardChoice::MammothRetrieve => "card_discard_or_retrieve",
+    }
+}
+
+/// The engine's own name for a card choice, kept alongside the shared purpose
+/// because Patchface, Massing at Milkwater and Mammoth Riders all mean "pick a
+/// card" but read very differently in a label.
+fn card_purpose_detail(purpose: &CardChoice) -> &'static str {
+    match purpose {
+        CardChoice::TyrionSwap { .. } => "tyrion_swap",
+        CardChoice::AeronSwap => "aeron_swap",
+        CardChoice::PatchfaceDiscard { .. } => "patchface_discard",
+        CardChoice::MassingDiscard => "massing_discard",
+        CardChoice::MammothRetrieve => "mammoth_retrieve",
+    }
+}
+
+fn region_purpose_name(purpose: &RegionChoice) -> &'static str {
+    match purpose {
+        RegionChoice::QueenOrder { .. } => "queen_order",
+        RegionChoice::CerseiOrder { .. } => "cersei_order",
+        RegionChoice::RenlyFootman => "renly_footman",
+        RegionChoice::HordeFort { .. } => "horde_fort",
+        RegionChoice::HordeMusterFort => "horde_muster_fort",
+    }
+}
+
+fn track_purpose_name(purpose: TrackChoice) -> &'static str {
+    match purpose {
+        TrackChoice::KingBeyondHighest => "king_beyond_highest",
+        TrackChoice::KingBeyondOther => "king_beyond_other",
+        TrackChoice::PreemptiveHighest => "preemptive_highest",
+    }
+}
+
+fn option_purpose_name(purpose: OptionChoice) -> &'static str {
+    match purpose {
+        OptionChoice::PreemptiveRaid => "preemptive_raid",
+        OptionChoice::TyrionUse { .. } => "tyrion_use",
+        OptionChoice::RobbRetreat => "robb_retreat",
+    }
+}
+
+fn resume_name(resume: ChoiceResume) -> &'static str {
+    match resume {
+        ChoiceResume::BattlePre => "battle_pre",
+        ChoiceResume::Wildling => "wildling",
+        ChoiceResume::PostBattle => "post_battle",
     }
 }
 
@@ -996,6 +1256,225 @@ mod tests {
                 expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
             );
         }
+    }
+
+    /// A Patchface task: the chooser names a card from the *opponent's* hand.
+    ///
+    /// Returns the state with the task queued and a card slot whose features
+    /// differ between the two decks, so a wrong-deck lookup is visible.
+    fn patchface_state(data: &DataSet) -> (State, CardId) {
+        let mut state = planning_state(data);
+        let chooser = HouseId(0); // baratheon
+        let target = HouseId(2); // stark
+        let cards = state
+            .house(target)
+            .expect("stark is in the game")
+            .house_cards_available
+            .clone();
+        let tables = StaticTables::from_data(data);
+        let card = (0..cards.len())
+            .map(|index| CardId(index as u8))
+            .find(|card| {
+                tables.card_features(chooser, *card) != tables.card_features(target, *card)
+            })
+            .expect("the two decks differ somewhere");
+        state.choice_queue.push(ChoiceTask {
+            house: chooser,
+            kind: ChoiceKind::Card {
+                purpose: CardChoice::PatchfaceDiscard { target },
+                cards,
+                allow_none: true,
+            },
+        });
+        (state, card)
+    }
+
+    /// Patchface's owner discards an opponent's card: the id is a slot in the
+    /// *opponent's* deck, and the action records that deck in `card_house`, so
+    /// the card block must describe that card.
+    #[test]
+    fn a_patchface_card_is_encoded_against_the_opponents_deck() {
+        let data = data();
+        let (state, card) = patchface_state(&data);
+        // What `Game::legal_actions` emits for the task: the chooser acts, the
+        // card comes from the target's deck, tagged with the card-discard context.
+        let action = Action::play_house_card(HouseId(0), Some(card))
+            .with_card_house(HouseId(2))
+            .with_context(crate::action::choice_context::CARD_DISCARD_OR_RETRIEVE);
+        assert_eq!(card_owner(&action), Some(HouseId(2)));
+
+        let tables = StaticTables::from_data(&data);
+        let card_offset = N_ACTION_KINDS + N_HOUSES + 1 + 2 * REGION_BLOCK;
+        let vector = encode_action(&state, &data, &action, Some(HouseId(0)));
+        assert_eq!(
+            &vector[card_offset..card_offset + CARD_BLOCK],
+            &tables.card_features(HouseId(2), card),
+            "the block describes the card in the target's deck"
+        );
+        assert_ne!(
+            &vector[card_offset..card_offset + CARD_BLOCK],
+            &tables.card_features(HouseId(0), card),
+            "the chooser's deck must not be used"
+        );
+    }
+
+    #[test]
+    fn a_normal_card_action_still_uses_the_acting_house_deck() {
+        let data = data();
+        let state = planning_state(&data);
+        let action = Action::play_house_card(HouseId(2), Some(CardId(0)));
+        assert_eq!(action.card_house, None);
+        assert_eq!(card_owner(&action), Some(HouseId(2)));
+
+        let tables = StaticTables::from_data(&data);
+        let card_offset = N_ACTION_KINDS + N_HOUSES + 1 + 2 * REGION_BLOCK;
+        let vector = encode_action(&state, &data, &action, Some(HouseId(2)));
+        assert_eq!(
+            &vector[card_offset..card_offset + CARD_BLOCK],
+            &tables.card_features(HouseId(2), CardId(0))
+        );
+    }
+
+    /// A generic choice packs a context tag into `order`; the tags are numbered
+    /// inside the order table, so they reach the network through the existing
+    /// ORDER_BLOCK without changing `ACTION_DIM`.
+    #[test]
+    fn choice_context_tags_flow_into_the_order_block() {
+        let data = data();
+        let state = planning_state(&data);
+        let order_offset = N_ACTION_KINDS + N_HOUSES + 1 + 2 * REGION_BLOCK + CARD_BLOCK;
+        let tags = crate::action::choice_context::ALL;
+        assert!(
+            tags.len() <= N_ORDERS,
+            "the frozen ORDER_BLOCK has one slot per order key"
+        );
+        for tag in tags {
+            let action = Action::choice_amount(HouseId(2), 1).with_context(tag);
+            let vector = encode_action(&state, &data, &action, Some(HouseId(2)));
+            assert_eq!(vector.len(), ACTION_DIM);
+            assert_eq!(vector[order_offset + tag as usize], 1.0, "tag {tag}");
+            assert_eq!(
+                vector[order_offset + N_ORDERS],
+                0.0,
+                "a context tag is not an order token and has no combat modifier"
+            );
+        }
+    }
+
+    /// A tag appended past the order table has no slot. It must be ignored
+    /// rather than written past the order one-hot into the amount block.
+    #[test]
+    fn an_out_of_range_context_tag_does_not_corrupt_the_action_row() {
+        let data = data();
+        let state = planning_state(&data);
+        let base = Action::play_house_card(HouseId(2), Some(CardId(0)));
+        let tagged = base.with_context(crate::action::choice_context::ALL.len() as u8);
+
+        let plain = encode_action(&state, &data, &base, Some(HouseId(2)));
+        let vector = encode_action(&state, &data, &tagged, Some(HouseId(2)));
+        assert_eq!(vector.len(), ACTION_DIM);
+
+        let order_offset = N_ACTION_KINDS + N_HOUSES + 1 + 2 * REGION_BLOCK + CARD_BLOCK;
+        assert!(vector[order_offset..order_offset + ORDER_BLOCK]
+            .iter()
+            .all(|value| *value == 0.0));
+        for (index, (left, right)) in vector.iter().zip(plain.iter()).enumerate() {
+            if (order_offset..order_offset + ORDER_BLOCK).contains(&index) {
+                continue;
+            }
+            assert_eq!(left, right, "slot {index} changed");
+        }
+    }
+
+    #[test]
+    fn pending_choice_describes_a_patchface_task() {
+        let data = data();
+        let (state, _card) = patchface_state(&data);
+        let value = pending_choice(&state, &data).expect("a task is pending");
+        assert_eq!(value["kind"], json!("card"));
+        assert_eq!(value["purpose"], json!("card_discard_or_retrieve"));
+        assert_eq!(value["detail"], json!("patchface_discard"));
+        assert_eq!(value["house"], json!("baratheon"));
+        assert_eq!(value["target"], json!("stark"));
+        assert_eq!(value["allow_none"], json!(true));
+        assert_eq!(value["queued"], json!(1));
+
+        let cards: Vec<&str> = value["cards"]
+            .as_array()
+            .expect("a card list")
+            .iter()
+            .map(|card| card.as_str().expect("a card name"))
+            .collect();
+        let hand: Vec<&str> = data
+            .house_cards
+            .deck(HouseId(2))
+            .iter()
+            .map(|spec| spec.id.as_str())
+            .collect();
+        assert!(!cards.is_empty());
+        assert!(
+            cards.iter().all(|card| hand.contains(card)),
+            "names resolve against the target's deck: {cards:?}"
+        );
+    }
+
+    #[test]
+    fn pending_choice_describes_unit_areas_and_remaining() {
+        let data = data();
+        let mut state = planning_state(&data);
+        let winterfell = data.map.lookup("winterfell").expect("winterfell");
+        state.choice_queue.push(ChoiceTask {
+            house: HouseId(2),
+            kind: ChoiceKind::Unit {
+                purpose: UnitChoice::Destroy,
+                areas: smallvec::smallvec![winterfell],
+                remaining: 2,
+                allow_none: false,
+            },
+        });
+
+        let value = pending_choice(&state, &data).expect("a task is pending");
+        assert_eq!(value["kind"], json!("unit"));
+        assert_eq!(value["purpose"], json!("generic_destroy"));
+        assert_eq!(value["house"], json!("stark"));
+        assert_eq!(value["remaining"], json!(2));
+        assert_eq!(value["allow_none"], json!(false));
+        assert_eq!(value["areas"], json!(["winterfell"]));
+        assert!(value.get("resume").is_none());
+    }
+
+    #[test]
+    fn pending_choice_is_absent_on_an_ordinary_decision() {
+        let data = data();
+        assert!(pending_choice(&planning_state(&data), &data).is_none());
+    }
+
+    /// The accessor is a derived view: the frozen parity fingerprint must not
+    /// grow a choice-queue block.
+    #[test]
+    fn the_choice_queue_stays_out_of_the_state_fingerprint() {
+        use crate::fingerprint::state_fingerprint;
+
+        let data = data();
+        let mut state = planning_state(&data);
+        let before = state_fingerprint(&state, &data);
+        let winterfell = data.map.lookup("winterfell").expect("winterfell");
+        state.choice_queue.push(ChoiceTask {
+            house: HouseId(2),
+            kind: ChoiceKind::Region {
+                purpose: RegionChoice::RenlyFootman,
+                regions: smallvec::smallvec![winterfell],
+                allow_none: true,
+            },
+        });
+        state.choice_resume = Some(ChoiceResume::PostBattle);
+        assert_eq!(state_fingerprint(&state, &data), before);
+
+        let value = pending_choice(&state, &data).expect("a task is pending");
+        assert_eq!(value["kind"], json!("region"));
+        assert_eq!(value["purpose"], json!("renly_footman"));
+        assert_eq!(value["resume"], json!("post_battle"));
+        assert_eq!(value["regions"], json!(["winterfell"]));
     }
 
     #[test]

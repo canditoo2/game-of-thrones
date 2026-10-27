@@ -539,19 +539,21 @@ def test_rust_engine_driver_feeds_the_training_loop():
     model = PolicyValueNet(hidden=32, trunk_layers=1)
     plan = SelfPlayPlan(
         games=2,
-        max_rounds=2,
+        max_rounds=4,
         simulations=4,
         determinizations=1,
         batch_games=2,
         seed=3,
     )
-    records = rust_engine.self_play_records(model, plan)
+    records = rust_engine.self_play_records(
+        model, plan, base_config=GameConfig(sequential_westeros=True)
+    )
     assert len(records) == 2
 
     for record in records:
         assert record.examples, "a game must record decisions"
         assert record.steps == len(record.examples)
-        assert record.rounds >= 1
+        assert record.rounds > 2, "the native driver must not stop at the first reveal"
         assert record.winner is None or record.winner in HOUSE_ORDER
         for example in record.examples:
             assert example.state.shape == (97,)

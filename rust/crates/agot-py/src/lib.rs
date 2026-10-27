@@ -146,6 +146,32 @@ fn parse_cards(
         .collect()
 }
 
+/// Resolve a printed House-card name to its slot and owning deck.
+///
+/// `preferred` is the deck the caller named (or the action's own house); a card
+/// that is not in it is looked up across the six decks, because a generic card
+/// choice can name another house's card: Patchface discards from the opponent's
+/// hand. Printed names are unique across the decks, so the search is unambiguous.
+fn resolve_house_card(
+    data: &DataSet,
+    preferred: Option<HouseId>,
+    id: &str,
+) -> PyResult<(CardId, HouseId)> {
+    if let Some(house) = preferred {
+        if let Some(card) = data.house_cards.card_index(house, id) {
+            return Ok((card, house));
+        }
+    }
+    HouseId::ALL
+        .into_iter()
+        .find_map(|house| {
+            data.house_cards
+                .card_index(house, id)
+                .map(|card| (card, house))
+        })
+        .ok_or_else(|| PyValueError::new_err(format!("unknown house card {id:?}")))
+}
+
 // ---------------------------------------------------------------------------
 // Action
 // ---------------------------------------------------------------------------
@@ -194,6 +220,33 @@ impl PyAction {
         self.inner.order.map(|order| order.key())
     }
 
+    /// The synthetic generic-choice context tag, when `order` holds one.
+    ///
+    /// Generic choices pack a context tag into `order` (values `0..=14`, see
+    /// `agot_core::action::choice_context`). Only `PlaceOrder` and `RavenSwap`
+    /// carry a real order token, so every other kind with `order` set holds a
+    /// tag; it is reported here as the integer `agot.choice_context` expects so
+    /// a caller never has to reverse an order key name.
+    #[getter]
+    fn choice_tag(&self) -> Option<u8> {
+        if matches!(
+            self.inner.kind,
+            ActionKind::PlaceOrder | ActionKind::RavenSwap
+        ) {
+            return None;
+        }
+        self.inner.order.map(|order| order.0)
+    }
+
+    /// The house whose deck `card` belongs to, when it is not `house`'s own.
+    ///
+    /// Patchface's controller discards an opponent's card, so the action belongs
+    /// to the Patchface player while the card id indexes the target's deck.
+    #[getter]
+    fn card_house(&self) -> Option<&'static str> {
+        self.inner.card_house.map(|house| house.name())
+    }
+
     #[getter]
     fn card(&self) -> Option<&str> {
         // A holders'-choice action stores a *Westeros* card index in the same
@@ -206,10 +259,15 @@ impl PyAction {
             }
             return Some(self.data.westeros.card_id(card.0 as u16));
         }
-        match (self.inner.house, self.inner.card) {
-            (Some(house), Some(card)) => Some(self.data.house_cards.card(house, card).id.as_str()),
-            _ => None,
-        }
+        // A card id is a slot in one house's deck. `card_house` names the deck
+        // when it is not the acting house's (Patchface discards an opponent's
+        // card), so printing the action names the card the chooser really saw
+        // instead of the same slot in their own hand.
+        let house = observation::card_owner(&self.inner)?;
+        self.inner
+            .card
+            .and_then(|card| self.data.house_cards.deck(house).get(card.0 as usize))
+            .map(|spec| spec.id.as_str())
     }
 
     #[getter]
@@ -301,10 +359,15 @@ impl PyGame {
 impl PyGame {
     /// `Game.new(houses=None, seed=0, max_rounds=10, victory_castles=7,
     /// use_westeros_decks=True, deferred_battles=False,
-    /// sequential_westeros=False, doran_choice=False, data_dir=None)`.
+    /// sequential_westeros=False, doran_choice=False,
+    /// wildling_tie_choice=False, choice_choices=False, data_dir=None)`.
+    ///
+    /// The rule options are optional keyword arguments, so an existing caller
+    /// keeps working unchanged; each defaults to the raw engine behaviour the
+    /// frozen fixtures pin.
     #[classmethod]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, deferred_battles=false, sequential_westeros=false, doran_choice=false, data_dir=None))]
+    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, deferred_battles=false, sequential_westeros=false, doran_choice=false, wildling_tie_choice=false, choice_choices=false, data_dir=None))]
     fn new(
         _cls: &Bound<'_, PyType>,
         houses: Option<Vec<String>>,
@@ -315,6 +378,8 @@ impl PyGame {
         deferred_battles: bool,
         sequential_westeros: bool,
         doran_choice: bool,
+        wildling_tie_choice: bool,
+        choice_choices: bool,
         data_dir: Option<String>,
     ) -> PyResult<PyGame> {
         let data = match data_dir {
@@ -346,6 +411,9 @@ impl PyGame {
         game.deferred_battles = deferred_battles;
         game.sequential_westeros = sequential_westeros;
         game.doran_choice = doran_choice;
+        game.wildling_tie_choice = wildling_tie_choice;
+        game.choice_choices = choice_choices;
+        game.state.choice_choices = choice_choices;
         Ok(PyGame { game })
     }
 
@@ -587,14 +655,24 @@ impl PyGame {
             "stage": format!("{:?}", battle.stage),
             "attacker_units": units(&battle.attacker_units),
             "defender_units": units(&battle.defender_units),
-            "attacker_card": battle.attacker_card.map(|card| {
-                self.game.data.house_cards.card(battle.attacker, card).id.as_str()
-            }),
-            "defender_card": match (battle.defender, battle.defender_card) {
-                (Some(house), Some(card)) => {
-                    Some(self.game.data.house_cards.card(house, card).id.as_str())
+            // Both House cards stay hidden until both players have committed
+            // (FFG secrecy ruling); the physical game reveals them together.
+            "attacker_card": if battle.attacker_card_chosen && battle.defender_card_chosen {
+                battle.attacker_card.map(|card| {
+                    self.game.data.house_cards.card(battle.attacker, card).id.as_str()
+                })
+            } else {
+                None
+            },
+            "defender_card": if battle.attacker_card_chosen && battle.defender_card_chosen {
+                match (battle.defender, battle.defender_card) {
+                    (Some(house), Some(card)) => {
+                        Some(self.game.data.house_cards.card(house, card).id.as_str())
+                    }
+                    _ => None,
                 }
-                _ => None,
+            } else {
+                None
             },
             "doran_owner": battle.doran_owner.map(|house| house.name()),
             "attacker_units_strength": attacker_unit_strength,
@@ -615,6 +693,22 @@ impl PyGame {
         to_python(py, &value)
     }
 
+    /// The generic choice the game is waiting on, or `None`.
+    ///
+    /// Read-only decision context for the desktop game and the training loop:
+    /// the network layout is frozen and `state_fingerprint` must not grow a
+    /// choice block, so the pending task is exposed here instead. The dict is
+    /// `observation::pending_choice`'s: `kind`, `purpose`, `house`, `queued`,
+    /// `resume` when the queue resumes a battle/Wildling sequence, plus the
+    /// variant's own lists (`areas`, `cards`, `regions`, `tracks`, `options`)
+    /// and counts (`remaining`, `allow_none`, `points`, `count`, `target`).
+    fn pending_choice(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match observation::pending_choice(&self.game.state, &self.game.data) {
+            Some(value) => to_python(py, &value),
+            None => Ok(py.None()),
+        }
+    }
+
     /// The Wildling attack in progress, as the dict the Python engine keeps.
     fn wildling_attack(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let Some(attack) = self.game.state.wildling_attack.as_ref() else {
@@ -625,6 +719,7 @@ impl PyGame {
             .iter()
             .map(|(house, amount)| (house.name().to_string(), serde_json::json!(amount)))
             .collect();
+        let tie = self.game.state.pending_wildling_tie.as_ref();
         let value = serde_json::json!({
             "strength": attack.strength,
             "bids": bids,
@@ -635,6 +730,11 @@ impl PyGame {
                 .collect::<Vec<_>>(),
             "card": attack.card.map(|card| self.game.data.wildlings.card_id(card)),
             "return_phase": attack.return_phase.as_str(),
+            "tie_highest": tie.map(|tie| tie.highest),
+            "tie_chooser": tie.map(|tie| tie.chooser.name()),
+            "tie_candidates": tie.map(|tie| {
+                tie.candidates.iter().map(|house| house.name()).collect::<Vec<_>>()
+            }),
         });
         to_python(py, &value)
     }
@@ -780,7 +880,12 @@ impl PyGame {
     }
 
     /// Build an action from names: `game.action("place_order", region="winterfell", order="march")`.
-    #[pyo3(signature = (kind, *, house=None, region=None, target=None, order=None, card=None, unit=None, side=None, amount=None, units=None, establish=false))]
+    ///
+    /// `card_house` names the deck a `card` belongs to when it is not `house`'s
+    /// own (Patchface discards an opponent's card); without it the card is
+    /// looked up in `house`'s deck first and then across the decks by printed
+    /// name, so a GUI can rebuild any legal action it was offered.
+    #[pyo3(signature = (kind, *, house=None, region=None, target=None, order=None, card=None, card_house=None, unit=None, side=None, amount=None, units=None, establish=false))]
     #[allow(clippy::too_many_arguments)]
     fn action(
         &self,
@@ -790,6 +895,7 @@ impl PyGame {
         target: Option<String>,
         order: Option<String>,
         card: Option<String>,
+        card_house: Option<String>,
         unit: Option<String>,
         side: Option<String>,
         amount: Option<u8>,
@@ -800,6 +906,13 @@ impl PyGame {
         let kind = ActionKind::from_name(kind)
             .ok_or_else(|| PyValueError::new_err(format!("unknown action kind {kind:?}")))?;
         let house_id = house
+            .as_deref()
+            .map(|name| {
+                HouseId::from_name(name)
+                    .ok_or_else(|| PyValueError::new_err(format!("unknown house {name:?}")))
+            })
+            .transpose()?;
+        let named_card_house = card_house
             .as_deref()
             .map(|name| {
                 HouseId::from_name(name)
@@ -820,24 +933,31 @@ impl PyGame {
                     .ok_or_else(|| PyValueError::new_err(format!("unknown order {key:?}")))
             })
             .transpose()?;
-        let card_id = match (kind, house_id, card.as_deref()) {
+        let (card_id, action_card_house) = match (kind, card.as_deref()) {
             // A holders'-choice action stores a card id from the Westeros deck,
             // with the literal "none" as the no-effect sentinel.
-            (ActionKind::WesterosChoice, _, Some("none")) => {
-                Some(CardId(agot_core::state::NONE_OPTION as u8))
+            (ActionKind::WesterosChoice, Some("none")) => {
+                (Some(CardId(agot_core::state::NONE_OPTION as u8)), None)
             }
-            (ActionKind::WesterosChoice, _, Some(id)) => {
+            (ActionKind::WesterosChoice, Some(id)) => {
                 let index = data.westeros.card_index(id).ok_or_else(|| {
                     PyValueError::new_err(format!("unknown Westeros card {id:?}"))
                 })?;
-                Some(CardId(index as u8))
+                (Some(CardId(index as u8)), None)
             }
-            (_, Some(house), Some(id)) => {
-                Some(data.house_cards.card_index(house, id).ok_or_else(|| {
-                    PyValueError::new_err(format!("{house} has no house card {id:?}"))
-                })?)
+            (_, Some(id)) => {
+                let (card, deck) = resolve_house_card(data, named_card_house.or(house_id), id)?;
+                // Mirror `Action::with_card_house`: only a *foreign* deck is
+                // recorded, so a rebuilt action compares equal to the one the
+                // engine offered.
+                let card_house = if Some(deck) == house_id {
+                    None
+                } else {
+                    Some(deck)
+                };
+                (Some(card), card_house)
             }
-            _ => None,
+            _ => (None, None),
         };
         let unit_id = unit
             .as_deref()
@@ -867,6 +987,7 @@ impl PyGame {
                 amount,
                 units: units.map(|counts| [counts.0, counts.1, counts.2, counts.3]),
                 establish,
+                card_house: action_card_house,
             },
             Arc::clone(&self.game.data),
         ))

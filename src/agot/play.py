@@ -25,6 +25,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agot.agents import MCTS, GreedyPolicy, Policy, RandomPolicy
+from agot.choice_context import (
+    card_choice_mode,
+    choice_track,
+    describe_action_choice,
+    resolve_choice_context,
+)
 from agot.engine.actions import Action, ActionKind
 from agot.engine.enums import ORDERS_BY_KEY, OrderType, Phase, Track, UnitType
 from agot.engine.game import Game, GameConfig
@@ -51,6 +57,7 @@ _TRACK_NAMES = {
     Track.FIEFDOMS: "Fiefdoms",
     Track.KINGS_COURT: "King's Court",
 }
+_TRACKS = (Track.IRON_THRONE, Track.FIEFDOMS, Track.KINGS_COURT)
 _HELP = """Commands:
   <number>  play the numbered action
   b         redraw the board
@@ -168,11 +175,80 @@ def _action_unit_counts(units: tuple[int, ...] | None) -> str:
     return " ".join(pieces) or "no units"
 
 
+def _doran_active(game: Game) -> bool:
+    battle = game.state.pending_battle
+    return (
+        game.state.phase is Phase.COMBAT
+        and battle is not None
+        and battle.get("stage") == "Doran"
+    )
+
+
+def _wildling_tie_candidates(game: Game) -> list[str]:
+    if game.state.phase is not Phase.WILDLING_ATTACK:
+        return []
+    attack = game.state.wildling_attack or {}
+    candidates = attack.get("tie_candidates") or []
+    return [str(candidate) for candidate in candidates]
+
+
+def _format_doran_choice(game: Game, action: Action) -> str:
+    tracks = _TRACKS
+    index = action.amount if action.amount is not None else 0
+    track = tracks[index] if 0 <= index < len(tracks) else tracks[0]
+    return (
+        "Doran Martell: move the opponent to the bottom of "
+        f"{_TRACK_NAMES[track]}"
+    )
+
+
+def _format_tie_choice(game: Game, action: Action) -> str:
+    candidates = _wildling_tie_candidates(game)
+    index = action.amount if action.amount is not None else 0
+    if 0 <= index < len(candidates):
+        return f"Break the Wildling bid tie: choose {_house_name(candidates[index])}"
+    return "Break the Wildling bid tie"
+
+
 def format_action(game: Game, action: Action) -> str:
     """A human-readable description of one legal action."""
     kind = action.kind
-    region = _region_name(game, action.region)
+    context = resolve_choice_context(game, action)
+    region_id = action.region
+    if region_id is None and context is not None and context.regions:
+        region_id = context.regions[0]
+    region = _region_name(game, region_id)
     target = _region_name(game, action.target)
+
+    # Doran and the Wildling bid tie keep their dedicated wording: they are
+    # not generic card tasks and their action payload is an index, not a card.
+    if _doran_active(game) or (context is not None and context.purpose == "doran"):
+        return _format_doran_choice(game, action)
+    if context is not None and context.purpose == "wildling_tie":
+        candidates = _wildling_tie_candidates(game)
+        if not candidates:
+            candidates = list(context.cards)
+        index = action.amount if action.amount is not None else 0
+        if 0 <= index < len(candidates):
+            return (
+                "Break the Wildling bid tie: choose "
+                f"{_house_name(candidates[index])}"
+            )
+        return "Break the Wildling bid tie"
+    if context is None and _wildling_tie_candidates(game) and action.card is None:
+        return _format_tie_choice(game, action)
+
+    if context is not None:
+        track = choice_track(context, action)
+        text = describe_action_choice(
+            context,
+            action,
+            region_name=region,
+            track=track,
+            mode=card_choice_mode(context, action, game),
+        )
+        if text:
+            return text
 
     if kind is ActionKind.PASS:
         if not action.region:
@@ -209,9 +285,11 @@ def format_action(game: Game, action: Action) -> str:
     if kind is ActionKind.RETREAT:
         return f"Retreat from {region} to {target}"
     if kind is ActionKind.DISBAND:
-        return f"Disband one {_unit_name(action.unit)} in {region}"
+        routed = " routed" if action.amount == 1 else ""
+        return f"Disband one{routed} {_unit_name(action.unit)} in {region}"
     if kind is ActionKind.CHOOSE_CASUALTY:
-        return f"Destroy one {_unit_name(action.unit)} in {region}"
+        routed = " routed" if action.amount == 1 else ""
+        return f"Destroy one{routed} {_unit_name(action.unit)} in {region}"
     if kind is ActionKind.DECLARE_SUPPORT:
         if action.side == "refuse":
             return f"Refuse to support from {region}"
@@ -224,21 +302,12 @@ def format_action(game: Game, action: Action) -> str:
     if kind is ActionKind.BID:
         return f"Bid {action.amount if action.amount is not None else '?'} Power"
     if kind is ActionKind.WESTEROS_CHOICE:
-        battle = game.state.pending_battle
-        if (
-            game.state.phase is Phase.COMBAT
-            and battle is not None
-            and battle.get("stage") == "Doran"
-        ):
-            tracks = (Track.IRON_THRONE, Track.FIEFDOMS, Track.KINGS_COURT)
-            index = action.amount if action.amount is not None else 0
-            track = tracks[index] if 0 <= index < len(tracks) else tracks[0]
-            return (
-                "Doran Martell: move the opponent to the bottom of "
-                f"{_TRACK_NAMES[track]}"
-            )
         if action.card and action.card != "none":
             return f"Resolve Westeros card {_pretty(action.card)}"
+        if action.target or action.region:
+            return f"Choose {_region_name(game, action.target or action.region)}"
+        if action.amount is not None:
+            return f"Choose option {action.amount + 1}"
         return "Choose no Westeros effect"
     return str(action)
 
@@ -453,8 +522,14 @@ def ai_action_summary(game: Game, house: str, action: Action) -> str:
         return f"{_house_name(house)} uses the Messenger Raven."
     if action.kind is ActionKind.BID:
         return f"{_house_name(house)} bids in secret."
+    context = resolve_choice_context(game, action)
     if action.kind is ActionKind.PLAY_HOUSE_CARD:
-        return f"{_house_name(house)} selects a House card."
+        # A plain battle card stays hidden. A generic card task (Patchface's
+        # discard, Massing, Mammoth, Tyrion/Aeron) is public once chosen, so the
+        # specific label is both clearer and not a leak.
+        if context is None or context.purpose is None:
+            return f"{_house_name(house)} selects a House card."
+        return f"{_house_name(house)}: {format_action(game, action)}"
     return f"{_house_name(house)}: {format_action(game, action)}"
 
 
@@ -494,7 +569,7 @@ def play_interactive(
     if max_steps is not None and max_steps < 0:
         raise ValueError("max_steps cannot be negative")
     if config is None:
-        config = GameConfig(seed=seed)
+        config = GameConfig(seed=seed, sequential_westeros=True)
     if human_house not in config.houses:
         raise ValueError(
             f"unknown house {human_house!r}; choose from {list(config.houses)}"
@@ -533,6 +608,12 @@ def play_interactive(
             output_fn(f"Stopped after {steps} decisions.")
             aborted = True
             break
+
+        # Sequential Westeros reveals pause for the table; the console has no
+        # table, so resolve the card and continue.
+        if game.state.phase is Phase.WESTEROS and game.state.westeros_waiting:
+            game.continue_westeros()
+            continue
 
         state = game.state
         human = state.houses.get(human_house)

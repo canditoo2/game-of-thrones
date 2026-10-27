@@ -23,6 +23,12 @@ from tkinter import font as tkfont
 import numpy as np
 
 from agot.agents import MCTS, outcome_vector
+from agot.choice_context import (
+    card_choice_mode,
+    describe_choice,
+    resolve_choice_context,
+    wildling_card_name,
+)
 from agot.engine.actions import Action, ActionKind
 from agot.engine.enums import (
     ORDERS_BY_KEY,
@@ -1287,6 +1293,8 @@ class AgotApp:
                 deferred_battles=True,
                 sequential_westeros=True,
                 doran_choice=True,
+                wildling_tie_choice=True,
+                choice_choices=True,
             )
             policies = make_policies(
                 config,
@@ -2914,6 +2922,13 @@ class AgotApp:
             return ""
         state = self.game.state
         parts: list[str] = []
+        payload = getattr(state, "pending_choice", None)
+        if isinstance(payload, dict) and payload:
+            context = resolve_choice_context(
+                self.game, Action(ActionKind.PASS), pending=payload
+            )
+            if context is not None:
+                parts.append(describe_choice(context))
         battle = state.pending_battle
         if battle:
             region = region_name(self.game, str(battle.get("region", "")))
@@ -2933,8 +2948,13 @@ class AgotApp:
             )
         attack = state.wildling_attack
         if attack:
+            card = attack.get("card")
+            card_text = (
+                wildling_card_name(str(card)) + " — " if card else ""
+            )
             parts.append(
-                f"Wildling attack in progress (strength {attack.get('strength', '?')})."
+                f"Wildling attack in progress ({card_text}strength "
+                f"{attack.get('strength', '?')})."
             )
         pending = state.pending_westeros
         if pending:
@@ -3207,8 +3227,20 @@ class AgotApp:
             return "Finish the March order"
         text = format_action(self.game, action)
         if action.kind is ActionKind.PLAY_HOUSE_CARD:
+            # The chosen card may come from the opponent's hand (Patchface,
+            # Tyrion), so prefer the deck the engine named over the actor's.
+            context = resolve_choice_context(self.game, action)
+            mode = card_choice_mode(context, action, self.game) if context else None
+            card_house = getattr(action, "card_house", None)
+            if not card_house:
+                if mode == "replace":
+                    card_house = context.target if context else None
+                elif mode == "discard" and context and context.target != action.house:
+                    card_house = context.target
+                else:
+                    card_house = action.house
             card = house_card_line(
-                action.house or self.human_house, action.card
+                card_house or self.human_house, action.card
             )
             if card:
                 text += "\n" + card

@@ -100,7 +100,9 @@ def cmd_demo(args: argparse.Namespace) -> int:
     # torch trainer, and a demo/gauntlet must not pay a 2 s torch import.
     from agot.training.selfplay import play_game
 
-    config = GameConfig(seed=args.seed, max_rounds=args.max_rounds)
+    config = GameConfig(
+        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True
+    )
     factory = _policy_factory(
         args.policy,
         simulations=args.simulations,
@@ -143,7 +145,9 @@ def cmd_play(args: argparse.Namespace) -> int:
 
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
-    config = GameConfig(seed=args.seed, max_rounds=args.max_rounds)
+    config = GameConfig(
+        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True
+    )
     if args.a.startswith("net:") and args.b.startswith("net:"):
         from agot.training.evaluate import evaluate_models_match
 
@@ -194,7 +198,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 def cmd_gauntlet(args: argparse.Namespace) -> int:
     """Measure one candidate's single-seat win rate against a field."""
     names = [name for name in args.opponents.split(",") if name]
-    config = GameConfig(seed=args.seed, max_rounds=args.max_rounds)
+    config = GameConfig(
+        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True
+    )
 
     # A saved network against scripted opponents is the training gauntlet and
     # the common CLI case: run it on the Rust driver instead of Python MCTS.
@@ -284,7 +290,11 @@ def cmd_round_robin(args: argparse.Namespace) -> int:
             simulations=args.simulations,
             determinizations=args.determinizations,
             games=args.games,
-            config=GameConfig(seed=args.seed, max_rounds=args.max_rounds),
+            config=GameConfig(
+                seed=args.seed,
+                max_rounds=args.max_rounds,
+                sequential_westeros=True,
+            ),
             seed=args.seed,
         )
         results[candidate] = result.as_dict()
@@ -340,7 +350,9 @@ def _run_training(args: argparse.Namespace) -> int:
 
         torch.set_num_threads(train_threads)
 
-    config = GameConfig(seed=args.seed, max_rounds=args.max_rounds)
+    config = GameConfig(
+        seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True
+    )
     model = (
         PolicyValueNet.load(args.resume)
         if args.resume

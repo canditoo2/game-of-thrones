@@ -17,9 +17,10 @@
 //!   Cersei, Robb, Loras, Roose, Patchface, Arianne).
 //!
 //! The rulebook lets the card's owner make several sub-choices (which Footman,
-//! which Order, which alternate card, which retreat area). The engine resolves
-//! those with deterministic defaults: strongest House card, cheapest Footman,
-//! first legal Order, and a retreat that keeps Supply. See `docs/roadmap.md`.
+//! which Order, which alternate card, which retreat area). Interactive play and
+//! training queue those as generic [`crate::state::ChoiceTask`] decisions; the
+//! direct low-level battle helpers keep deterministic fallbacks for the frozen
+//! regression corpus. See `docs/roadmap.md`.
 //!
 //! # The deferred context
 //!
@@ -70,10 +71,11 @@
 
 use smallvec::SmallVec;
 
+use crate::action::Side;
 use crate::combat::{sort_region_ids, BattleResult, BattleSide};
 use crate::enums::{CardId, HouseId, OrderKey, OrderType, RegionId, Track, UnitType};
 use crate::map::{CardSpec, GameMap, HouseCardData};
-use crate::state::State;
+use crate::state::{CardChoice, ChoiceKind, ChoiceResume, ChoiceTask, RegionChoice, State};
 
 // ---------------------------------------------------------------------------
 // Ability lookup
@@ -206,6 +208,10 @@ pub struct BattleContext {
     pub defender_card: Option<CardId>,
     pub attacker_supported: bool,
     pub defender_supported: bool,
+    /// The declared support for each adjacent area, when the caller supplied
+    /// them (`None` is the legacy self-directed fallback). Internal to battle
+    /// resolution: it is not serialized, so the frozen fixtures are unaffected.
+    pub(crate) support_choices: Option<SmallVec<[(RegionId, Side); 8]>>,
     pub attacker_support_units: [u8; 4],
     pub defender_support_units: [u8; 4],
     pub attacker_order: Option<OrderKey>,
@@ -248,6 +254,19 @@ impl BattleContext {
             self.attacker_card
         } else {
             self.defender_card
+        }
+    }
+
+    /// Update the card id the later abilities read.
+    ///
+    /// A swap changes which card this side actually played, so every ability
+    /// resolved after it (Mace, Balon, Renly, ...) must see the new id.
+    #[inline]
+    pub fn set_card_of(&mut self, house: HouseId, card: Option<CardId>) {
+        if house == self.attacker {
+            self.attacker_card = card;
+        } else {
+            self.defender_card = card;
         }
     }
 
@@ -317,6 +336,18 @@ impl BattleContext {
         units[unit.index()] -= 1;
         true
     }
+
+    /// Remove every participating Siege Engine from one side.
+    ///
+    /// FFG's ruling: Siege Engines cannot be chosen as casualties; they are
+    /// removed automatically, in addition to the normal casualties, before the
+    /// loser picks any other unit.
+    pub fn remove_siege_engines(&mut self, house: HouseId) -> u8 {
+        let units = self.units_of_mut(house);
+        let count = units[UnitType::Siege.index()];
+        units[UnitType::Siege.index()] = 0;
+        count
+    }
 }
 
 #[inline]
@@ -368,6 +399,10 @@ fn resolve_card_swaps(
     cards: &HouseCardData,
     house: HouseId,
 ) {
+    if state.choice_choices {
+        // Interactive play queues these choices in the Game layer.
+        return;
+    }
     let ability = ability_of(cards, house, ctx.card_of(house));
     if ability != "tyrion_lannister" && ability != "aeron_damphair" {
         return;
@@ -450,6 +485,9 @@ fn apply_swap(
     side.card_strength = strength;
     side.swords = swords;
     side.forts = forts;
+    // Later abilities (and the post-battle hooks) read the context card id, so
+    // record the swap there too: the side is now fighting with `new`.
+    ctx.set_card_of(house, new);
     ctx.card_swaps.push(CardSwap {
         house,
         old,
@@ -570,6 +608,10 @@ fn passive(
 }
 
 /// Salladhor Saan zeroes every non-Baratheon Ship in a supported battle.
+///
+/// Victarion may already have added +1 per attacking/supporting Ship to
+/// `units_strength`; that bonus is ship strength too, so it must be removed
+/// along with the printed ship strength. Order bonuses are left untouched.
 fn salladhor(ctx: &mut BattleContext, cards: &HouseCardData, house: HouseId) {
     if ability_of(cards, house, ctx.card_of(house)) != "salladhor_saan" {
         return;
@@ -583,15 +625,37 @@ fn salladhor(ctx: &mut BattleContext, cards: &HouseCardData, house: HouseId) {
         }
         let ships = count(ctx.units_of(target), UnitType::Ship) as i16;
         let support_ships = count(ctx.support_of(target), UnitType::Ship) as i16;
+        let victarion = ctx.is_attacker(target)
+            && ability_of(cards, target, ctx.card_of(target)) == "victarion_greyjoy";
         let side = ctx.side_of_mut(target);
+        // The printed Ship strength is in `units_strength`; supporting Ships
+        // also appear in `support_strength`. Victarion's extra +1 per Ship is
+        // in `units_strength` regardless of whether the Ship is supporting.
         side.units_strength -= ships;
         side.support_strength -= support_ships;
+        if victarion {
+            side.units_strength -= ships + support_ships;
+        }
     }
     ctx.notes
         .push("Salladhor Saan reduces non-Baratheon Ships to 0".to_string());
 }
 
 /// The Queen of Thorns removes an adjacent opponent Order.
+///
+/// # Support timing
+///
+/// Support is locked in at step 2 of combat ("Calculate Initial Combat
+/// Strength"), while House-card text resolves at step 3. The official FAQ
+/// nevertheless requires the initial strength to be recalculated when this card
+/// removes a Support order: the opponent "does not add the strength of the
+/// supporting units in the area from where the Support order was removed"
+/// (AGoT 2E FAQ v2.0, Queen of Thorns). [`crate::combat::prepare_battle`]
+/// applies that correction after recording the removal, so both the
+/// deterministic and the interactive paths score the battle without that
+/// area's support. Interactive play chooses the area before
+/// [`crate::combat::prepare_battle`] runs, so it already starts from the
+/// post-removal board and needs no extra adjustment.
 fn queen_of_thorns(
     ctx: &mut BattleContext,
     state: &State,
@@ -599,6 +663,10 @@ fn queen_of_thorns(
     cards: &HouseCardData,
     house: HouseId,
 ) {
+    if state.choice_choices {
+        // Interactive play queues the adjacent-Order choice in the Game layer.
+        return;
+    }
     if ability_of(cards, house, ctx.card_of(house)) != "queen_of_thorns" {
         return;
     }
@@ -761,8 +829,8 @@ pub fn apply_post_battle(
             }
             state.note("Tywin Lannister gains 2 Power".to_string());
         }
-        "renly_baratheon" => renly_upgrade(ctx, state, map, winner),
-        "cersei_lannister" => remove_any_order(ctx, state, map, loser),
+        "renly_baratheon" if !state.choice_choices => renly_upgrade(ctx, state, map, winner),
+        "cersei_lannister" if !state.choice_choices => remove_any_order(ctx, state, map, loser),
         _ => {}
     }
 
@@ -775,11 +843,134 @@ pub fn apply_post_battle(
         state.note("Roose Bolton returns the discard pile to hand".to_string());
     }
 
-    // Patchface acts after combat whichever side won.
+    if state.choice_choices {
+        queue_post_battle_choices(ctx, state, map, cards, result);
+    } else {
+        // Patchface acts after combat whichever side won.
+        for house in [ctx.attacker, ctx.defender] {
+            if ability_of(cards, house, ctx.card_of(house)) == "patchface" {
+                patchface(ctx, state, cards, house);
+            }
+        }
+    }
+}
+
+/// Queue the interactive post-battle card choices.
+fn queue_post_battle_choices(
+    ctx: &BattleContext,
+    state: &mut State,
+    map: &GameMap,
+    cards: &HouseCardData,
+    result: &BattleResult,
+) {
+    let winner = result.winner;
+    let loser = result.loser;
+    let mut queued = false;
+
+    if ability_of(cards, winner, ctx.card_of(winner)) == "renly_baratheon" {
+        let winner_side = if winner == ctx.attacker {
+            Side::Attacker
+        } else {
+            Side::Defender
+        };
+        // With explicit declarations only the areas that really supported the
+        // winner may be upgraded: a Support order that refused (or helped the
+        // opponent) is not a supporting Footman. `None` keeps the legacy
+        // self-directed helper, where every adjacent Support order supports.
+        let declared_for_winner = |region: RegionId| match &ctx.support_choices {
+            None => true,
+            Some(choices) => choices
+                .iter()
+                .any(|(area, side)| *area == region && *side == winner_side),
+        };
+        let mut regions: SmallVec<[RegionId; 8]> = SmallVec::new();
+        if state.region(ctx.region_id).unit_count(UnitType::Footman) > 0 {
+            regions.push(ctx.region_id);
+        }
+        let mut neighbours: Vec<RegionId> = map.neighbours_of(ctx.region_id).to_vec();
+        sort_region_ids(map, &mut neighbours);
+        for neighbour in neighbours {
+            let region = state.region(neighbour);
+            if region.unit_count(UnitType::Footman) == 0 {
+                continue;
+            }
+            let eligible = match &ctx.support_choices {
+                // No declarations: the legacy helper treats every adjacent
+                // Support order of the winner as supporting it.
+                None => {
+                    region.order_house == Some(winner)
+                        && region
+                            .order
+                            .is_some_and(|order| order.order_type() == OrderType::Support)
+                }
+                // With declarations the declaration itself says whether the
+                // area supported the winner. The Support order may already be
+                // gone (Queen of Thorns) without undoing the support it gave.
+                Some(_) => region.controller == Some(winner) && declared_for_winner(neighbour),
+            };
+            if eligible {
+                regions.push(neighbour);
+            }
+        }
+        if !regions.is_empty() {
+            state.choice_queue.push(ChoiceTask {
+                house: winner,
+                kind: ChoiceKind::Region {
+                    purpose: RegionChoice::RenlyFootman,
+                    regions,
+                    allow_none: true,
+                },
+            });
+            queued = true;
+        }
+    }
+
+    if ability_of(cards, winner, ctx.card_of(winner)) == "cersei_lannister" {
+        let mut regions: Vec<RegionId> = state
+            .region_ids()
+            .filter(|region| state.region(*region).order_house == Some(loser))
+            .collect();
+        sort_region_ids(map, &mut regions);
+        if !regions.is_empty() {
+            state.choice_queue.push(ChoiceTask {
+                house: winner,
+                kind: ChoiceKind::Region {
+                    purpose: RegionChoice::CerseiOrder { opponent: loser },
+                    regions: SmallVec::from_vec(regions),
+                    allow_none: true,
+                },
+            });
+            queued = true;
+        }
+    }
+
     for house in [ctx.attacker, ctx.defender] {
         if ability_of(cards, house, ctx.card_of(house)) == "patchface" {
-            patchface(ctx, state, cards, house);
+            let target = if house == ctx.attacker {
+                ctx.defender
+            } else {
+                ctx.attacker
+            };
+            let hand = state
+                .house(target)
+                .map(|state| state.house_cards_available.clone())
+                .unwrap_or_default();
+            if !hand.is_empty() {
+                state.choice_queue.push(ChoiceTask {
+                    house,
+                    kind: ChoiceKind::Card {
+                        purpose: CardChoice::PatchfaceDiscard { target },
+                        cards: hand,
+                        allow_none: true,
+                    },
+                });
+                queued = true;
+            }
         }
+    }
+
+    if queued {
+        state.choice_resume = Some(ChoiceResume::PostBattle);
     }
 }
 
@@ -885,7 +1076,36 @@ pub fn arianne_holds(ctx: &BattleContext, cards: &HouseCardData, loser: HouseId)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::combat::{prepare_battle, resolve_battle, BattleRequest};
     use crate::map::DataSet;
+    use crate::state::House;
+    use smallvec::smallvec;
+
+    /// A blank board sized like the bundled data, with no houses in play.
+    fn blank_state(data: &DataSet) -> State {
+        let mut state = State::blank();
+        state.region_count = data.map.region_count() as u8;
+        state
+    }
+
+    /// The Python helper: the first land region in board order and its first
+    /// land neighbour.
+    fn first_land_pair(map: &GameMap) -> (RegionId, RegionId) {
+        for index in 0..map.region_count() as u16 {
+            let region = RegionId(index);
+            if !map.region(region).is_land() {
+                continue;
+            }
+            if let Some(neighbour) = map
+                .neighbours_of(region)
+                .iter()
+                .find(|other| map.region(**other).is_land())
+            {
+                return (region, *neighbour);
+            }
+        }
+        panic!("no adjacent land regions");
+    }
 
     #[test]
     fn ability_lookup_uses_the_house_deck() {
@@ -941,5 +1161,154 @@ mod tests {
             Some(margaery)
         );
         assert_eq!(best_card(cards, tyrell, &[]), None);
+    }
+
+    #[test]
+    fn apply_swap_updates_the_context_card_id_for_later_abilities() {
+        let data = DataSet::load_default().unwrap();
+        let cards = &data.house_cards;
+        let (target, _) = first_land_pair(&data.map);
+        let stark = HouseId::from_name("stark").unwrap();
+        let lannister = HouseId::from_name("lannister").unwrap();
+        let robb = cards.card_index(stark, "robb_stark").unwrap();
+        let jaime = cards.card_index(lannister, "jaime_lannister").unwrap();
+        let request = BattleRequest::new(target, stark, lannister, [1, 0, 0, 0], [1, 0, 0, 0]);
+        let mut ctx = prepare_battle(&blank_state(&data), &data.map, cards, &request, None);
+
+        apply_swap(
+            &mut ctx,
+            cards,
+            stark,
+            None,
+            Some(robb),
+            SwapKind::DiscardSwap,
+        );
+        assert_eq!(ctx.card_of(stark), Some(robb));
+        assert_eq!(ctx.attacker_card, Some(robb));
+        assert_eq!(ctx.defender_card, None);
+        let spec = card_data(cards, stark, Some(robb)).unwrap();
+        assert_eq!(ctx.side_of(stark).card_strength, spec.strength as i16);
+        assert_eq!(ctx.side_of(stark).swords, spec.swords);
+        assert_eq!(ctx.side_of(stark).forts, spec.forts);
+
+        // The defender's field is updated independently.
+        apply_swap(
+            &mut ctx,
+            cards,
+            lannister,
+            None,
+            Some(jaime),
+            SwapKind::ReturnSwap,
+        );
+        assert_eq!(ctx.defender_card, Some(jaime));
+        assert_eq!(ctx.attacker_card, Some(robb));
+        assert_eq!(ctx.card_of(lannister), Some(jaime));
+    }
+
+    #[test]
+    fn aeron_swap_is_visible_to_the_abilities_after_it() {
+        let data = DataSet::load_default().unwrap();
+        let cards = &data.house_cards;
+        let (target, _) = first_land_pair(&data.map);
+        let greyjoy = HouseId::from_name("greyjoy").unwrap();
+        let stark = HouseId::from_name("stark").unwrap();
+        let aeron = cards.card_index(greyjoy, "aeron_damphair").unwrap();
+        let euron = cards.card_index(greyjoy, "euron_crows_eye").unwrap();
+
+        let mut state = blank_state(&data);
+        state.houses[greyjoy.index()] = Some(House::new(7, 5, 3));
+        state.house_mut(greyjoy).unwrap().play_card(aeron);
+
+        let mut request = BattleRequest::new(target, greyjoy, stark, [1, 0, 0, 0], [1, 0, 0, 0]);
+        request.attacker_card = Some(aeron);
+        let result = resolve_battle(&state, &data.map, cards, &request);
+
+        // The side now fights with Euron, and every later ability reads him.
+        assert_eq!(result.context.attacker_card, Some(euron));
+        assert_eq!(result.attacker.card_strength, 4);
+        assert_eq!(result.attacker.swords, 1);
+        assert_eq!(
+            ability_of(cards, greyjoy, result.context.card_of(greyjoy)),
+            "none"
+        );
+    }
+
+    #[test]
+    fn renly_only_upgrades_a_footman_that_actually_supported_him() {
+        let data = DataSet::load_default().unwrap();
+        let map = &data.map;
+        let cards = &data.house_cards;
+        let baratheon = HouseId::from_name("baratheon").unwrap();
+        let stark = HouseId::from_name("stark").unwrap();
+        let target = map.lookup("highgarden").unwrap();
+        let support = map.lookup("searoad_marches").unwrap();
+        assert!(map.neighbours_of(target).contains(&support));
+
+        let mut state = blank_state(&data);
+        state.choice_choices = true;
+        state.region_mut(target).controller = Some(stark);
+        {
+            let region = state.region_mut(support);
+            region.controller = Some(baratheon);
+            region.units = [1, 0, 0, 0];
+            region.order = Some(OrderKey::from_name("support_a").unwrap());
+            region.order_house = Some(baratheon);
+        }
+        let renly = cards.card_index(baratheon, "renly_baratheon").unwrap();
+        let request = |side: Option<Side>| {
+            let mut request = BattleRequest::new(target, baratheon, stark, [2, 0, 0, 0], [0; 4]);
+            request.attacker_card = Some(renly);
+            request.support_choices = side.map(|side| smallvec![(support, side)]);
+            request
+        };
+
+        // The Support order refused: Renly did not win with that Footman's
+        // help, so the area must not be offered.
+        let result = resolve_battle(&state, map, cards, &request(Some(Side::Refuse)));
+        assert_eq!(result.winner, baratheon);
+        apply_post_battle(&result.context, &mut state, map, cards, &result);
+        assert!(
+            state.choice_queue.is_empty(),
+            "a refused Support order is not an eligible Renly area"
+        );
+
+        // Declared for the winner: the supporting Footman is eligible.
+        let result = resolve_battle(&state, map, cards, &request(Some(Side::Attacker)));
+        apply_post_battle(&result.context, &mut state, map, cards, &result);
+        match &state
+            .choice_queue
+            .first()
+            .expect("Renly must offer the declared supporter")
+            .kind
+        {
+            ChoiceKind::Region {
+                purpose: RegionChoice::RenlyFootman,
+                regions,
+                allow_none,
+            } => {
+                assert!(*allow_none);
+                assert_eq!(regions.as_slice(), &[support]);
+            }
+            other => panic!("expected a Renly Footman choice, got {other:?}"),
+        }
+
+        // The legacy self-directed helper (no declarations) keeps offering the
+        // winner's own adjacent Support order.
+        state.choice_queue.clear();
+        let result = resolve_battle(&state, map, cards, &request(None));
+        apply_post_battle(&result.context, &mut state, map, cards, &result);
+        match &state
+            .choice_queue
+            .first()
+            .expect("the legacy helper still offers the Support order")
+            .kind
+        {
+            ChoiceKind::Region {
+                purpose: RegionChoice::RenlyFootman,
+                regions,
+                ..
+            } => assert_eq!(regions.as_slice(), &[support]),
+            other => panic!("expected a Renly Footman choice, got {other:?}"),
+        }
     }
 }

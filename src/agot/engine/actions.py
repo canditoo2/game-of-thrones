@@ -72,6 +72,16 @@ class Action:
     #: Whether a March action uses a Power token to keep control of the area
     #: it vacates.
     establish: bool = False
+    #: For a card choice, which house's deck the card belongs to. It differs
+    #: from :attr:`house` when one player chooses a card from the opponent's
+    #: hand (Patchface, Tyrion) and is ``None`` for battle card selection where
+    #: both players pick from their own deck.
+    card_house: str | None = None
+    #: The extension's synthetic generic-choice context tag (0..14), when this
+    #: action answers a pending card/Wildling choice. The Rust action stores it
+    #: in the order slot for the frozen encoder layout; Python keeps it separate
+    #: so ``order`` still reads as a real order token for ``PLACE_ORDER``.
+    choice_tag: int | None = None
     #: The extension's own action record when this object came from
     #: ``Game.legal_actions``. Not part of equality or the hash: it is a
     #: transport handle that lets the encoder skip rebuilding the action.
@@ -85,6 +95,8 @@ class Action:
             "target",
             "order",
             "card",
+            "card_house",
+            "choice_tag",
             "unit",
             "side",
             "amount",

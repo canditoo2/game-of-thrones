@@ -12,9 +12,11 @@
     "cross-checked against chibimagic/got-board-game (app/models/house*.rb).",
     "House Martell is included in the reference sheet and is now marked verified;",
     "the previous file was missing Darkstar and had the Martell strengths wrong.",
-    "Ability ids map to handlers in agot/engine/house_cards.py. Abilities that depend",
-    "on a player sub-choice (which unit, which order, which card) are auto-resolved",
-    "with the deterministic defaults documented in that module."
+    "Ability ids map to handlers in rust/crates/agot-core/src/house_cards.rs.",
+    "Abilities that depend",
+    "on a player sub-choice (which unit, which order, which card) expose that",
+    "sub-choice as a real action in Python training/evaluation and desktop play;",
+    "only the low-level fixture/test battle helpers keep deterministic defaults."
   ],
   "houses": {
     "baratheon": {

@@ -27,7 +27,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use agot_core::enums::{HouseId, N_HOUSES};
+use agot_core::enums::{HouseId, Phase, N_HOUSES};
 use agot_core::game::Game;
 use agot_core::map::DataSet;
 use agot_core::observation::{self, ACTION_DIM, STATE_DIM};
@@ -140,6 +140,11 @@ fn array2(py: Python<'_>, rows: usize, cols: usize, flat: Vec<f32>) -> PyResult<
 /// and it returns `(action_index, target | None)`, where `target` is only
 /// required when `spec["record_opponents"]` is true. Search seats remain fully
 /// native; only the scripted seat's own decisions cross the boundary.
+///
+/// Rule options travel in the spec: `deferred_battles`, `sequential_westeros`,
+/// `doran_choice`, `wildling_tie_choice` and `choice_choices`. Each defaults to
+/// `false`, which is the raw engine behaviour the frozen fixtures pin, so a
+/// caller that omits them keeps the old games.
 #[pyfunction]
 #[pyo3(signature = (spec, evaluator, scripted_decider=None, extra_evaluators=None))]
 pub fn selfplay<'py>(
@@ -178,7 +183,11 @@ pub fn selfplay<'py>(
     let max_rounds: u8 = spec_or(spec, "max_rounds", 10)?;
     let victory_castles: u8 = spec_or(spec, "victory_castles", 7)?;
     let use_westeros_decks: bool = spec_or(spec, "use_westeros_decks", true)?;
+    let deferred_battles: bool = spec_or(spec, "deferred_battles", false)?;
+    let sequential_westeros: bool = spec_or(spec, "sequential_westeros", false)?;
     let doran_choice: bool = spec_or(spec, "doran_choice", false)?;
+    let wildling_tie_choice: bool = spec_or(spec, "wildling_tie_choice", false)?;
+    let choice_choices: bool = spec_or(spec, "choice_choices", false)?;
     let houses: Option<Vec<String>> = spec_value(spec, "houses")?;
     let data_dir: Option<String> = spec_value(spec, "data_dir")?;
     let step_limit: u32 = spec_or(spec, "step_limit", 20_000)?;
@@ -250,15 +259,30 @@ pub fn selfplay<'py>(
             .map(|config| {
                 let mut game = Game::new(Arc::clone(&data), config.clone())
                     .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                // Rule options that change what the engine asks for. They must
+                // match the Python-side config, otherwise a training run records
+                // decisions the reference driver would never have posed.
+                game.deferred_battles = deferred_battles;
+                game.sequential_westeros = sequential_westeros;
                 game.doran_choice = doran_choice;
+                game.wildling_tie_choice = wildling_tie_choice;
+                game.choice_choices = choice_choices;
+                game.state.choice_choices = choice_choices;
                 Ok(game)
             })
             .collect::<PyResult<Vec<Game>>>()?;
 
         // One searcher per game, so PIMC worlds and noise stay independent.
+        // `determinizations` is a spec key, so the searcher has to be told about
+        // it: without this the driver ran one perfect-information tree per
+        // decision while `per_world` divided the simulations as if PIMC were on.
         let mut searchers: Vec<Mcts<UniformEvaluator>> = chunk
             .iter()
-            .map(|index| Mcts::with_seed(UniformEvaluator, game_seed(*index)))
+            .map(|index| {
+                let mut searcher = Mcts::with_seed(UniformEvaluator, game_seed(*index));
+                searcher.determinizations = determinizations;
+                searcher
+            })
             .collect();
         let mut histories: Vec<Vec<Record>> = (0..chunk.len()).map(|_| Vec::new()).collect();
         let mut steps = vec![0u32; chunk.len()];
@@ -277,6 +301,18 @@ pub fn selfplay<'py>(
                             winners[slot] = states[slot].winner();
                         }
                         break;
+                    }
+                    if states[slot].state.phase == Phase::Westeros
+                        && states[slot].state.westeros_waiting
+                    {
+                        // Reveal/resolve the next Westeros card. This is not a
+                        // decision, but the card and its mustering/supply step
+                        // must resolve before the following card is drawn.
+                        states[slot]
+                            .continue_westeros()
+                            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                        acted = true;
+                        continue;
                     }
                     let Some(house) = states[slot].current_player() else {
                         winners[slot] = states[slot].winner();

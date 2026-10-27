@@ -244,6 +244,41 @@ fn a_march_may_leave_units_behind() {
     );
 }
 
+/// Supply excess is a real unit-by-unit decision, not an automatic trim.
+#[test]
+fn supply_excess_is_disbanded_by_player_choice() {
+    let (mut game, data) = clean(0);
+    let house = house("stark");
+    let winterfell = region_of(&data, "winterfell");
+    {
+        let state = game.state.house_mut(house).unwrap();
+        state.supply_level = 0; // at most two units per army
+    }
+    {
+        let region = game.state.region_mut(winterfell);
+        region.controller = Some(house);
+        region.units = [4, 0, 0, 0];
+    }
+    game.enforce_supply(house);
+    game.advance().expect("the supply pause settles");
+    assert_eq!(game.state.supply_queue.as_slice(), &[house]);
+
+    for _ in 0..2 {
+        let action = game
+            .legal_actions()
+            .into_iter()
+            .find(|action| action.kind == ActionKind::Disband)
+            .expect("the player chooses which unit to disband");
+        assert_eq!(action.unit, Some(UnitType::Footman));
+        game.step(action).expect("a disband is legal");
+    }
+    assert!(game.state.supply_queue.is_empty());
+    assert_eq!(
+        game.state.region(winterfell).unit_count(UnitType::Footman),
+        2
+    );
+}
+
 /// Python: `test_a_march_that_exceeds_supply_is_not_offered`.
 #[test]
 fn a_march_that_exceeds_supply_is_not_offered() {
@@ -902,6 +937,36 @@ fn the_messenger_raven_can_swap_an_order() {
 // Valyrian Steel Blade
 // ---------------------------------------------------------------------------
 
+/// FFG ruling: Doran's move is applied to the current Action-Phase turn order
+/// immediately, so the next house is read from the new track exactly as is.
+#[test]
+fn doran_turn_order_is_followed_after_the_influence_move() {
+    let (mut game, _data) = clean(0);
+    let (a, b, c, d) = (
+        house("baratheon"),
+        house("lannister"),
+        house("stark"),
+        house("tyrell"),
+    );
+    game.state.phase = Phase::Action;
+    game.state.action_step = ActionStep::March;
+    game.state.tracks[Track::IronThrone.index()] = SmallVec::from_slice(&[a, b, c, d]);
+    for (index, house_id) in [a, b, c, d].into_iter().enumerate() {
+        let region = RegionId(index as u16);
+        game.state.region_mut(region).controller = Some(house_id);
+        with_march_order(&mut game, region, house_id);
+    }
+    game.state.action_house_last = Some(c);
+
+    // Doran moves C to the bottom: the new order is A, B, D, C.
+    game.state.tracks[Track::IronThrone.index()] = SmallVec::from_slice(&[a, b, d, c]);
+    assert_eq!(
+        game.next_action_house(),
+        Some(a),
+        "after C's turn the engine must wrap to the new first house"
+    );
+}
+
 /// Python: `test_using_the_valyrian_steel_blade_is_the_holders_choice`.
 #[test]
 fn using_the_valyrian_steel_blade_is_the_holders_choice() {
@@ -935,6 +1000,7 @@ fn using_the_valyrian_steel_blade_is_the_holders_choice() {
         defender_card: None,
         attacker_card_chosen: true,
         defender_card_chosen: true,
+        pre_choices_done: false,
         doran_owner: None,
         doran_track: None,
         prepared: None,
@@ -1051,8 +1117,9 @@ fn wildling_lowest_bidder_loses_units() {
     }
 
     begin_wildling_attack(&mut game, &data, "mammoth_riders", 8);
-    // Everyone bids zero. The wildlings win and the tied lowest bidders are
-    // broken by Iron Throne position, so `house` is the lowest bidder.
+    // Everyone bids zero. The wildlings win; this raw engine game keeps the
+    // deterministic tie fallback (the held choice is covered separately), so
+    // `house` is the lowest bidder.
     while game.state.phase == Phase::WildlingAttack {
         let active = game.state.active_house.expect("a bidder");
         game.step(Action::bid(active, 0)).expect("a bid is legal");
@@ -1585,6 +1652,193 @@ fn mace_destroys_an_opposing_footman() {
     assert_eq!(result.context.defender_units[UnitType::Footman.index()], 1);
 }
 
+/// FFG ruling: Siege Engines are removed automatically and are never a
+/// casualty choice.
+#[test]
+fn siege_engines_are_removed_automatically_and_cannot_be_casualties() {
+    let (mut game, data) = clean(0);
+    let (origin, target) = adjacent_land_pair(&data);
+    let (stark, lannister) = (house("stark"), house("lannister"));
+    let greatjon = card(&data, stark, "greatjon_umber");
+
+    game.state.phase = Phase::Combat;
+    game.state.pending_battle = Some(PendingBattle {
+        region: target,
+        attacker: stark,
+        defender: Some(lannister),
+        neutral: false,
+        origin: Some(origin),
+        attacker_order: None,
+        attacker_units: [4, 0, 0, 0],
+        defender_units: [1, 0, 1, 0],
+        attacker_order_strength: 0,
+        defender_order_strength: 0,
+        attacker_card: Some(greatjon),
+        defender_card: None,
+        attacker_card_chosen: true,
+        defender_card_chosen: true,
+        pre_choices_done: false,
+        doran_owner: None,
+        doran_track: None,
+        prepared: None,
+        blade_done: true,
+        attacker_blade: false,
+        defender_blade: false,
+        stage: BattleStage::Blade,
+        support_queue: SmallVec::new(),
+        support_index: 0,
+        support_choices: SmallVec::new(),
+        result: None,
+        casualties_remaining: 0,
+        retreat_options: SmallVec::new(),
+        retreat_house: None,
+        retreat_destination: None,
+        defender_order: None,
+        defender_order_house: None,
+    });
+
+    game.begin_battle_resolution().expect("the battle resolves");
+    {
+        let battle = game.state.pending_battle.as_ref().expect("a battle");
+        assert_eq!(battle.stage, BattleStage::Casualties);
+        assert_eq!(battle.casualties_remaining, 1);
+        assert_eq!(
+            battle
+                .result
+                .as_ref()
+                .expect("result")
+                .context
+                .defender_units[UnitType::Siege.index()],
+            0,
+            "the Siege Engine is removed before the casualty step"
+        );
+    }
+
+    let actions = game.combat_actions(lannister);
+    assert!(
+        actions
+            .iter()
+            .all(|action| action.unit != Some(UnitType::Siege)),
+        "a Siege Engine must never be offered as a casualty: {actions:?}"
+    );
+    assert!(actions
+        .iter()
+        .any(|action| action.unit == Some(UnitType::Footman)));
+    game.apply_choose_casualty(Action::choose_casualty(
+        lannister,
+        target,
+        UnitType::Footman,
+    ))
+    .expect("the footman is a valid casualty");
+    let battle = game.state.pending_battle.as_ref().expect("a battle");
+    assert_eq!(
+        battle
+            .result
+            .as_ref()
+            .expect("result")
+            .context
+            .defender_units[UnitType::Footman.index()],
+        0
+    );
+    assert_eq!(battle.casualties_remaining, 0);
+}
+
+/// FFG ruling: a province containing only routed units still fights; the
+/// routed units contribute 0 Combat Strength.
+#[test]
+fn routed_only_defenders_still_fight() {
+    let (mut game, data) = clean(0);
+    let (origin, target) = adjacent_land_pair(&data);
+    let (stark, lannister) = (house("stark"), house("lannister"));
+    with_march_order(&mut game, origin, stark);
+    {
+        let source = game.state.region_mut(origin);
+        source.controller = Some(stark);
+        source.units = [3, 0, 0, 0];
+    }
+    {
+        let defender = game.state.region_mut(target);
+        defender.controller = Some(lannister);
+        defender.units = [0; 4];
+        defender.routed = [1, 0, 0, 0];
+    }
+    game.state.phase = Phase::Action;
+    game.state.action_step = ActionStep::March;
+    game.state.active_house = Some(stark);
+
+    let actions = game.march_actions(stark, origin);
+    let attack = actions
+        .iter()
+        .find(|action| action.target == Some(target))
+        .copied()
+        .expect("the routed-only province is a legal battle target");
+    game.step(attack).expect("the march is legal");
+
+    let battle = game.state.pending_battle.as_ref().expect("a battle starts");
+    assert_eq!(battle.defender, Some(lannister));
+    assert_eq!(
+        battle.defender_units[UnitType::Footman.index()],
+        0,
+        "routed units contribute no ready-unit strength"
+    );
+    assert_eq!(
+        game.state.region(target).routed[UnitType::Footman.index()],
+        1,
+        "the routed unit is still in the province"
+    );
+}
+
+/// FFG ruling: the Iron Throne holder chooses between tied highest/lowest
+/// Wildling bidders after the card is revealed.
+#[test]
+fn the_iron_throne_holder_breaks_a_tied_wildling_bid() {
+    let (mut game, data) = clean(0);
+    game.wildling_tie_choice = true;
+    let order = game.state.track_order(Track::IronThrone).to_vec();
+    let chooser = order[0];
+    let chosen = order[1];
+    let region = region_of(&data, "kingswood");
+    {
+        let state = game.state.region_mut(region);
+        state.controller = Some(chosen);
+        state.units = [4, 0, 0, 0];
+    }
+
+    begin_wildling_attack(&mut game, &data, "mammoth_riders", 8);
+    while game.state.pending_wildling_tie.is_none() {
+        let active = game.state.active_house.expect("a bidder");
+        game.step(Action::bid(active, 0)).expect("a bid is legal");
+    }
+
+    let tie = game
+        .state
+        .pending_wildling_tie
+        .as_ref()
+        .expect("the tied bid pauses for its holder");
+    assert_eq!(tie.chooser, chooser);
+    assert!(tie.candidates.contains(&chosen));
+    assert!(tie.candidates.len() > 1);
+    let actions = game.legal_actions();
+    assert!(!actions.is_empty());
+    let index = tie
+        .candidates
+        .iter()
+        .position(|house| *house == chosen)
+        .expect("the chosen candidate is in the tie");
+    let choice = actions
+        .iter()
+        .find(|action| action.amount == Some(index as u8))
+        .copied()
+        .expect("the holder can choose any tied bidder");
+    game.step(choice).expect("the tie choice applies");
+
+    assert_eq!(
+        game.state.region(region).unit_count(UnitType::Footman),
+        1,
+        "Mammoth Riders destroys 3 of the chosen lowest bidder's units"
+    );
+}
+
 /// Python: `test_salladhor_reduces_non_baratheon_ships`.
 #[test]
 fn salladhor_reduces_non_baratheon_ships() {
@@ -1612,6 +1866,82 @@ fn salladhor_reduces_non_baratheon_ships() {
     let result = resolve_battle(&game.state, &data.map, &data.house_cards, &request);
     assert_eq!(result.defender.units_strength, 0);
     assert_eq!(result.attacker.units_strength, 1);
+}
+
+/// FFG ruling: if Mace Tyrell removes the defender's last unit but the
+/// defender still wins, the defender's March/Consolidate Order remains.
+#[test]
+fn mace_leaves_the_order_on_an_empty_but_victorious_area() {
+    let (mut game, data) = clean(0);
+    let (origin, target) = adjacent_land_pair(&data);
+    let (tyrell, stark) = (house("tyrell"), house("stark"));
+    game.state.region_mut(origin).controller = Some(tyrell);
+    game.state.region_mut(origin).units = [0; 4];
+    {
+        let region = game.state.region_mut(target);
+        region.controller = Some(stark);
+        region.units = [1, 0, 0, 0];
+        region.order = Some(OrderKey::from_name("defend_2").unwrap());
+        region.order_house = Some(stark);
+    }
+
+    let mut request = battle(
+        target,
+        tyrell,
+        stark,
+        [1, 0, 0, 0],
+        [1, 0, 0, 0],
+        Some(card(&data, tyrell, "mace_tyrell")),
+        Some(card(&data, stark, "eddard_stark")),
+    );
+    request.attacker_origin = Some(origin);
+    request.defender_order_strength = 2;
+    let result = resolve_and_apply(&mut game.state, &data.map, &data.house_cards, &request);
+
+    assert_eq!(result.winner, stark, "Eddard's 4 + Defend 2 beats Mace's 5");
+    assert_eq!(game.state.region(target).unit_count(UnitType::Footman), 0);
+    assert_eq!(
+        game.state.region(target).order,
+        Some(OrderKey::from_name("defend_2").unwrap()),
+        "the victorious defender keeps its Order in the emptied area"
+    );
+    assert_eq!(game.state.region(target).controller, Some(stark));
+}
+
+/// FFG clarification: Salladhor Saan is an override that also removes
+/// Victarion's +1-per-Ship bonus, while leaving Order modifiers alone.
+#[test]
+fn salladhor_overrides_victarions_ship_bonus() {
+    let (mut game, data) = clean(0);
+    let sea = first_sea(&data);
+    let neighbour = sorted_regions(&data, data.map.sea_neighbours_of(sea).to_vec())[0];
+    let (baratheon, greyjoy) = (house("baratheon"), house("greyjoy"));
+    {
+        let region = game.state.region_mut(neighbour);
+        region.controller = Some(baratheon);
+        region.units = [0, 0, 0, 1];
+        region.order = Some(OrderKey::from_name("support_a").unwrap());
+        region.order_house = Some(baratheon);
+    }
+
+    let request = battle(
+        sea,
+        greyjoy,
+        baratheon,
+        [0, 0, 0, 2],
+        [0, 0, 0, 1],
+        Some(card(&data, greyjoy, "victarion_greyjoy")),
+        Some(card(&data, baratheon, "salladhor_saan")),
+    );
+    let result = resolve_battle(&game.state, &data.map, &data.house_cards, &request);
+    assert_eq!(
+        result.attacker.units_strength, 0,
+        "Victarion's +2 must be removed with the printed Ship strength"
+    );
+    assert_eq!(
+        result.defender.units_strength, 1,
+        "Salladhor does not reduce Baratheon Ships"
+    );
 }
 
 /// Python: `test_tywin_gains_two_power_when_he_wins`.
@@ -1695,6 +2025,7 @@ fn arianne_blocks_the_conquest() {
     let (lannister, martell) = (house("lannister"), house("martell"));
     game.state.region_mut(origin).controller = Some(lannister);
     game.state.region_mut(origin).units = [0; 4];
+    game.state.region_mut(target).influence_token = Some(martell);
 
     let mut request = battle(
         target,
@@ -1711,6 +2042,11 @@ fn arianne_blocks_the_conquest() {
     assert_eq!(result.winner, lannister);
     // The attacker may not occupy the area; it returns to where it marched from.
     assert_ne!(game.state.region(target).controller, Some(lannister));
+    assert_eq!(
+        game.state.region(target).influence_token,
+        None,
+        "Arianne does not save the defender's Power token"
+    );
     assert_eq!(game.state.region(origin).unit_count(UnitType::Footman), 3);
 }
 
@@ -1894,6 +2230,7 @@ fn doran_moves_influence_before_blade_and_carries_the_used_face() {
             defender_card: Some(card(&data, martell, "doran_martell")),
             attacker_card_chosen: true,
             defender_card_chosen: true,
+            pre_choices_done: false,
             doran_owner: None,
             doran_track: None,
             prepared: None,
@@ -2055,6 +2392,92 @@ fn tyrion_returns_the_opponents_card_and_forces_a_swap() {
     assert!(state.house_cards_used.contains(&catelyn));
 }
 
+/// FFG ruling: Patchface resolves after the opponent has drawn back the six
+/// cards from a just-completed seven-card House deck.
+#[test]
+fn patchface_sees_the_hand_after_a_seventh_house_card_is_recycled() {
+    let (mut game, data) = clean(0);
+    let (origin, target) = adjacent_land_pair(&data);
+    let (baratheon, stark) = (house("baratheon"), house("stark"));
+    game.state.region_mut(origin).controller = Some(baratheon);
+    game.state.region_mut(origin).units = [0; 4];
+    let eddard = card(&data, stark, "eddard_stark");
+    let mut used =
+        SmallVec::from_iter(data.house_cards.deck(stark).iter().enumerate().filter_map(
+            |(index, spec)| (spec.id != "eddard_stark").then_some(CardId(index as u8)),
+        ));
+    used.push(eddard);
+    {
+        let state = game.state.house_mut(stark).unwrap();
+        state.house_cards_available.clear();
+        state.house_cards_used = used;
+    }
+
+    let mut request = battle(
+        target,
+        baratheon,
+        stark,
+        [6, 0, 0, 0],
+        [1, 0, 0, 0],
+        Some(card(&data, baratheon, "patchface")),
+        Some(eddard),
+    );
+    request.attacker_origin = Some(origin);
+    let result = resolve_battle(&game.state, &data.map, &data.house_cards, &request);
+    game.state.phase = Phase::Combat;
+    game.state.pending_battle = Some(PendingBattle {
+        region: target,
+        attacker: baratheon,
+        defender: Some(stark),
+        neutral: false,
+        origin: Some(origin),
+        attacker_order: None,
+        attacker_units: [6, 0, 0, 0],
+        defender_units: [1, 0, 0, 0],
+        attacker_order_strength: 0,
+        defender_order_strength: 0,
+        attacker_card: Some(card(&data, baratheon, "patchface")),
+        defender_card: Some(eddard),
+        attacker_card_chosen: true,
+        defender_card_chosen: true,
+        pre_choices_done: false,
+        doran_owner: None,
+        doran_track: None,
+        prepared: None,
+        blade_done: true,
+        attacker_blade: false,
+        defender_blade: false,
+        stage: BattleStage::Finalize,
+        support_queue: SmallVec::new(),
+        support_index: 0,
+        support_choices: SmallVec::new(),
+        result: Some(result),
+        casualties_remaining: 0,
+        retreat_options: SmallVec::new(),
+        retreat_house: None,
+        retreat_destination: None,
+        defender_order: None,
+        defender_order_house: None,
+    });
+    game.finalize_battle().expect("the battle finalises");
+
+    let state = game.state.house(stark).unwrap();
+    assert_eq!(
+        state.house_cards_available.len(),
+        5,
+        "the six recycled cards are present before Patchface discards one"
+    );
+    assert!(
+        state.house_cards_used.contains(&eddard),
+        "the just-played seventh card stays in the discard"
+    );
+    assert_eq!(
+        state.house_cards_used.len(),
+        2,
+        "Eddard plus Patchface's discard"
+    );
+}
+
 /// Python: `test_tyrion_leaves_an_empty_handed_opponent_with_no_card`.
 #[test]
 fn tyrion_leaves_an_empty_handed_opponent_with_no_card() {
@@ -2159,4 +2582,492 @@ fn patchface_discards_the_opponents_best_card() {
     let state = game.state.house(stark).unwrap();
     assert!(state.house_cards_used.contains(&robb));
     assert!(!state.house_cards_available.contains(&robb));
+}
+
+/// Interactive Patchface asks which opponent card to discard.
+#[test]
+fn patchface_target_is_the_owners_choice() {
+    let (mut game, data) = clean(0);
+    let (origin, target) = adjacent_land_pair(&data);
+    let (baratheon, stark) = (house("baratheon"), house("stark"));
+    let (greatjon, robb) = (
+        card(&data, stark, "greatjon_umber"),
+        card(&data, stark, "robb_stark"),
+    );
+    {
+        let state = game.state.house_mut(stark).unwrap();
+        state.house_cards_available = SmallVec::from_slice(&[greatjon, robb]);
+    }
+    let mut request = battle(
+        target,
+        baratheon,
+        stark,
+        [6, 0, 0, 0],
+        [1, 0, 0, 0],
+        Some(card(&data, baratheon, "patchface")),
+        Some(card(&data, stark, "eddard_stark")),
+    );
+    request.attacker_origin = Some(origin);
+    let result = resolve_battle(&game.state, &data.map, &data.house_cards, &request);
+    game.choice_choices = true;
+    game.state.choice_choices = true;
+    game.state.phase = Phase::Combat;
+    game.state.pending_battle = Some(PendingBattle {
+        region: target,
+        attacker: baratheon,
+        defender: Some(stark),
+        neutral: false,
+        origin: Some(origin),
+        attacker_order: None,
+        attacker_units: [6, 0, 0, 0],
+        defender_units: [1, 0, 0, 0],
+        attacker_order_strength: 0,
+        defender_order_strength: 0,
+        attacker_card: Some(card(&data, baratheon, "patchface")),
+        defender_card: Some(card(&data, stark, "eddard_stark")),
+        attacker_card_chosen: true,
+        defender_card_chosen: true,
+        pre_choices_done: true,
+        doran_owner: None,
+        doran_track: None,
+        prepared: None,
+        blade_done: true,
+        attacker_blade: false,
+        defender_blade: false,
+        stage: BattleStage::Finalize,
+        support_queue: SmallVec::new(),
+        support_index: 0,
+        support_choices: SmallVec::new(),
+        result: Some(result),
+        casualties_remaining: 0,
+        retreat_options: SmallVec::new(),
+        retreat_house: None,
+        retreat_destination: None,
+        defender_order: None,
+        defender_order_house: None,
+    });
+    game.finalize_battle().expect("the battle finalises");
+    assert!(!game.state.choice_queue.is_empty());
+    game.advance().expect("Patchface's choice appears");
+    let choice = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.card == Some(greatjon))
+        .expect("the owner can choose Greatjon");
+    game.step(choice).expect("Patchface choice applies");
+    let state = game.state.house(stark).unwrap();
+    assert!(state.house_cards_used.contains(&greatjon));
+    assert!(!state.house_cards_available.contains(&greatjon));
+}
+
+/// Interactive Aeron lets its owner choose whether to pay and which card.
+#[test]
+fn aeron_swap_is_the_owners_choice() {
+    let (mut game, data) = clean(0);
+    let (origin, target) = adjacent_land_pair(&data);
+    let (greyjoy, stark) = (house("greyjoy"), house("stark"));
+    let (aeron, balon) = (
+        card(&data, greyjoy, "aeron_damphair"),
+        card(&data, greyjoy, "balon_greyjoy"),
+    );
+    {
+        let state = game.state.house_mut(greyjoy).unwrap();
+        state.power = 5;
+        state.house_cards_available = SmallVec::from_slice(&[balon]);
+        state.house_cards_used = SmallVec::from_slice(&[aeron]);
+    }
+    game.choice_choices = true;
+    game.state.choice_choices = true;
+    game.state.phase = Phase::Combat;
+    game.state.pending_battle = Some(PendingBattle {
+        region: target,
+        attacker: greyjoy,
+        defender: Some(stark),
+        neutral: false,
+        origin: Some(origin),
+        attacker_order: None,
+        attacker_units: [5, 0, 0, 0],
+        defender_units: [1, 0, 0, 0],
+        attacker_order_strength: 0,
+        defender_order_strength: 0,
+        attacker_card: Some(aeron),
+        defender_card: None,
+        attacker_card_chosen: true,
+        defender_card_chosen: true,
+        pre_choices_done: false,
+        doran_owner: None,
+        doran_track: None,
+        prepared: None,
+        blade_done: true,
+        attacker_blade: false,
+        defender_blade: false,
+        stage: BattleStage::Cards,
+        support_queue: SmallVec::new(),
+        support_index: 0,
+        support_choices: SmallVec::new(),
+        result: None,
+        casualties_remaining: 0,
+        retreat_options: SmallVec::new(),
+        retreat_house: None,
+        retreat_destination: None,
+        defender_order: None,
+        defender_order_house: None,
+    });
+    game.advance().expect("Aeron's choice appears");
+    let choice = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.card == Some(balon))
+        .expect("Aeron's owner can pick Balon");
+    game.step(choice).expect("Aeron's choice applies");
+    assert_eq!(game.state.house(greyjoy).unwrap().power, 3);
+    assert!(game
+        .state
+        .house(greyjoy)
+        .unwrap()
+        .house_cards_used
+        .contains(&balon));
+}
+
+/// Interactive Tyrion lets the target choose the replacement card.
+#[test]
+fn tyrion_replacement_is_the_targets_choice() {
+    let (mut game, data) = clean(0);
+    let (origin, target) = adjacent_land_pair(&data);
+    let (lannister, stark) = (house("lannister"), house("stark"));
+    let eddard = card(&data, stark, "eddard_stark");
+    let greatjon = card(&data, stark, "greatjon_umber");
+    let robb = card(&data, stark, "robb_stark");
+    {
+        let state = game.state.house_mut(stark).unwrap();
+        state.house_cards_available = SmallVec::from_slice(&[greatjon, robb]);
+        state.house_cards_used = SmallVec::from_slice(&[eddard]);
+    }
+    game.choice_choices = true;
+    game.state.choice_choices = true;
+    game.state.phase = Phase::Combat;
+    game.state.pending_battle = Some(PendingBattle {
+        region: target,
+        attacker: lannister,
+        defender: Some(stark),
+        neutral: false,
+        origin: Some(origin),
+        attacker_order: None,
+        attacker_units: [4, 0, 0, 0],
+        defender_units: [1, 0, 0, 0],
+        attacker_order_strength: 0,
+        defender_order_strength: 0,
+        attacker_card: Some(card(&data, lannister, "tyrion_lannister")),
+        defender_card: Some(eddard),
+        attacker_card_chosen: true,
+        defender_card_chosen: true,
+        pre_choices_done: false,
+        doran_owner: None,
+        doran_track: None,
+        prepared: None,
+        blade_done: true,
+        attacker_blade: false,
+        defender_blade: false,
+        stage: BattleStage::Cards,
+        support_queue: SmallVec::new(),
+        support_index: 0,
+        support_choices: SmallVec::new(),
+        result: None,
+        casualties_remaining: 0,
+        retreat_options: SmallVec::new(),
+        retreat_house: None,
+        retreat_destination: None,
+        defender_order: None,
+        defender_order_house: None,
+    });
+    game.advance().expect("Tyrion's choice appears");
+    let use_choice = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.house == Some(lannister) && action.amount == Some(1))
+        .expect("the owner can choose to use Tyrion");
+    game.step(use_choice).expect("the use choice applies");
+    let choice = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.house == Some(stark) && action.card == Some(greatjon))
+        .expect("the target can choose Greatjon");
+    game.step(choice).expect("the Tyrion choice applies");
+    let state = game.state.house(stark).unwrap();
+    assert!(state.house_cards_used.contains(&greatjon));
+    assert!(state.house_cards_available.contains(&eddard));
+}
+
+/// Interactive Renly asks which Footman to upgrade.
+#[test]
+fn renly_upgrade_is_the_winners_choice() {
+    let (mut game, data) = clean(0);
+    let (origin, target) = adjacent_land_pair(&data);
+    let (baratheon, stark) = (house("baratheon"), house("stark"));
+    let mut request = battle(
+        target,
+        baratheon,
+        stark,
+        [6, 0, 0, 0],
+        [1, 0, 0, 0],
+        Some(card(&data, baratheon, "renly_baratheon")),
+        None,
+    );
+    request.attacker_origin = Some(origin);
+    let result = resolve_battle(&game.state, &data.map, &data.house_cards, &request);
+    game.choice_choices = true;
+    game.state.choice_choices = true;
+    game.state.phase = Phase::Combat;
+    game.state.pending_battle = Some(PendingBattle {
+        region: target,
+        attacker: baratheon,
+        defender: Some(stark),
+        neutral: false,
+        origin: Some(origin),
+        attacker_order: None,
+        attacker_units: [6, 0, 0, 0],
+        defender_units: [1, 0, 0, 0],
+        attacker_order_strength: 0,
+        defender_order_strength: 0,
+        attacker_card: Some(card(&data, baratheon, "renly_baratheon")),
+        defender_card: None,
+        attacker_card_chosen: true,
+        defender_card_chosen: true,
+        pre_choices_done: true,
+        doran_owner: None,
+        doran_track: None,
+        prepared: None,
+        blade_done: true,
+        attacker_blade: false,
+        defender_blade: false,
+        stage: BattleStage::Finalize,
+        support_queue: SmallVec::new(),
+        support_index: 0,
+        support_choices: SmallVec::new(),
+        result: Some(result),
+        casualties_remaining: 0,
+        retreat_options: SmallVec::new(),
+        retreat_house: None,
+        retreat_destination: None,
+        defender_order: None,
+        defender_order_house: None,
+    });
+    game.finalize_battle().expect("the battle finalises");
+    game.advance().expect("Renly's choice appears");
+    let choice = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.region == Some(target))
+        .expect("the winner chooses the battle area");
+    game.step(choice).expect("the Renly choice applies");
+    assert_eq!(game.state.region(target).unit_count(UnitType::Knight), 1);
+}
+
+/// Interactive Queen of Thorns asks which adjacent Order to remove.
+#[test]
+fn queen_of_thorns_choice_is_a_real_action() {
+    let (mut game, data) = clean(0);
+    let (origin, target) = adjacent_land_pair(&data);
+    let (tyrell, stark) = (house("tyrell"), house("stark"));
+    let order_region = data
+        .map
+        .neighbours_of(target)
+        .iter()
+        .copied()
+        .find(|region| *region != origin)
+        .expect("an adjacent area");
+    {
+        let region = game.state.region_mut(order_region);
+        region.order = Some(OrderKey::from_name("support_a").unwrap());
+        region.order_house = Some(stark);
+    }
+    game.choice_choices = true;
+    game.state.choice_choices = true;
+    game.state.phase = Phase::Combat;
+    game.state.pending_battle = Some(PendingBattle {
+        region: target,
+        attacker: tyrell,
+        defender: Some(stark),
+        neutral: false,
+        origin: Some(origin),
+        attacker_order: None,
+        attacker_units: [3, 0, 0, 0],
+        defender_units: [1, 0, 0, 0],
+        attacker_order_strength: 0,
+        defender_order_strength: 0,
+        attacker_card: Some(card(&data, tyrell, "queen_of_thorns")),
+        defender_card: None,
+        attacker_card_chosen: true,
+        defender_card_chosen: true,
+        pre_choices_done: false,
+        doran_owner: None,
+        doran_track: None,
+        prepared: None,
+        blade_done: true,
+        attacker_blade: false,
+        defender_blade: false,
+        stage: BattleStage::Cards,
+        support_queue: SmallVec::new(),
+        support_index: 0,
+        support_choices: SmallVec::new(),
+        result: None,
+        casualties_remaining: 0,
+        retreat_options: SmallVec::new(),
+        retreat_house: None,
+        retreat_destination: None,
+        defender_order: None,
+        defender_order_house: None,
+    });
+    game.advance().expect("the pre-battle choice appears");
+    let choice = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.region == Some(order_region))
+        .expect("the Queen offers the adjacent Order");
+    game.step(choice).expect("the Queen choice applies");
+    assert_eq!(game.state.region(order_region).order, None);
+}
+
+/// Interactive King Beyond the Wall asks every other house which track to use.
+#[test]
+fn king_beyond_the_wall_track_is_a_real_choice() {
+    let (mut game, data) = clean(0);
+    game.choice_choices = true;
+    game.state.choice_choices = true;
+    game.wildling_tie_choice = false;
+    begin_wildling_attack(&mut game, &data, "king_beyond_the_wall", 8);
+    for _ in 0..6 {
+        if game.state.choice_queue.is_empty() {
+            let active = game.state.active_house.expect("a bidder");
+            game.step(Action::bid(active, 0)).expect("a bid is legal");
+        }
+    }
+    let task = game
+        .state
+        .choice_queue
+        .first()
+        .cloned()
+        .expect("the other houses choose a track");
+    let house = task.house;
+    let choice = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.amount == Some(0))
+        .expect("Fiefdoms is offered");
+    game.step(choice).expect("the track choice applies");
+    assert_eq!(
+        game.state.track_order(Track::Fiefdoms).last(),
+        Some(&house),
+        "the chosen house moves to the bottom of Fiefdoms"
+    );
+}
+
+/// Interactive Preemptive Raid offers the A/B choice.
+#[test]
+fn preemptive_raid_offers_the_players_choice() {
+    let (mut game, data) = clean(0);
+    game.choice_choices = true;
+    game.state.choice_choices = true;
+    game.wildling_tie_choice = false;
+    begin_wildling_attack(&mut game, &data, "preemptive_raid", 8);
+    for _ in 0..6 {
+        if game.state.choice_queue.is_empty() {
+            let active = game.state.active_house.expect("a bidder");
+            game.step(Action::bid(active, 0)).expect("a bid is legal");
+        }
+    }
+    assert!(!game.state.choice_queue.is_empty());
+    let choice = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.amount == Some(1))
+        .expect("option B is offered");
+    let house = choice.house.expect("a chooser");
+    let highest = Track::ALL
+        .into_iter()
+        .min_by_key(|track| game.state.track_position(house, *track))
+        .expect("tracks exist");
+    let before = game.state.track_position(house, highest);
+    game.step(choice)
+        .expect("the Preemptive Raid choice applies");
+    assert_ne!(
+        game.state.track_position(house, highest),
+        before,
+        "option B lowers the highest Influence track"
+    );
+}
+
+/// Interactive Horde rewards ask for the fort and the units there.
+#[test]
+fn horde_fort_and_units_are_real_choices() {
+    let (mut game, data) = clean(0);
+    game.choice_choices = true;
+    game.state.choice_choices = true;
+    game.wildling_tie_choice = false;
+    let chosen = game.state.track_order(Track::IronThrone)[0];
+    let fort = region_of(&data, "winterfell");
+    {
+        let state = game.state.region_mut(fort);
+        state.controller = Some(chosen);
+        state.units = [2, 0, 0, 0];
+    }
+    begin_wildling_attack(&mut game, &data, "the_horde_descends", 8);
+    for _ in 0..6 {
+        if game.state.choice_queue.is_empty() {
+            let active = game.state.active_house.expect("a bidder");
+            game.step(Action::bid(active, 0)).expect("a bid is legal");
+        }
+    }
+    let region_choice = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.region == Some(fort))
+        .expect("the chosen fort is offered");
+    game.step(region_choice).expect("the fort choice applies");
+    assert!(!game.state.choice_queue.is_empty());
+    let unit_choice = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.kind == ActionKind::ChooseCasualty)
+        .expect("the player chooses a unit in the fort");
+    game.step(unit_choice).expect("the unit choice applies");
+    assert!(
+        game.state.region(fort).total(true) < 2,
+        "a unit in the chosen fort was destroyed"
+    );
+}
+
+/// Interactive Mammoth Riders asks which units the lowest bidder destroys.
+#[test]
+fn mammoth_riders_choice_is_a_real_action() {
+    let (mut game, data) = clean(0);
+    game.choice_choices = true;
+    game.state.choice_choices = true;
+    game.wildling_tie_choice = false;
+    let chosen = game.state.track_order(Track::IronThrone)[0];
+    let region = region_of(&data, "winterfell");
+    {
+        let state = game.state.region_mut(region);
+        state.controller = Some(chosen);
+        state.units = [4, 0, 0, 0];
+    }
+
+    begin_wildling_attack(&mut game, &data, "mammoth_riders", 8);
+    for _ in 0..6 {
+        if game.state.choice_queue.is_empty() {
+            let active = game.state.active_house.expect("a bidder");
+            game.step(Action::bid(active, 0)).expect("a bid is legal");
+        }
+    }
+    assert!(!game.state.choice_queue.is_empty());
+    let destroy = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.kind == ActionKind::ChooseCasualty)
+        .expect("the chosen bidder chooses a unit");
+    game.step(destroy).expect("the unit choice applies");
+    assert!(
+        game.state.region(region).total(true) < 4,
+        "the chosen unit was destroyed"
+    );
 }
