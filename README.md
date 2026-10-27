@@ -150,7 +150,7 @@ then launches a resumable training run whose checkpoints are written to Google
 Drive, so a disconnected runtime continues from the last iteration. The wheel
 is cached per source tree (not per commit), so a reconnected session or a
 docs-only change installs it in seconds instead of rebuilding Rust; the first
-session for a new source tree takes a few minutes. A CPU runtime is fine — the search is CPU-bound, so a GPU adds little.
+session for a new source tree takes a few minutes. `run4` replaces the old random/greedy-only best selection with a relative gate against the previous best (3v3, 60 games, per-house), so a later checkpoint cannot silently replace a stronger one. A CPU runtime is fine — the search is CPU-bound, so a GPU adds little.
 Open it in Colab (upload the file, or *File → Open notebook → GitHub*) and run
 the cells top to bottom.
 

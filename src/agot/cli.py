@@ -415,6 +415,8 @@ def _run_training(args: argparse.Namespace) -> int:
     # torch every iteration is pure overhead.
     workers = worker_count(plan, args.games)
     executor = create_executor(workers) if workers > 1 else None
+    gate_failures = 0
+    stop_training = False
     try:
         for iteration in range(run.iteration, args.iterations):
             iteration_started = time.time()
@@ -441,19 +443,94 @@ def _run_training(args: argparse.Namespace) -> int:
                 "policy_loss": last.get("policy_loss"),
                 "value_loss": last.get("value_loss"),
             }
-            if args.eval_games > 0 and (iteration + 1) % max(1, args.eval_every) == 0:
-                result = _evaluate_model(model, config, args)
-                line += (
-                    f" eval={result.win_rate:.3f} "
-                    f"ci=[{result.ci_low:.2f},{result.ci_high:.2f}]"
-                )
-                record["eval"] = result.win_rate
-                record["eval_low"] = result.ci_low
-                record["eval_high"] = result.ci_high
-                if result.win_rate > best_rate:
-                    best_rate = result.win_rate
-                    model.save(str(best_checkpoint))
-                    line += f" -> best {best_checkpoint}"
+            gate_due = (
+                (iteration + 1) % max(1, args.eval_every) == 0
+                and (args.eval_games > 0 or args.gate_games > 0)
+            )
+            if gate_due:
+                result = None
+                if args.eval_games > 0:
+                    result = _evaluate_model(model, config, args)
+                    line += (
+                        f" eval={result.win_rate:.3f} "
+                        f"ci=[{result.ci_low:.2f},{result.ci_high:.2f}]"
+                    )
+                    record["eval"] = result.win_rate
+                    record["eval_low"] = result.ci_low
+                    record["eval_high"] = result.ci_high
+                    # The random/greedy anchor is a sanity check, not the
+                    # relative gate: do not let it replace a gate-approved best.
+                    if args.gate_games <= 0 and result.win_rate > best_rate:
+                        best_rate = result.win_rate
+                        model.save(str(best_checkpoint))
+                        line += f" -> best {best_checkpoint}"
+
+                if args.gate_games > 0:
+                    from agot.training.evaluate import (
+                        evaluate_models_match,
+                        wilson_interval,
+                    )
+
+                    if best_checkpoint.exists():
+                        previous_best = PolicyValueNet.load(str(best_checkpoint))
+                        match = evaluate_models_match(
+                            model,
+                            previous_best,
+                            simulations=args.simulations,
+                            determinizations=args.determinizations,
+                            games=args.gate_games,
+                            config=config,
+                            seed=args.seed + 900_000,
+                            batch_games=args.batch_games,
+                        )
+                        low, high = wilson_interval(match.wins_a, match.games)
+                        house_ok = all(
+                            match.per_house_a[house]
+                            >= match.per_house_b.get(house, 1.0)
+                            + args.gate_house_margin
+                            for house in match.per_house_a
+                        )
+                        absolute_ok = all(
+                            rate >= args.gate_min_house
+                            for rate in match.per_house_a.values()
+                        )
+                        passed = (
+                            match.win_rate_a > args.gate_threshold
+                            and house_ok
+                            and absolute_ok
+                        )
+                        record["gate"] = match.win_rate_a
+                        record["gate_low"] = low
+                        record["gate_high"] = high
+                        record["gate_per_house"] = match.per_house_a
+                        record["gate_passed"] = passed
+                        line += (
+                            f" gate={match.win_rate_a:.3f} "
+                            f"ci=[{low:.2f},{high:.2f}]"
+                        )
+                        if passed:
+                            best_rate = match.win_rate_a
+                            gate_failures = 0
+                            model.save(str(best_checkpoint))
+                            line += " -> gate best"
+                        else:
+                            gate_failures += 1
+                            line += " -> kept previous best"
+                            if (
+                                args.gate_patience > 0
+                                and gate_failures >= args.gate_patience
+                            ):
+                                stop_training = True
+                                line += " -> stopping after gate failures"
+                    else:
+                        # Seed the gate once, then only a candidate that beats
+                        # it (overall and house by house) may replace it.
+                        model.save(str(best_checkpoint))
+                        if result is not None:
+                            best_rate = result.win_rate
+                        record["gate_seeded"] = True
+                        gate_failures = 0
+                        line += " -> seeded gate best"
             elapsed = time.time() - iteration_started
             record["seconds"] = round(elapsed, 3)
             log.append(record)
@@ -462,6 +539,8 @@ def _run_training(args: argparse.Namespace) -> int:
             run.trainer = trainer.state_dict()
             run.save(state_file)
             print(f"{line} ({elapsed:.1f}s) -> {checkpoint}", flush=True)
+            if stop_training:
+                break
     finally:
         if executor is not None:
             executor.shutdown()
@@ -778,6 +857,45 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="simulations for the periodic gauntlet (default: same as --simulations)",
+    )
+    train.add_argument(
+        "--gate-games",
+        type=int,
+        default=0,
+        help=(
+            "head-to-head games against the current agot-best.pt; 0 disables the "
+            "relative gate and keeps the random/greedy best selection"
+        ),
+    )
+    train.add_argument(
+        "--gate-threshold",
+        type=float,
+        default=0.5,
+        help="minimum overall win rate against the previous best to replace it",
+    )
+    train.add_argument(
+        "--gate-min-house",
+        type=float,
+        default=0.0,
+        help=(
+            "optional absolute floor for every per-house win rate (0 = only "
+            "compare each house with the previous best)"
+        ),
+    )
+    train.add_argument(
+        "--gate-house-margin",
+        type=float,
+        default=0.0,
+        help="required advantage over the previous best in every house",
+    )
+    train.add_argument(
+        "--gate-patience",
+        type=int,
+        default=0,
+        help=(
+            "stop after this many consecutive gate failures (0 = keep training; "
+            "the gate-approved best is preserved either way)"
+        ),
     )
     train.set_defaults(func=cmd_train)
 

@@ -30,6 +30,9 @@ class MatchResult:
     win_rate_b: float = 0.0
     average_steps: float = 0.0
     seats_of_a: list[str] = field(default_factory=list)
+    #: Win rate of A when it controls each house (and of B in the mirror).
+    per_house_a: dict[str, float] = field(default_factory=dict)
+    per_house_b: dict[str, float] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -39,6 +42,8 @@ class MatchResult:
             "win_rate_a": self.win_rate_a,
             "win_rate_b": self.win_rate_b,
             "average_steps": self.average_steps,
+            "per_house_a": self.per_house_a,
+            "per_house_b": self.per_house_b,
         }
 
 
@@ -367,10 +372,22 @@ def evaluate_models_match(
 
     result = MatchResult()
     total_steps = 0
+    a_games = {house: 0 for house in houses}
+    a_wins = {house: 0 for house in houses}
+    b_games = {house: 0 for house in houses}
+    b_wins = {house: 0 for house in houses}
     for game_index, winner in enumerate(winners):
-        seats_a, _ = split_houses(houses, bool(game_index % 2))
+        seats_a, seats_b = split_houses(houses, bool(game_index % 2))
         result.games += 1
         total_steps += steps[game_index]
+        for house in seats_a:
+            a_games[house] += 1
+            if winner == house:
+                a_wins[house] += 1
+        for house in seats_b:
+            b_games[house] += 1
+            if winner == house:
+                b_wins[house] += 1
         if winner in seats_a:
             result.wins_a += 1
         else:
@@ -379,6 +396,16 @@ def evaluate_models_match(
     result.win_rate_b = result.wins_b / max(1, result.games)
     result.average_steps = total_steps / max(1, result.games)
     result.seats_of_a = sorted(split_houses(houses, False)[0])
+    result.per_house_a = {
+        house: a_wins[house] / a_games[house]
+        for house in houses
+        if a_games[house]
+    }
+    result.per_house_b = {
+        house: b_wins[house] / b_games[house]
+        for house in houses
+        if b_games[house]
+    }
     return result
 
 

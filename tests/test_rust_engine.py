@@ -480,6 +480,10 @@ def test_two_networks_and_anchors_play_on_the_rust_driver():
     )
     assert match.games == 2
     assert match.wins_a + match.wins_b == 2
+    assert set(match.per_house_a) == set(config.houses)
+    assert set(match.per_house_b) == set(config.houses)
+    assert all(0.0 <= rate <= 1.0 for rate in match.per_house_a.values())
+    assert all(0.0 <= rate <= 1.0 for rate in match.per_house_b.values())
 
     field = evaluate_models_vs_field(
         candidate,

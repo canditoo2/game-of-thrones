@@ -50,6 +50,68 @@ each card's mustering/supply step before the next reveal, and PIMC resamples the
 cards still face down, so re-run the same gauntlet before comparing a new run's
 numbers with this table.
 
+### Why run3's best checkpoint was iteration 10
+
+This is worth recording because it is not only evaluation noise. In `run3` the
+30-game eval at iteration 10 was 66.7% (CI 48.8?80.8%) and at iteration 200 was
+60.0% (CI 42.3?75.4%); those intervals overlap. The larger 200-game validation is
+decisive:
+
+| Checkpoint | vs mixed random+greedy | vs 5?random |
+| --- | --- | --- |
+| `agot-best.pt` (iteration 10) | 52.0% | 73.0% |
+| `agot.pt` (iteration 200) | 44.0% | 49.0% |
+
+A direct 200-game match of the final against the best ended **52?148** (final
+26%, best 74%). So the later model really was weaker against fixed opponents,
+not just unlucky in a 30-game sample.
+
+The logs show the mechanism: policy loss fell from 1.82 at iteration 10 to 0.59
+at 200, and value loss from 0.14 to 0.10. Lower loss only means the network fits
+its **own** search targets better. There is no league or old-opponent sampling,
+no KL anchor to the previous policy, a constant learning rate, and a replay
+buffer that is swept in full and resets whenever a Colab session resumes. The
+policy became sharper and more confident on a narrowing self-play distribution
+while its strength against random/greedy fell. The 30-game eval also selects the
+maximum over many noisy evaluations, which biases `agot-best` upward.
+
+Run4 addresses this with a **relative checkpoint gate** instead of choosing the
+best on the random/greedy anchor:
+
+* every 10 iterations, 60 games of the current net (3 seats) against
+  `agot-best.pt` (3 seats), swapping seats each game;
+* a new checkpoint replaces the best only when the overall win rate clears
+  `--gate-threshold` **and** every house matches or beats the previous best in
+  that seat (`--gate-house-margin` adds a required advantage; `--gate-min-house`
+  is an optional absolute floor);
+* the first gate seeds the best, and three consecutive failures stop the run
+  with the best preserved;
+* the 12-game random/greedy anchor remains in the log for continuity, but it
+  no longer chooses the best checkpoint.
+
+### How the weights change between versions
+
+Every iteration is one AlphaZero-style update, not an interpolation between two
+checkpoints:
+
+1. the current network plays 48 self-play games through MCTS (128 simulations,
+   2 PIMC determinizations by default);
+2. each decision is stored with the search's temperature-scaled visit
+   distribution as the policy target and the final per-house outcome as the
+   value target;
+3. the examples go into the replay buffer (80k on Colab); one full shuffled pass
+   over the buffer is trained with cross-entropy policy loss plus MSE value loss;
+4. the optimizer is AdamW with learning rate `1e-3`, batch 64, gradient clipping
+   `1.0`, one epoch, and decoupled weight decay `1e-4` on weight matrices only;
+5. `agot.pt` is overwritten with the result every iteration; `agot.state.pt`
+   carries the optimizer/iteration for resume; `agot-best.pt` is the
+   gate-approved checkpoint, not a moving average.
+
+There is no EMA/SWA, no learning-rate schedule, no KL penalty and no population
+of past checkpoints in the current trainer. Those are the next levers if the
+gate alone is not enough: a small old-opponent fraction in self-play, an EMA
+evaluation copy, or a KL/behavior-cloning anchor to the previous best.
+
 ## Methods considered
 
 Kept short; each entry is *what it is → pro → con → verdict*.
@@ -176,9 +238,14 @@ checkpoints on Drive, resume across disconnects).
    agot train --iterations 120 --games 48 --workers 12 --batch-games 4 \
      --opponent-rate 0.2 --train-threads 4 \
      --temperature-rounds 3 --final-temperature 0.25 \
-     --eval-games 30 --eval-every 10 \
+     --eval-games 12 --eval-every 10 \
+     --gate-games 60 --gate-threshold 0.5 --gate-house-margin 0.0 --gate-patience 3 \
      --checkpoint checkpoints/run4/agot.pt
    ```
+
+   `agot-best.pt` is replaced only by a checkpoint that wins the 3v3 gate and
+   matches or beats the previous best in every house. It is the checkpoint to
+   use even when the last iteration is weaker.
 
    Watch it in another terminal:
 

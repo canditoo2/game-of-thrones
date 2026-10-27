@@ -107,6 +107,10 @@ eval rather than assuming the last checkpoint is strongest.
   flat at ~2.0 = uniform over candidates). Don't resume them; the loader refuses them.
 - `run3` predates the sequential Westeros resolution and the PIMC deck resampling; treat its
   numbers as a pre-change baseline and start a fresh run rather than resuming it.
+- `run4` uses a relative checkpoint gate: every 10 iterations it plays 60 games of the
+  candidate (3 seats) against `agot-best.pt` (3 seats), swapping seats, and only replaces the
+  best when the overall win rate clears `--gate-threshold` and every house matches the previous
+  best in that seat. Three consecutive failures stop the run with the best preserved.
 - A run writes `agot.pt` (weights), `agot.state.pt` (iteration/best-eval/optimizer for
   `--resume`), `agot.log.jsonl` (one line per iteration) and `agot-best.pt` (best gauntlet eval).
   The replay buffer is deliberately not saved — a resumed run refills it and shows a transient
