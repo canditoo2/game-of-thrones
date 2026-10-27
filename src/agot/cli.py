@@ -325,6 +325,8 @@ def cmd_train(args: argparse.Namespace) -> int:
 
 
 def _run_training(args: argparse.Namespace) -> int:
+    import torch
+
     from agot.nn.model import PolicyValueNet
     from agot.training.checkpoint import RunLog, RunState, log_path, state_path
     from agot.training.parallel import (
@@ -346,19 +348,33 @@ def _run_training(args: argparse.Namespace) -> int:
         # self-play workers are separate processes with one thread each.
         train_threads = max(1, min(8, usable))
     if train_threads > 0:
-        import torch
-
         torch.set_num_threads(train_threads)
 
     config = GameConfig(
         seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True, deferred_battles=True
     )
+    device = args.device
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise SystemExit(
+            "--device cuda was requested but CUDA is not available; "
+            "select a GPU runtime or use --device cpu"
+        )
+    print(f"training device: {device}", flush=True)
     model = (
         PolicyValueNet.load(args.resume)
         if args.resume
         else PolicyValueNet(hidden=args.hidden)
     )
-    trainer = Trainer(model, TrainConfig(learning_rate=args.lr, epochs=args.epochs))
+    trainer = Trainer(
+        model,
+        TrainConfig(
+            learning_rate=args.lr,
+            epochs=args.epochs,
+            device=device,
+        ),
+    )
     buffer = ReplayBuffer(capacity=args.buffer)
 
     checkpoint = Path(args.checkpoint)
@@ -388,6 +404,9 @@ def _run_training(args: argparse.Namespace) -> int:
                 flush=True,
             )
     best_rate = run.best_rate
+    # Self-play and the native evaluators run on CPU; the trainer owns the
+    # GPU copy. Move the shared model back before the first self-play batch.
+    model.to("cpu")
 
     plan = SelfPlayPlan(
         games=args.games,
@@ -421,13 +440,18 @@ def _run_training(args: argparse.Namespace) -> int:
         for iteration in range(run.iteration, args.iterations):
             iteration_started = time.time()
             plan.seed = args.seed + iteration * 100_000
+            model.to("cpu")
             records = parallel_self_play(
                 model, plan, base_config=config, executor=executor
             )
             for record in records:
                 buffer.extend(record.examples)
+            # The search and its leaf batches stay on CPU; only the gradient
+            # pass moves to the GPU.
+            model.to(device)
             history = trainer.train(buffer)
             last = history[-1] if history else {}
+            model.to("cpu")
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             model.save(str(checkpoint))
             line = (
@@ -785,6 +809,14 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--epochs", type=int, default=1)
     train.add_argument("--lr", type=float, default=1e-3)
     train.add_argument("--hidden", type=int, default=256)
+    train.add_argument(
+        "--device",
+        default="auto",
+        help=(
+            "torch device for the training pass: auto (CUDA when available), "
+            "cpu, cuda or cuda:N. Self-play search stays CPU-bound."
+        ),
+    )
     train.add_argument("--buffer", type=int, default=200_000)
     train.add_argument("--resume", default=None)
     train.add_argument("--checkpoint", default="checkpoints/agot.pt")
