@@ -81,9 +81,18 @@ best on the random/greedy anchor:
 * every 10 iterations, 60 games of the current net (3 seats) against
   `agot-best.pt` (3 seats), swapping seats each game;
 * a new checkpoint replaces the best only when the overall win rate clears
-  `--gate-threshold` **and** every house matches or beats the previous best in
-  that seat (`--gate-house-margin` adds a required advantage; `--gate-min-house`
-  is an optional absolute floor);
+  `--gate-threshold` **and** every house is within tolerance of the previous
+  best in that seat (`candidate + --gate-house-tolerance >= previous_best +
+  --gate-house-margin`; `--gate-min-house` is an optional absolute floor);
+* the tolerance (default `0.10`) exists because each house is played about 30
+  times in the default 60-game gate, so its win rate carries a binomial
+  standard error of roughly 9% (`sqrt(0.25 / 30)`); requiring all six houses to
+  be non-negative stacks six independent ~1-sigma constraints and rejects
+  clearly stronger networks. Run4 showed this at iteration 50: a candidate won
+  70% of its 60 gate games overall and was still rejected by the per-house
+  rule. `--gate-house-tolerance 0` restores the old strict comparison, and
+  `--gate-house-margin` remains a *required* advantage applied on top of the
+  tolerance;
 * the first gate seeds the best, and three consecutive failures stop the run
   with the best preserved;
 * the 12-game random/greedy anchor remains in the log for continuity, but it
@@ -244,8 +253,8 @@ checkpoints on Drive, resume across disconnects).
    ```
 
    `agot-best.pt` is replaced only by a checkpoint that wins the 3v3 gate and
-   matches or beats the previous best in every house. It is the checkpoint to
-   use even when the last iteration is weaker.
+   stays within per-house tolerance of the previous best in every house. It is
+   the checkpoint to use even when the last iteration is weaker.
 
    Watch it in another terminal:
 

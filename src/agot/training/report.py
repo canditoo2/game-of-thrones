@@ -69,6 +69,16 @@ svg { display: block; width: 100%; height: auto; }
 .legend span { margin-right: 14px; }
 .legend i { font-style: normal; font-weight: 700; }
 .note { color: #718096; font-size: 12px; }
+table {
+  border-collapse: collapse; width: 100%; font-size: 12px; margin: 0 0 6px;
+}
+th, td {
+  padding: 3px 6px; border-bottom: 1px solid #edf2f7; text-align: right;
+  white-space: nowrap;
+}
+th { color: #718096; font-weight: 600; }
+th:first-child, td:first-child { text-align: left; }
+td.miss { color: #c05621; font-weight: 600; }
 .empty {
   background: #fff; border: 1px dashed #cbd5e0; border-radius: 8px;
   padding: 28px; text-align: center; color: #718096;
@@ -130,6 +140,7 @@ def render(
     seconds = _points(rows, "seconds")
     evals = _points(rows, "eval")
     band = _band(rows)
+    gate_entries = _gate_entries(rows)
 
     if not rows:
         body = (
@@ -187,6 +198,14 @@ def render(
                 "single seat vs five opponents; higher is better",
                 body='<p class="note">No evaluation recorded yet '
                 "(the first one lands on the first eval interval).</p>",
+            )
+        )
+    if gate_entries:
+        sections.append(
+            _section(
+                "Gate vs previous best",
+                "per-house win rate; candidate / previous best",
+                body=_gate_table(gate_entries),
             )
         )
     sections.append(
@@ -271,6 +290,69 @@ def _band(rows: Sequence[Mapping]) -> list[tuple[float, float, float]]:
             continue
         band.append((float(iteration), float(low), float(high)))
     return band
+
+
+def _gate_entries(
+    rows: Sequence[Mapping],
+) -> list[tuple[Mapping, Mapping, Mapping]]:
+    """Gate records as ``(record, candidate, previous best)`` triples.
+
+    Logs written before the gate recorded the best's rates have no
+    ``gate_per_house_best``: those use an empty mapping so the table still
+    renders the candidate alone.
+    """
+    entries: list[tuple[Mapping, Mapping, Mapping]] = []
+    for record in rows:
+        candidate = record.get("gate_per_house")
+        if not isinstance(candidate, Mapping) or not candidate:
+            continue
+        best = record.get("gate_per_house_best")
+        entries.append((record, candidate, best if isinstance(best, Mapping) else {}))
+    return entries
+
+
+def _gate_table(entries: Sequence[tuple[Mapping, Mapping, Mapping]]) -> str:
+    houses = list(entries[0][1])
+    for _, candidate, _ in entries[1:]:
+        houses.extend(house for house in candidate if house not in houses)
+    head = "".join(
+        ["<th>iter</th>", "<th>gate</th>", "<th>ok</th>"]
+        + [f"<th>{html.escape(str(house))}</th>" for house in houses]
+    )
+    body: list[str] = []
+    for record, candidate, best in entries:
+        gate = record.get("gate")
+        gate_text = "-" if gate is None else f"{float(gate):.3f}"
+        passed = record.get("gate_passed")
+        passed_text = "-" if passed is None else ("yes" if passed else "no")
+        iteration = record.get("iteration", "-")
+        cells = [
+            f"<td>{html.escape(str(iteration))}</td>",
+            f"<td>{gate_text}</td>",
+            f"<td>{passed_text}</td>",
+        ]
+        for house in houses:
+            rate = candidate.get(house)
+            other = best.get(house)
+            if rate is None:
+                cells.append("<td>-</td>")
+                continue
+            text = f"{float(rate):.2f}"
+            if other is not None:
+                text += f" / {float(other):.2f}"
+            miss = other is not None and float(rate) < float(other)
+            cells.append(f'<td class="miss">{text}</td>' if miss else f"<td>{text}</td>")
+        body.append("<tr>" + "".join(cells) + "</tr>")
+    return (
+        "<table><thead><tr>"
+        + head
+        + "</tr></thead><tbody>"
+        + "".join(body)
+        + "</tbody></table>"
+        '<p class="note">candidate / previous best win rate for each house. '
+        "A highlighted cell is a house where the candidate trailed the best; "
+        "logs from before the best was recorded show the candidate only.</p>"
+    )
 
 
 def _average_last(points: Sequence[tuple[float, float]], window: int) -> float | None:

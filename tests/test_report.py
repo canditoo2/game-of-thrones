@@ -91,6 +91,42 @@ def test_render_without_evals_still_renders() -> None:
     assert "No evaluation recorded yet" in page
 
 
+def test_render_gate_table_shows_candidate_and_best() -> None:
+    page = render(
+        [
+            {
+                "iteration": 1,
+                "gate": 0.42,
+                "gate_low": 0.30,
+                "gate_high": 0.55,
+                "gate_per_house": {"stark": 0.5, "lannister": 0.25},
+                "gate_per_house_best": {"stark": 0.4, "lannister": 0.5},
+                "gate_passed": False,
+            }
+        ]
+    )
+    assert "Gate vs previous best" in page
+    assert "0.50 / 0.40" in page  # candidate beat the best in this house
+    assert "0.25 / 0.50" in page  # and trailed it in this one
+    assert 'class="miss"' in page
+
+
+def test_render_gate_table_tolerates_old_logs() -> None:
+    page = render(
+        [
+            {
+                "iteration": 1,
+                "gate": 0.30,
+                "gate_per_house": {"stark": 0.5},
+                "gate_passed": False,
+            }
+        ]
+    )
+    assert "Gate vs previous best" in page
+    assert "<td>0.50</td>" in page
+    assert 'class="miss"' not in page
+
+
 def test_render_empty_log() -> None:
     page = render([])
     assert "No log records yet" in page

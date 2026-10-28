@@ -404,6 +404,8 @@ def _run_training(args: argparse.Namespace) -> int:
                 flush=True,
             )
     best_rate = run.best_rate
+    # Carried in the state file so a resumed Colab session keeps its patience.
+    gate_failures = run.gate_failures
     # Self-play and the native evaluators run on CPU; the trainer owns the
     # GPU copy. Move the shared model back before the first self-play batch.
     model.to("cpu")
@@ -430,11 +432,24 @@ def _run_training(args: argparse.Namespace) -> int:
         )
         return 0
 
+    # A run stopped by --gate-patience keeps the count in its state file. Re-running
+    # the same command must not burn another window of self-play to stop again.
+    if args.gate_patience > 0 and gate_failures >= args.gate_patience:
+        print(
+            f"nothing to do: {gate_failures} consecutive gate failures are already "
+            f"recorded for {checkpoint}",
+            flush=True,
+        )
+        print(
+            f"raise --gate-patience or move {best_checkpoint.name} aside to continue",
+            flush=True,
+        )
+        return 0
+
     # One long-lived pool for the whole run: re-spawning workers and re-importing
     # torch every iteration is pure overhead.
     workers = worker_count(plan, args.games)
     executor = create_executor(workers) if workers > 1 else None
-    gate_failures = 0
     stop_training = False
     try:
         for iteration in range(run.iteration, args.iterations):
@@ -509,7 +524,7 @@ def _run_training(args: argparse.Namespace) -> int:
                         )
                         low, high = wilson_interval(match.wins_a, match.games)
                         house_ok = all(
-                            match.per_house_a[house]
+                            match.per_house_a[house] + args.gate_house_tolerance
                             >= match.per_house_b.get(house, 1.0)
                             + args.gate_house_margin
                             for house in match.per_house_a
@@ -523,14 +538,25 @@ def _run_training(args: argparse.Namespace) -> int:
                             and house_ok
                             and absolute_ok
                         )
+                        # The gate compares house by house, so log both sides:
+                        # a failed gate is otherwise impossible to diagnose.
+                        worst_house = min(
+                            (
+                                rate - match.per_house_b.get(house, 0.0)
+                                for house, rate in match.per_house_a.items()
+                            ),
+                            default=0.0,
+                        )
                         record["gate"] = match.win_rate_a
                         record["gate_low"] = low
                         record["gate_high"] = high
                         record["gate_per_house"] = match.per_house_a
+                        record["gate_per_house_best"] = match.per_house_b
                         record["gate_passed"] = passed
                         line += (
                             f" gate={match.win_rate_a:.3f} "
-                            f"ci=[{low:.2f},{high:.2f}]"
+                            f"ci=[{low:.2f},{high:.2f}] "
+                            f"worst_house={worst_house:.2f}"
                         )
                         if passed:
                             best_rate = match.win_rate_a
@@ -560,6 +586,7 @@ def _run_training(args: argparse.Namespace) -> int:
             log.append(record)
             run.iteration = iteration + 1
             run.best_rate = best_rate
+            run.gate_failures = gate_failures
             run.trainer = trainer.state_dict()
             run.save(state_file)
             print(f"{line} ({elapsed:.1f}s) -> {checkpoint}", flush=True)
@@ -918,7 +945,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--gate-house-margin",
         type=float,
         default=0.0,
-        help="required advantage over the previous best in every house",
+        help=(
+            "required advantage over the previous best in every house (added on "
+            "top of --gate-house-tolerance)"
+        ),
+    )
+    train.add_argument(
+        "--gate-house-tolerance",
+        type=float,
+        default=0.10,
+        help=(
+            "allowed shortfall per house against the previous best to absorb "
+            "binomial noise (about 9% standard error per house at 60 gate games); "
+            "0 disables it"
+        ),
     )
     train.add_argument(
         "--gate-patience",

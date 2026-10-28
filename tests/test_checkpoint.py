@@ -63,6 +63,25 @@ def test_run_state_load_missing_returns_none(tmp_path) -> None:
     assert RunState.load(tmp_path / "absent.state.pt") is None
 
 
+def test_run_state_gate_failures_round_trip(tmp_path) -> None:
+    path = tmp_path / "run.state.pt"
+    RunState(iteration=3, gate_failures=2).save(path)
+
+    loaded = RunState.load(path)
+    assert loaded is not None
+    assert loaded.gate_failures == 2
+
+
+def test_run_state_without_gate_failures_loads_zero(tmp_path) -> None:
+    # State files written before the counter existed must still resume.
+    path = tmp_path / "old.state.pt"
+    torch.save({"iteration": 4, "best_rate": 0.1, "trainer": {}}, path)
+
+    loaded = RunState.load(path)
+    assert loaded is not None
+    assert loaded.gate_failures == 0
+
+
 def test_run_log_appends_records(tmp_path) -> None:
     log = RunLog(tmp_path / "run.log.jsonl")
     log.append({"iteration": 1, "eval": 0.1})

@@ -45,6 +45,8 @@ class RunState:
     iteration: int = 0
     best_rate: float = -1.0
     trainer: dict = field(default_factory=dict)
+    #: Consecutive failed gates, so ``--gate-patience`` spans resumed sessions.
+    gate_failures: int = 0
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
@@ -57,6 +59,7 @@ class RunState:
                 "iteration": self.iteration,
                 "best_rate": self.best_rate,
                 "trainer": self.trainer,
+                "gate_failures": self.gate_failures,
             },
             temporary,
         )
@@ -77,6 +80,7 @@ class RunState:
             iteration=int(payload.get("iteration", 0)),
             best_rate=float(payload.get("best_rate", -1.0)),
             trainer=payload.get("trainer", {}) or {},
+            gate_failures=int(payload.get("gate_failures", 0)),
         )
 
 
