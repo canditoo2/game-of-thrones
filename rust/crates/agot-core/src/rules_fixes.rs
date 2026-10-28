@@ -2798,6 +2798,98 @@ fn tyrion_replacement_is_the_targets_choice() {
     assert!(state.house_cards_available.contains(&eddard));
 }
 
+/// Tyrion can take the card Aeron's queued task still lists.
+///
+/// Aeron's task snapshots the hand when the battle's pre-battle choices are
+/// queued. Tyrion resolves first and makes the same defender play a different
+/// card, so that card leaves the hand while Aeron's task still offers it. The
+/// task must re-check the live hand instead of failing on apply.
+#[test]
+fn aeron_does_not_offer_the_card_tyrion_made_it_play() {
+    let (mut game, data) = clean(0);
+    let (origin, target) = adjacent_land_pair(&data);
+    let (lannister, greyjoy) = (house("lannister"), house("greyjoy"));
+    let (aeron, balon, asha) = (
+        card(&data, greyjoy, "aeron_damphair"),
+        card(&data, greyjoy, "balon_greyjoy"),
+        card(&data, greyjoy, "asha_greyjoy"),
+    );
+    {
+        let state = game.state.house_mut(greyjoy).unwrap();
+        state.power = 5;
+        state.house_cards_available = SmallVec::from_slice(&[balon, asha]);
+        state.house_cards_used = SmallVec::from_slice(&[aeron]);
+    }
+    game.choice_choices = true;
+    game.state.choice_choices = true;
+    game.state.phase = Phase::Combat;
+    game.state.pending_battle = Some(PendingBattle {
+        region: target,
+        attacker: lannister,
+        defender: Some(greyjoy),
+        neutral: false,
+        origin: Some(origin),
+        attacker_order: None,
+        attacker_units: [4, 0, 0, 0],
+        defender_units: [1, 0, 0, 0],
+        attacker_order_strength: 0,
+        defender_order_strength: 0,
+        attacker_card: Some(card(&data, lannister, "tyrion_lannister")),
+        defender_card: Some(aeron),
+        attacker_card_chosen: true,
+        defender_card_chosen: true,
+        pre_choices_done: false,
+        doran_owner: None,
+        doran_track: None,
+        prepared: None,
+        blade_done: true,
+        attacker_blade: false,
+        defender_blade: false,
+        stage: BattleStage::Cards,
+        support_queue: SmallVec::new(),
+        support_index: 0,
+        support_choices: SmallVec::new(),
+        result: None,
+        casualties_remaining: 0,
+        retreat_options: SmallVec::new(),
+        retreat_house: None,
+        retreat_destination: None,
+        defender_order: None,
+        defender_order_house: None,
+    });
+    game.advance().expect("Tyrion's choice appears");
+    let use_choice = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.house == Some(lannister) && action.amount == Some(1))
+        .expect("the owner can choose to use Tyrion");
+    game.step(use_choice).expect("the use choice applies");
+    let swap = game
+        .legal_actions()
+        .into_iter()
+        .find(|action| action.house == Some(greyjoy) && action.card == Some(balon))
+        .expect("the target can choose Balon");
+    game.step(swap).expect("the Tyrion choice applies");
+
+    let actions = game.legal_actions();
+    assert!(
+        !actions.iter().any(|action| action.card == Some(balon)),
+        "Aeron must not offer the card Tyrion made it play"
+    );
+    let aeron = actions
+        .into_iter()
+        .find(|action| action.card == Some(asha))
+        .expect("Aeron can still swap for Asha");
+    game.step(aeron).expect("Aeron's choice applies");
+    assert_eq!(game.state.house(greyjoy).unwrap().power, 3);
+    assert!(game
+        .state
+        .house(greyjoy)
+        .unwrap()
+        .house_cards_used
+        .contains(&asha));
+}
+
 /// Interactive Renly asks which Footman to upgrade.
 #[test]
 fn renly_upgrade_is_the_winners_choice() {

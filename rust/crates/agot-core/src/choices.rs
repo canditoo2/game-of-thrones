@@ -117,9 +117,28 @@ impl Game {
                 allow_none,
             } => {
                 let owner = card_choice_owner(purpose);
+                // The task stores the hand as it looked when it was queued, and
+                // a card can leave that hand before the task is reached: when
+                // Tyrion forces the target to play a different card, the
+                // defender's own Aeron task still lists the card Tyrion made it
+                // play. Offer only what the chooser can pay with now, so an
+                // action generated here can never fail in `apply_card_choice`.
+                let live: Vec<CardId> = match purpose {
+                    CardChoice::MammothRetrieve => self
+                        .state
+                        .house(house)
+                        .map(|state| state.house_cards_used.to_vec())
+                        .unwrap_or_default(),
+                    _ => self
+                        .state
+                        .house(owner.unwrap_or(house))
+                        .map(|state| state.house_cards_available.to_vec())
+                        .unwrap_or_default(),
+                };
                 let context = card_choice_context(purpose);
                 let mut actions: Vec<Action> = cards
                     .iter()
+                    .filter(|card| live.contains(card))
                     .map(|card| {
                         let mut action = Action::play_house_card(house, Some(*card));
                         if let Some(owner) = owner {
