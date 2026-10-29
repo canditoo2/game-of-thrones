@@ -848,13 +848,28 @@ impl State {
             .count() as u32
     }
 
+    /// Regions that hold this house's units, in board order.
+    ///
+    /// Supply counts the armies on the board, so an area whose control flag was
+    /// cleared while its ships stayed behind must still count: otherwise a stale
+    /// flag would let a player muster past the limit.
+    pub fn army_regions(&self, house: HouseId) -> SmallVec<[RegionId; 32]> {
+        self.region_ids()
+            .filter(|id| {
+                let region = self.region(*id);
+                region.controller == Some(house)
+                    || (region.controller.is_none() && region.total(true) > 0)
+            })
+            .collect()
+    }
+
     /// Sizes of a house's armies, largest first.
     ///
     /// A lone unit is not an army and is exempt from Supply, while routed units
     /// still count towards Supply.
     pub fn army_sizes(&self, house: HouseId) -> Vec<u32> {
         let mut sizes: Vec<u32> = self
-            .controlled_regions(house)
+            .army_regions(house)
             .iter()
             .map(|id| self.region(*id).total(true))
             .filter(|size| *size >= 2)

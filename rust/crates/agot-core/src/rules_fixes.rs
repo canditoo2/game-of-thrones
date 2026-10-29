@@ -3163,3 +3163,42 @@ fn mammoth_riders_choice_is_a_real_action() {
         "the chosen unit was destroyed"
     );
 }
+
+/// A fleet that outlived its control flag still counts towards Supply.
+///
+/// The control flag can be cleared while the ships stay in the sea; mustering
+/// keyed on the flag alone then offered a seventh ship on top of six, which the
+/// Supply table forbids at every level.
+#[test]
+fn an_uncontrolled_sea_still_counts_for_supply() {
+    let (mut game, data) = clean(0);
+    let greyjoy = house("greyjoy");
+    let home = data.map.lookup("pyke").expect("pyke");
+    let sea = data.map.lookup("ironmans_bay").expect("ironmans_bay");
+    game.state.house_mut(greyjoy).unwrap().supply_level = 2;
+    {
+        let region = game.state.region_mut(home);
+        region.controller = Some(greyjoy);
+        region.mustering_points = 2;
+    }
+    {
+        let region = game.state.region_mut(sea);
+        region.controller = None;
+        region.units[UnitType::Ship.index()] = 6;
+    }
+    assert!(
+        !game.state.within_supply(greyjoy),
+        "six ships in one area exceed every Supply row"
+    );
+    game.state.phase = Phase::Mustering;
+    let offered: Vec<_> = game
+        .mustering_actions(greyjoy)
+        .into_iter()
+        .filter(|action| action.unit == Some(UnitType::Ship))
+        .map(|action| action.target)
+        .collect();
+    assert!(
+        !offered.contains(&Some(sea)),
+        "mustering offered a seventh ship into a six-ship sea"
+    );
+}

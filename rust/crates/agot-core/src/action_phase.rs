@@ -211,7 +211,7 @@ impl Game {
             .unwrap_or_default();
         let controlled = self
             .state
-            .controlled_regions(house)
+            .army_regions(house)
             .into_iter()
             .map(|region| (region, self.state.region(region).total(true)))
             .collect();

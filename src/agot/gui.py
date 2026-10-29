@@ -2277,14 +2277,21 @@ class AgotApp:
                 color = "#5a5f66"
             card_total = len(house.house_cards_available) + len(house.house_cards_used)
             allowance = state.star_allowance(house_id)
-            special_placed = house.stars_placed()
+            # Starred orders are placed face down. The allowance is public (it
+            # follows the King's Court track), but how many a rival has already
+            # placed is not, so only the human's own count is shown.
+            special = (
+                f"{house.stars_placed()}/{allowance}"
+                if is_human
+                else f"-/{allowance}"
+            )
             values = (
                 f"{house.power}",
                 f"{house.supply_level}",
                 f"{state.castle_count(house_id)}",
                 f"{len(house.house_cards_available)}/{card_total}",
                 f"{len(house.orders_available)}",
-                f"{special_placed}/{allowance}",
+                special,
             )
             name_cell = tk.Frame(self._houses_body, bg=background)
             name_cell.grid(row=row, column=0, sticky="ew", padx=(0, 3), pady=1)
@@ -2321,7 +2328,7 @@ class AgotApp:
             self._houses_body,
             text=(
                 "P power  S supply  C castles  Ord order tokens left\n"
-                "Spec special orders placed / allowance"
+                "Spec special orders placed / allowance (your own count only)"
             ),
             bg=BG,
             fg=MUTED,
