@@ -426,6 +426,24 @@ impl PyGame {
             .collect()
     }
 
+    /// The top card of the Wildling deck, for the Messenger Raven's look.
+    fn peek_wildling_card(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let Some(index) = self.game.state.wildling_deck.cards.first().copied() else {
+            return Ok(py.None());
+        };
+        let card = self.game.data.wildlings.card(index);
+        let text_of = |side: &str| card[side]["text"].as_str().unwrap_or_default().to_string();
+        let payload = serde_json::json!({
+            "name": card["name"].as_str().unwrap_or("Wildling card"),
+            "wildling": text_of("wildling_victory"),
+            "nights_watch": text_of("nights_watch_victory"),
+        });
+        let text = serde_json::to_string(&payload)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let json = py.import("json")?;
+        Ok(json.call_method1("loads", (text,))?.unbind())
+    }
+
     /// The Messenger Raven looks at one rival order token.
     fn peek_raven_order(&mut self, house: &str, region: &str) -> PyResult<()> {
         let house_id = agot_core::enums::HouseId::from_name(house)

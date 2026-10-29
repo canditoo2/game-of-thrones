@@ -2833,6 +2833,55 @@ class AgotApp:
                 -1 if event.delta > 0 else 1, "units"
             )
 
+    def _raven_wildling_choice(self, action: Action) -> Action | None:
+        """Show the top Wildling card before the raven returns it.
+
+        The two deck actions used to be a blind choice: the card was never
+        shown, so the raven looked broken. The card is displayed first and the
+        player picks top or bottom with the choice in front of them.
+        """
+        if self.game is None or self.game.state.phase is not Phase.RAVEN:
+            return action
+        if self.game.state.raven_holder() != self.human_house:
+            return action
+        try:
+            card = self.game.peek_wildling_card()
+        except Exception as error:  # keep the window alive
+            self._append_log(f"Messenger Raven: {error}", "error")
+            return action
+        if not card:
+            return action
+        name = str(card.get("name") or "Wildling card")
+        wildling = str(card.get("wildling") or "").strip()
+        watch = str(card.get("nights_watch") or "").strip()
+        detail = ""
+        if wildling:
+            detail += f"\n\nIf the Wildlings win:\n{wildling}"
+        if watch:
+            detail += f"\n\nIf the Night's Watch wins:\n{watch}"
+        keep = messagebox.askyesnocancel(
+            "Messenger Raven - Wildling deck",
+            f"Top card of the Wildling deck:\n\n{name}{detail}\n\n"
+            "Yes: leave it on top of the deck.\n"
+            "No: put it on the bottom of the deck.\n"
+            "Cancel: decide later.",
+            parent=self,
+        )
+        if keep is None:
+            return None
+        wanted = (
+            ActionKind.RAVEN_DECK_TOP if keep else ActionKind.RAVEN_DECK_BOTTOM
+        )
+        for candidate in self.actions:
+            if candidate.kind is wanted:
+                self._append_log(
+                    f"Messenger Raven: {name} goes to the "
+                    f"{'top' if keep else 'bottom'} of the Wildling deck.",
+                    "system",
+                )
+                return candidate
+        return action
+
     def _raven_look(self, region_id: str) -> bool:
         """Look at a rival order token with the Messenger Raven, if allowed.
 
@@ -3661,6 +3710,13 @@ class AgotApp:
         if not 0 <= index < len(self.display_actions):
             return
         action = self.display_actions[index]
+        if action.kind in (
+            ActionKind.RAVEN_DECK_TOP,
+            ActionKind.RAVEN_DECK_BOTTOM,
+        ):
+            action = self._raven_wildling_choice(action)
+            if action is None:
+                return
         if self.order_mode == "march":
             if not self._confirm_march_force(action):
                 return

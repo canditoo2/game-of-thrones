@@ -279,9 +279,9 @@ def format_action(game: Game, action: Action) -> str:
     if kind is ActionKind.RAVEN_SWAP:
         return f"Messenger Raven: change the order in {region} to {order_label(action.order)}"
     if kind is ActionKind.RAVEN_DECK_TOP:
-        return "Messenger Raven: put the drawn Westeros card on top of the deck"
+        return "Messenger Raven: look at the top Wildling card, leave it on top"
     if kind is ActionKind.RAVEN_DECK_BOTTOM:
-        return "Messenger Raven: put the drawn Westeros card on the bottom of the deck"
+        return "Messenger Raven: look at the top Wildling card, put it on the bottom"
     if kind is ActionKind.RETREAT:
         return f"Retreat from {region} to {target}"
     if kind is ActionKind.DISBAND:

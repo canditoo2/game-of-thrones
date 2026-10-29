@@ -489,6 +489,10 @@ class RustGame:
         self._version += 1
         self._snapshot = None
 
+    def peek_wildling_card(self) -> dict | None:
+        """The top Wildling card, for the Messenger Raven's look."""
+        return self._inner.peek_wildling_card()
+
     def peek_raven_order(self, house: str, region: str) -> None:
         """Use the Messenger Raven to look at a rival order token."""
         self._inner.peek_raven_order(house, region)
