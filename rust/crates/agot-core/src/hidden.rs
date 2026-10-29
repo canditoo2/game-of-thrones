@@ -139,8 +139,8 @@ fn take_plausible(pool: &mut Vec<OrderKey>, region: &Region, stars_left: i32) ->
 
 /// Resamples every face-down Order token the observer did not place.
 ///
-/// Once the orders are revealed (any phase after the Messenger Raven step) they
-/// are public and nothing is resampled.
+/// Once the orders are revealed (the step before the Messenger Raven) they are
+/// public and nothing is resampled.
 fn resample_orders(state: &mut State, observer: HouseId, rng: &mut Rng) {
     if state.orders_revealed() {
         return;

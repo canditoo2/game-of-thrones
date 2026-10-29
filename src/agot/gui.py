@@ -1112,8 +1112,6 @@ class AgotApp:
         self.steps = 0
         self.undo_stack: list[tuple[Game, int, int]] = []
         self.selected_region: str | None = None
-        #: (round, region) the Messenger Raven has looked at, if any.
-        self._raven_peek: tuple[int, str] | None = None
         self.actions: list[Action] = []
         self.display_actions: list[Action] = []
         self.order_mode: str | None = None
@@ -2708,11 +2706,7 @@ class AgotApp:
         )
 
         if region.order:
-            visible = (
-                state.orders_revealed
-                or region.order_house == self.human_house
-                or self._raven_peek == (state.round, region_id)
-            )
+            visible = state.orders_revealed or region.order_house == self.human_house
             badge = order_badge(region.order) if visible else "?"
             badge_fill = GOLD_DARK if visible else "#4a3a22"
             badge_text = "#17130a" if visible else GOLD
@@ -2816,7 +2810,6 @@ class AgotApp:
         y = self._board_canvas.canvasy(event.y)
         region_id = self._nearest_board_region(x, y)
         if region_id is not None:
-            self._raven_look(region_id)
             self._select_region(region_id)
 
     def _on_board_motion(self, event) -> None:
@@ -2881,46 +2874,6 @@ class AgotApp:
                 )
                 return candidate
         return action
-
-    def _raven_look(self, region_id: str) -> bool:
-        """Look at a rival order token with the Messenger Raven, if allowed.
-
-        Looking is one of the raven's three options, so it spends the raven for
-        the round; the engine keeps the token face down and this client reveals
-        it on the board for the rest of the round.
-        """
-        if self.game is None or self.game.state.phase is not Phase.RAVEN:
-            return False
-        state = self.game.state
-        if state.raven_holder() != self.human_house or state.raven_used:
-            return False
-        region = state.regions.get(region_id)
-        if region is None or region.order is None:
-            return False
-        if region.order_house == self.human_house:
-            return False
-        static = self.game.map.regions.get(region_id)
-        name = static.name if static is not None else region_id.replace("_", " ").title()
-        if not messagebox.askyesno(
-            "Messenger Raven",
-            f"Look at the order token in {name}?\n\n"
-            "This spends the Messenger Raven for this round.",
-        ):
-            return False
-        try:
-            self.game.peek_raven_order(self.human_house, region_id)
-        except Exception as error:  # keep the window alive on a bad peek
-            self._append_log(f"Messenger Raven: {error}", "error")
-            return False
-        self._raven_peek = (state.round, region_id)
-        self._append_log(
-            f"Messenger Raven: you look at the order in {name} - "
-            f"{order_label(region.order)}.",
-            "system",
-        )
-        self._refresh_all()
-        self._schedule_turn()
-        return True
 
     def _select_region(self, region_id: str) -> None:
         self.selected_region = region_id

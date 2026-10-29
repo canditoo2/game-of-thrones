@@ -765,9 +765,13 @@ impl State {
     // -- queries ---------------------------------------------------------
 
     /// Whether the Order tokens on the board are face up.
+    ///
+    /// Orders are assigned face down and revealed simultaneously *before* the
+    /// Messenger Raven step (rulebook: Assign Orders, Reveal Orders, Use
+    /// Messenger Raven), so only the assignment step hides them.
     #[inline]
     pub fn orders_revealed(&self) -> bool {
-        !matches!(self.phase, Phase::Planning | Phase::Raven)
+        self.phase != Phase::Planning
     }
 
     /// 1-based position of a house on a track (1 is best).

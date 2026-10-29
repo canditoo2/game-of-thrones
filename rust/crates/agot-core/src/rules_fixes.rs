@@ -520,6 +520,22 @@ fn power_gains_stop_at_twenty_tokens() {
     );
 }
 
+/// The Messenger Raven acts after all orders are revealed.
+#[test]
+fn orders_are_public_before_the_raven_step() {
+    let (mut game, _data) = clean(0);
+    game.state.phase = Phase::Planning;
+    assert!(
+        !game.state.orders_revealed(),
+        "orders stay secret while they are assigned"
+    );
+    game.state.phase = Phase::Raven;
+    assert!(
+        game.state.orders_revealed(),
+        "the reveal step comes before the Messenger Raven"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Messenger Raven
 // ---------------------------------------------------------------------------
@@ -961,46 +977,6 @@ fn the_messenger_raven_can_swap_an_order() {
 
     assert_eq!(game.state.region(region_id).order, Some(defend));
     assert!(game.state.raven_used);
-}
-
-/// The Messenger Raven may look at one rival order token.
-///
-/// Looking spends the raven for the round like the swap does, and it leaves the
-/// token face down: only the client that asked learns its face.
-#[test]
-fn the_raven_can_look_at_a_rival_order() {
-    let (mut game, _data) = clean(0);
-    let holder = game.state.raven_holder().expect("a raven holder");
-    let rival = HouseId::ALL
-        .into_iter()
-        .find(|house_id| *house_id != holder)
-        .expect("six houses");
-    game.state.phase = Phase::Raven;
-    game.state.active_house = Some(holder);
-    game.state.raven_used = false;
-
-    let region_id = game.state.region_ids().next().expect("a board");
-    let raid = OrderKey::from_name("raid_a").unwrap();
-    {
-        let region = game.state.region_mut(region_id);
-        region.controller = Some(rival);
-        region.units = [1, 0, 0, 0];
-        region.order = Some(raid);
-        region.order_house = Some(rival);
-    }
-
-    game.peek_raven_order(holder, region_id)
-        .expect("the holder may look at a rival order");
-    assert!(game.state.raven_used, "looking spends the raven");
-    assert_eq!(
-        game.state.region(region_id).order,
-        Some(raid),
-        "the token stays face down on the board"
-    );
-    assert!(
-        game.peek_raven_order(holder, region_id).is_err(),
-        "the raven is spent for the round"
-    );
 }
 
 // ---------------------------------------------------------------------------

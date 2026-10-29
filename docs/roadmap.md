@@ -116,8 +116,9 @@ they should be fixed before expecting a strong agent.
 
 1. **Face-down orders.** *(done)* Order tokens are placed secretly and
    revealed simultaneously. The engine tracks reveal timing via
-   `GameState.orders_revealed`: orders are secret during Planning and the
-   Messenger Raven step and public once the Action Phase begins, and the
+   `GameState.orders_revealed`: orders are secret during the Assign Orders step
+   and public from the Reveal Orders step onward, which is when the Messenger
+   Raven acts (rulebook planning steps; FAQ v1.0 errata), and the
    observation masks the *identity* of another house's hidden order while still
    showing that a face-down token is present. The search no longer sees hidden
    information either: `engine/hidden.py:determinize` resamples face-down orders
