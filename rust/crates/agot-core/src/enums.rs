@@ -204,6 +204,14 @@ pub const GARRISON_STRENGTH: u8 = 2;
 /// Upgrading a Footman to a Knight or Siege Engine costs 1 point instead.
 pub const MUSTER_COST: [u8; 4] = [1, 2, 2, 1];
 
+/// Plastic figures supplied with each house, indexed by [`UnitType::index`].
+///
+/// This is the physical component cap from the rulebook ("Exceeding the
+/// Components Provided", p. 4): a player may never have more figures of a type
+/// on the board than the box contains. It is independent of Supply, which caps
+/// army *sizes*; destroyed units return to the pool and can be mustered again.
+pub const UNIT_LIMITS: [u8; 4] = [10, 5, 2, 6];
+
 /// Units that may occupy land.
 pub const LAND_UNITS: [UnitType; 3] = [UnitType::Footman, UnitType::Knight, UnitType::Siege];
 

@@ -920,6 +920,48 @@ impl Game {
         Ok(())
     }
 
+    /// The Messenger Raven looks at one face-down order token.
+    ///
+    /// Looking is one of the raven's options, so it spends the raven for the
+    /// round. The token stays face down on the board and the client that asked
+    /// reveals it; the action layout is frozen, so this is not an `ActionKind`
+    /// and only the desktop client calls it.
+    pub fn peek_raven_order(
+        &mut self,
+        house: HouseId,
+        region: RegionId,
+    ) -> Result<(), EngineError> {
+        if self.state.phase != Phase::Raven {
+            return Err(EngineError::IllegalAction(
+                "not the Messenger Raven step".into(),
+            ));
+        }
+        if self.state.raven_holder() != Some(house) {
+            return Err(EngineError::IllegalAction(
+                "only the Messenger Raven holder may look at an order".into(),
+            ));
+        }
+        if self.state.raven_used {
+            return Err(EngineError::IllegalAction(
+                "the Messenger Raven has already been used this round".into(),
+            ));
+        }
+        let token = self.state.region(region);
+        match (token.order, token.order_house) {
+            (Some(_), Some(owner)) if owner != house => {}
+            _ => {
+                return Err(EngineError::IllegalAction(
+                    "that area holds no rival order token".into(),
+                ))
+            }
+        }
+        self.state.raven_used = true;
+        let text = self.data.map.id_of(region).to_string();
+        self.state
+            .note(format!("{house} looks at the order token in {text}"));
+        self.advance()
+    }
+
     pub(crate) fn apply_raven_deck(
         &mut self,
         action: Action,

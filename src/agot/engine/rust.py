@@ -489,6 +489,12 @@ class RustGame:
         self._version += 1
         self._snapshot = None
 
+    def peek_raven_order(self, house: str, region: str) -> None:
+        """Use the Messenger Raven to look at a rival order token."""
+        self._inner.peek_raven_order(house, region)
+        self._version += 1
+        self._snapshot = None
+
     def step(self, action: Action) -> None:
         """Apply a Python ``Action`` by matching it against the engine's own.
 

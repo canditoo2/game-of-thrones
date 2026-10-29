@@ -51,6 +51,7 @@ facts extracted from them are stored.
 | 19 | House-card secrecy | The second chooser's PIMC search could see the first chooser's card | The second chooser's determinized worlds resample the first card (the physical reveal is simultaneous); the GUI/snapshot hides both cards until both players commit | Official FFG responses, BGG thread 752416 |
 | 20 | Supply disbanding | Excess units were removed automatically (largest army, cheapest first) | The affected owner chooses one unit at a time from any controlled area, including routed units; the same pause handles Supply cards, Wildling Supply loss and other Supply enforcement paths | Rulebook p. 24 (Supply) |
 | 21 | Wildling card reveal timing | The top Wildling card was drawn and exposed before the Power bids | It stays face down during the bids, is revealed before the Iron Throne tie-break, and resolves only then; PIMC draws its own card from the resampled deck | Rulebook Wildling attack steps; Messenger Raven: "Look in the Wildling Deck" |
+| 22 | Component limits | Mustering ignored the plastic figures supplied, so a house could field a seventh Ship or a third Siege Engine | Mustering and upgrades stop at 10 Footmen, 5 Knights, 6 Ships and 2 Siege Engines per house; destroyed units return to the pool. This is separate from Supply, which caps army sizes | Rulebook p. 4 (Exceeding the Components Provided) |
 
 Correction 2 also carries a (non-mechanical) fact: House Stark is the only house
 to open with **both** a Stronghold (Winterfell) and a Castle (White Harbor).

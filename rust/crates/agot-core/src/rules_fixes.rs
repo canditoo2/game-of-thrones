@@ -933,6 +933,46 @@ fn the_messenger_raven_can_swap_an_order() {
     assert!(game.state.raven_used);
 }
 
+/// The Messenger Raven may look at one rival order token.
+///
+/// Looking spends the raven for the round like the swap does, and it leaves the
+/// token face down: only the client that asked learns its face.
+#[test]
+fn the_raven_can_look_at_a_rival_order() {
+    let (mut game, _data) = clean(0);
+    let holder = game.state.raven_holder().expect("a raven holder");
+    let rival = HouseId::ALL
+        .into_iter()
+        .find(|house_id| *house_id != holder)
+        .expect("six houses");
+    game.state.phase = Phase::Raven;
+    game.state.active_house = Some(holder);
+    game.state.raven_used = false;
+
+    let region_id = game.state.region_ids().next().expect("a board");
+    let raid = OrderKey::from_name("raid_a").unwrap();
+    {
+        let region = game.state.region_mut(region_id);
+        region.controller = Some(rival);
+        region.units = [1, 0, 0, 0];
+        region.order = Some(raid);
+        region.order_house = Some(rival);
+    }
+
+    game.peek_raven_order(holder, region_id)
+        .expect("the holder may look at a rival order");
+    assert!(game.state.raven_used, "looking spends the raven");
+    assert_eq!(
+        game.state.region(region_id).order,
+        Some(raid),
+        "the token stays face down on the board"
+    );
+    assert!(
+        game.peek_raven_order(holder, region_id).is_err(),
+        "the raven is spent for the round"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Valyrian Steel Blade
 // ---------------------------------------------------------------------------
@@ -3200,5 +3240,74 @@ fn an_uncontrolled_sea_still_counts_for_supply() {
     assert!(
         !offered.contains(&Some(sea)),
         "mustering offered a seventh ship into a six-ship sea"
+    );
+}
+
+/// The box holds six ships per house: a seventh is not available.
+///
+/// Supply alone would allow it: with 3 + 3 ships at Supply 6 another ship fits
+/// the army table. The physical component cap is what forbids it.
+#[test]
+fn a_seventh_ship_is_not_in_the_box() {
+    let (mut game, data) = clean(0);
+    let greyjoy = house("greyjoy");
+    let home = data.map.lookup("pyke").expect("pyke");
+    let first = data.map.lookup("ironmans_bay").expect("ironmans_bay");
+    let second = data.map.lookup("sunset_sea").expect("sunset_sea");
+    game.state.house_mut(greyjoy).unwrap().supply_level = 6;
+    {
+        let region = game.state.region_mut(home);
+        region.controller = Some(greyjoy);
+        region.mustering_points = 2;
+    }
+    for sea in [first, second] {
+        let region = game.state.region_mut(sea);
+        region.controller = Some(greyjoy);
+        region.units[UnitType::Ship.index()] = 3;
+    }
+    assert!(game.state.within_supply(greyjoy), "3 + 3 fits Supply 6");
+    game.state.phase = Phase::Mustering;
+    let ships: Vec<_> = game
+        .mustering_actions(greyjoy)
+        .into_iter()
+        .filter(|action| action.unit == Some(UnitType::Ship))
+        .collect();
+    assert!(
+        ships.is_empty(),
+        "six ships are already on the board, so no seventh may be mustered"
+    );
+}
+
+/// Two Siege Engines per house, and no upgrade past the second.
+#[test]
+fn a_third_siege_engine_is_not_in_the_box() {
+    let (mut game, data) = clean(0);
+    let greyjoy = house("greyjoy");
+    let home = data.map.lookup("pyke").expect("pyke");
+    game.state.house_mut(greyjoy).unwrap().supply_level = 6;
+    {
+        let region = game.state.region_mut(home);
+        region.controller = Some(greyjoy);
+        region.mustering_points = 3;
+        region.units[UnitType::Footman.index()] = 1;
+        region.units[UnitType::Siege.index()] = 2;
+    }
+    assert!(
+        game.state.within_supply(greyjoy),
+        "three units fit Supply 6"
+    );
+    game.state.phase = Phase::Mustering;
+    let actions = game.mustering_actions(greyjoy);
+    assert!(
+        !actions
+            .iter()
+            .any(|action| action.unit == Some(UnitType::Siege) && action.kind == ActionKind::Muster),
+        "two Siege Engines are already on the board"
+    );
+    assert!(
+        !actions.iter().any(
+            |action| action.unit == Some(UnitType::Siege) && action.kind == ActionKind::Upgrade
+        ),
+        "a Footman cannot upgrade to a third Siege Engine"
     );
 }

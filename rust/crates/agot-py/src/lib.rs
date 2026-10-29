@@ -426,6 +426,21 @@ impl PyGame {
             .collect()
     }
 
+    /// The Messenger Raven looks at one rival order token.
+    fn peek_raven_order(&mut self, house: &str, region: &str) -> PyResult<()> {
+        let house_id = agot_core::enums::HouseId::from_name(house)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown house {house:?}")))?;
+        let region_id = self
+            .game
+            .data
+            .map
+            .lookup(region)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown region {region:?}")))?;
+        self.game
+            .peek_raven_order(house_id, region_id)
+            .map_err(engine_error)
+    }
+
     fn step(&mut self, action: &PyAction) -> PyResult<()> {
         self.game.step(action.inner).map_err(engine_error)
     }

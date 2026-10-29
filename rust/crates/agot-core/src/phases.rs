@@ -11,7 +11,9 @@
 use smallvec::SmallVec;
 
 use crate::action::Action;
-use crate::enums::{CardId, HouseId, Phase, RegionId, Track, UnitType, MUSTER_COST, SUPPLY_LIMITS};
+use crate::enums::{
+    CardId, HouseId, Phase, RegionId, Track, UnitType, MUSTER_COST, SUPPLY_LIMITS, UNIT_LIMITS,
+};
 use crate::game::{EngineError, Game};
 use crate::state::{
     CardChoice, ChoiceKind, ChoiceResume, ChoiceTask, DeckState, OptionChoice, RegionChoice,
@@ -879,8 +881,12 @@ impl Game {
                 actions.push(Action::muster(house, region, UnitType::Siege, None));
             }
             if points >= 1 && self.state.region(region).unit_count(UnitType::Footman) > 0 {
-                actions.push(Action::upgrade(house, region, UnitType::Knight));
-                actions.push(Action::upgrade(house, region, UnitType::Siege));
+                if self.figure_available(house, UnitType::Knight, 1) {
+                    actions.push(Action::upgrade(house, region, UnitType::Knight));
+                }
+                if self.figure_available(house, UnitType::Siege, 1) {
+                    actions.push(Action::upgrade(house, region, UnitType::Siege));
+                }
             }
             if points >= MUSTER_COST[UnitType::Ship.index()] {
                 for destination in self.ship_muster_targets(house, region) {
@@ -929,15 +935,39 @@ impl Game {
         targets
     }
 
+    /// Figures of `unit` the house already has on the board.
+    pub(crate) fn figures_on_board(&self, house: HouseId, unit: UnitType) -> u32 {
+        self.state
+            .army_regions(house)
+            .into_iter()
+            .map(|region| {
+                let area = self.state.region(region);
+                (area.units[unit.index()] + area.routed[unit.index()]) as u32
+            })
+            .sum()
+    }
+
+    /// Is one more `unit` still in the box?
+    ///
+    /// The rulebook caps each house at the figures supplied (10 Footmen, 5
+    /// Knights, 2 Siege Engines, 6 Ships); Supply caps army sizes instead, so
+    /// both checks are needed.
+    pub(crate) fn figure_available(&self, house: HouseId, unit: UnitType, count: u32) -> bool {
+        self.figures_on_board(house, unit) + count <= UNIT_LIMITS[unit.index()] as u32
+    }
+
     /// Would adding `count` of `unit` in `destination` stay in Supply?
     pub(crate) fn muster_fits(
         &self,
         house: HouseId,
         destination: RegionId,
-        _unit: UnitType,
+        unit: UnitType,
         count: u8,
         profile: Option<&crate::action_phase::SupplyProfile>,
     ) -> bool {
+        if !self.figure_available(house, unit, count as u32) {
+            return false;
+        }
         let owned;
         let profile = match profile {
             Some(profile) => profile,
@@ -978,6 +1008,12 @@ impl Game {
             .unit
             .ok_or_else(|| EngineError::IllegalAction("muster without a unit".into()))?;
         let cost = MUSTER_COST[unit.index()];
+        if !self.figure_available(house, unit, 1) {
+            return Err(EngineError::IllegalAction(format!(
+                "no {} figures left in the box",
+                unit.as_str()
+            )));
+        }
         let destination = if unit == UnitType::Ship {
             action.target.unwrap_or(source)
         } else {
@@ -1009,6 +1045,12 @@ impl Game {
         let unit = action
             .unit
             .ok_or_else(|| EngineError::IllegalAction("upgrade without a unit".into()))?;
+        if !self.figure_available(house, unit, 1) {
+            return Err(EngineError::IllegalAction(format!(
+                "no {} figures left in the box",
+                unit.as_str()
+            )));
+        }
         {
             let state = self.state.region_mut(region);
             state.units[UnitType::Footman.index()] =
