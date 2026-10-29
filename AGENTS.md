@@ -5,11 +5,13 @@ rules engine, search and encoder (`rust/`) behind a thin Python facade, an optio
 scorer network (`nn/`) and the self-play training loop (`training/`). Everything is driven by
 the `agot` CLI.
 
-**Current direction (2026-10-27):** the next Colab run is **`run4`** (checkpoints under
-`/content/drive/MyDrive/agot/run4`); this PC remains the build-and-verify machine and must not
-start heavy runs unless asked. `run3` predates the sequential Westeros/PIMC changes and is a
-pre-change baseline, not a resume target. Watch the policy-loss trend and the best-checkpoint
-eval rather than assuming the last checkpoint is strongest.
+**Current direction (2026-10-29):** the next Colab run is **`run5`** (checkpoints under
+`/content/drive/MyDrive/agot/run5`), on code commit `9443761`: first-play value from the seen
+children, raw-visit policy targets, a value head that also reads the candidate actions, the
+neutral-support legality fix and a 200-game gate. This PC remains the build-and-verify machine
+and must not start heavy runs unless asked. `run4` is the pre-fix baseline (60 iterations, policy
+loss 1.98 -> 0.62, gate never promoted; its final beat the gate best 119-81). Watch the policy
+target's entropy and the gate trend, not the policy loss alone.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
