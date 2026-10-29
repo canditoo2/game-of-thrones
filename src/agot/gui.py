@@ -2850,14 +2850,20 @@ class AgotApp:
             return False
         if region.order_house == self.human_house:
             return False
+        static = self.game.map.regions.get(region_id)
+        name = static.name if static is not None else region_id.replace("_", " ").title()
+        if not messagebox.askyesno(
+            "Messenger Raven",
+            f"Look at the order token in {name}?\n\n"
+            "This spends the Messenger Raven for this round.",
+        ):
+            return False
         try:
             self.game.peek_raven_order(self.human_house, region_id)
         except Exception as error:  # keep the window alive on a bad peek
             self._append_log(f"Messenger Raven: {error}", "error")
             return False
         self._raven_peek = (state.round, region_id)
-        static = self.game.map.regions.get(region_id)
-        name = static.name if static is not None else region_id.replace("_", " ").title()
         self._append_log(
             f"Messenger Raven: you look at the order in {name} - "
             f"{order_label(region.order)}.",
