@@ -3430,6 +3430,45 @@ class AgotApp:
                 1100, lambda: self._continue_westeros(generation)
             )
             return
+        tie = self.game.pending_wildling_tie()
+        if tie is not None and str(tie.get("chooser")) == self.human_house:
+            self.busy = True
+            self._clear_actions()
+            heading = "highest" if tie.get("highest") else "lowest"
+            self._set_turn_text(
+                "WILDLING TIE",
+                f"Tie for the {heading} bid: you hold the Iron Throne.",
+            )
+            index = self._ask_wildling_tie(tie)
+            if index is None:
+                return
+            action = next(
+                (
+                    candidate
+                    for candidate in self.game.legal_actions()
+                    if candidate.amount == index
+                ),
+                None,
+            )
+            if action is None:
+                self._fail("There was no legal Wildling tie choice.")
+                return
+            try:
+                self.game.step(action)
+            except Exception as error:  # keep the window alive
+                self._fail(f"The engine rejected the tie choice: {error}")
+                return
+            self.steps += 1
+            chosen = tie.get("candidates")[index][0]
+            self._append_log(
+                f"Wildling bid tie: {house_name(str(chosen))} counts as the "
+                f"{heading} bidder.",
+                "system",
+            )
+            self._refresh_all()
+            self._schedule_turn()
+            return
+
         player = self.game.current_player()
         if player == self.human_house:
             self.busy = False
@@ -3441,6 +3480,64 @@ class AgotApp:
         self.ai_after = self.root.after(
             25, lambda: self._ai_step(generation)
         )
+
+    def _ask_wildling_tie(self, tie: dict) -> int | None:
+        """Modal: the Iron Throne holder picks between tied bidders."""
+        if self.root is None:
+            return None
+        candidates = list(tie.get("candidates") or [])
+        if not candidates:
+            return None
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Wildling bid tie")
+        dialog.configure(bg=BG)
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        result: list[int] = []
+
+        def pick(index: int) -> None:
+            result.append(index)
+            dialog.destroy()
+
+        heading = "highest" if tie.get("highest") else "lowest"
+        tk.Label(
+            dialog,
+            text=f"Tie for the {heading} bid",
+            bg=BG,
+            fg=GOLD,
+            font=("Georgia", 12, "bold"),
+        ).pack(padx=20, pady=(14, 2))
+        tk.Label(
+            dialog,
+            text=(
+                "You hold the Iron Throne: choose which tied bidder counts as "
+                f"the {heading} bidder."
+            ),
+            bg=BG,
+            fg=TEXT,
+            font=("Segoe UI", 9),
+            wraplength=320,
+            justify="left",
+        ).pack(padx=20, pady=(0, 10))
+        for index, entry in enumerate(candidates):
+            house_id = str(entry[0])
+            amount = entry[1] if len(entry) > 1 else "?"
+            tk.Button(
+                dialog,
+                text=f"{house_name(house_id)} - {amount} Power",
+                command=lambda value=index: pick(value),
+                bg=PANEL_ALT,
+                fg=TEXT,
+                activebackground=BORDER,
+                activeforeground=TEXT,
+                relief="flat",
+                padx=12,
+                pady=5,
+                font=("Segoe UI", 9, "bold"),
+            ).pack(fill="x", padx=20, pady=2)
+        self.root.wait_window(dialog)
+        return result[0] if result else None
 
     def _ask_doran_track(self) -> str | None:
         """Small modal choice for Doran Martell's Influence track."""

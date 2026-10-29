@@ -256,9 +256,9 @@ class StateView:
 
     @property
     def orders_revealed(self) -> bool:
-        # The Rust engine tracks the same rule with the same phases: orders are
-        # secret only while they are being assigned and swapped.
-        return self.phase not in (Phase.PLANNING, Phase.RAVEN)
+        # Orders are assigned face down and revealed before the Messenger Raven
+        # acts, so only the assignment step hides them.
+        return self.phase is not Phase.PLANNING
 
     @property
     def log(self) -> list[str]:
@@ -488,6 +488,10 @@ class RustGame:
         self._inner.choose_doran_track(track)
         self._version += 1
         self._snapshot = None
+
+    def pending_wildling_tie(self) -> dict | None:
+        """The Wildling bid tie the Iron Throne holder must break, if any."""
+        return self._inner.pending_wildling_tie()
 
     def peek_wildling_card(self) -> dict | None:
         """The top Wildling card, for the Messenger Raven's look."""

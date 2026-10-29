@@ -426,6 +426,36 @@ impl PyGame {
             .collect()
     }
 
+    /// The pending Wildling bid tie, as `{chooser, highest, candidates}`.
+    fn pending_wildling_tie(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let Some(tie) = self.game.state.pending_wildling_tie.as_ref() else {
+            return Ok(py.None());
+        };
+        let bids: Vec<(String, u8)> = tie
+            .candidates
+            .iter()
+            .map(|house| {
+                let amount = self
+                    .game
+                    .state
+                    .wildling_attack
+                    .as_ref()
+                    .and_then(|attack| attack.bid_of(*house))
+                    .unwrap_or(0);
+                (house.name().to_string(), amount)
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "chooser": tie.chooser.name(),
+            "highest": tie.highest,
+            "candidates": bids,
+        });
+        let text = serde_json::to_string(&payload)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let json = py.import("json")?;
+        Ok(json.call_method1("loads", (text,))?.unbind())
+    }
+
     /// The top card of the Wildling deck, for the Messenger Raven's look.
     fn peek_wildling_card(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let Some(index) = self.game.state.wildling_deck.cards.first().copied() else {

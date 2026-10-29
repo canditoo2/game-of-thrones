@@ -3066,6 +3066,42 @@ fn queen_of_thorns_choice_is_a_real_action() {
     assert_eq!(game.state.region(order_region).order, None);
 }
 
+/// A tied extreme Wildling bid is the Iron Throne holder's choice.
+#[test]
+fn a_tied_wildling_bid_is_the_throne_holders_choice() {
+    let (mut game, data) = clean(0);
+    game.wildling_tie_choice = true;
+    begin_wildling_attack(&mut game, &data, "crow_killers", 8);
+    for _ in 0..6 {
+        if game.state.pending_wildling_tie.is_some() {
+            break;
+        }
+        let active = game.state.active_house.expect("a bidder");
+        game.step(Action::bid(active, 0)).expect("a bid is legal");
+    }
+    let tie = game
+        .state
+        .pending_wildling_tie
+        .clone()
+        .expect("six zero bids tie for the lowest bidder");
+    assert_eq!(
+        game.state.active_house,
+        Some(tie.chooser),
+        "the Iron Throne holder is asked"
+    );
+    assert!(tie.candidates.len() > 1);
+    let choices = game.legal_actions();
+    assert!(
+        !choices.is_empty()
+            && choices
+                .iter()
+                .all(|action| action.house == Some(tie.chooser)),
+        "the chooser gets one action per tied bidder, got {choices:?}"
+    );
+    game.step(choices[0]).expect("the tie choice applies");
+    assert!(game.state.pending_wildling_tie.is_none());
+}
+
 /// Interactive King Beyond the Wall asks every other house which track to use.
 #[test]
 fn king_beyond_the_wall_track_is_a_real_choice() {
