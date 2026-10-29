@@ -536,6 +536,56 @@ fn orders_are_public_before_the_raven_step() {
     );
 }
 
+/// The Iron Throne holder orders tied Clash of Kings bids.
+#[test]
+fn a_tied_clash_bid_is_ordered_by_the_throne() {
+    let (mut game, _data) = clean(0);
+    game.bid_tie_choice = true;
+    let (first, second) = (house("baratheon"), house("stark"));
+    game.state.phase = Phase::Bidding;
+    game.state.bid_tracks = smallvec::smallvec![Track::IronThrone];
+    let others: Vec<HouseId> = HouseId::ALL
+        .into_iter()
+        .filter(|house_id| *house_id != first && *house_id != second)
+        .collect();
+    let mut bids = smallvec::smallvec![(first, 0), (second, 0)];
+    for (index, house_id) in others.into_iter().enumerate() {
+        bids.push((house_id, (index + 1) as u8));
+    }
+    game.state.pending_bids = bids;
+    game.resolve_bids();
+    let tie = game
+        .state
+        .pending_bid_tie
+        .clone()
+        .expect("two equal bids need the holder");
+    game.advance().expect("the holder is asked");
+    assert_eq!(game.current_player(), Some(tie.chooser));
+    let actions = game.legal_actions();
+    assert_eq!(
+        actions.len(),
+        2,
+        "one action per tied bidder, got {actions:?}"
+    );
+    game.step(actions[1])
+        .expect("the holder picks the second bidder");
+    assert!(game.state.pending_bid_tie.is_none());
+    let order = game.state.track_order(Track::IronThrone);
+    let chosen = order
+        .iter()
+        .position(|house| *house == second)
+        .expect("on the track");
+    let other = order
+        .iter()
+        .position(|house| *house == first)
+        .expect("on the track");
+    assert_eq!(
+        chosen + 1,
+        other,
+        "the chosen bidder is placed above the other tied house"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Messenger Raven
 // ---------------------------------------------------------------------------

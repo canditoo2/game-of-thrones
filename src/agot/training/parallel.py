@@ -238,6 +238,7 @@ def configs_for(plan: SelfPlayPlan, base: GameConfig) -> list[GameConfig]:
             sequential_westeros=base.sequential_westeros,
             doran_choice=base.doran_choice,
             wildling_tie_choice=base.wildling_tie_choice,
+            bid_tie_choice=base.bid_tie_choice,
             choice_choices=base.choice_choices,
         )
         for index in range(plan.games)

@@ -617,6 +617,9 @@ impl Game {
     // ==================================================================
 
     pub(crate) fn next_bidder(&self) -> Option<HouseId> {
+        if let Some(tie) = self.state.pending_bid_tie.as_ref() {
+            return Some(tie.chooser);
+        }
         for house in self.state.track_order(Track::IronThrone) {
             if self
                 .state
@@ -639,6 +642,15 @@ impl Game {
     }
 
     pub(crate) fn bidding_actions(&self, house: HouseId) -> Vec<Action> {
+        if let Some(tie) = self.state.pending_bid_tie.as_ref() {
+            if house != tie.chooser {
+                return Vec::new();
+            }
+            let width = tie.groups.first().map(|group| group.len()).unwrap_or(0);
+            return (0..width)
+                .map(|index| Action::bid_tie_choice(house, index as u8))
+                .collect();
+        }
         let power = self
             .state
             .house(house)
@@ -679,24 +691,60 @@ impl Game {
     ///
     /// Bidding is sequential (Iron Throne, then Fiefdoms, then King's Court);
     /// all power bid is discarded, so later tracks are bid with what remains.
-    /// Ties are broken by the current Iron Throne position.
+    /// Ties are decided by the Iron Throne holder when `bid_tie_choice` is on,
+    /// one position at a time; the holder is read when the track resolves, so a
+    /// new Iron Throne holder also decides the later tracks' ties.
     pub(crate) fn resolve_bids(&mut self) {
         if self.state.bid_tracks.is_empty() {
             self.resume_after_extra_step();
             return;
         }
-        let track = self.state.bid_tracks.remove(0);
+        if self.state.pending_bid_tie.is_some() {
+            // The holder is still ordering a tied group.
+            return;
+        }
+        let track = self.state.bid_tracks[0];
         let bids: SmallVec<[(HouseId, u8); 6]> = self.state.pending_bids.clone();
         for (house, amount) in &bids {
             if let Some(state) = self.state.house_mut(*house) {
                 state.power = state.power.saturating_sub(*amount);
             }
         }
-        let previous_blade = if track == Track::Fiefdoms {
-            self.state.blade_holder()
-        } else {
-            None
-        };
+        let ordered = self.bid_order(track, &bids);
+        if self.bid_tie_choice {
+            let groups = self.bid_tie_groups(&ordered, &bids);
+            if groups.iter().any(|group| group.len() > 1) {
+                if let Some(chooser) = self.state.track_order(Track::IronThrone).first().copied() {
+                    // Positions nobody contests are already decided; the holder
+                    // is only asked about runs of equal bids.
+                    let mut groups = groups;
+                    let mut settled: SmallVec<[HouseId; 6]> = SmallVec::new();
+                    while groups
+                        .first()
+                        .map(|group| group.len() == 1)
+                        .unwrap_or(false)
+                    {
+                        settled.push(groups.remove(0)[0]);
+                    }
+                    self.state.pending_bid_tie = Some(crate::state::BidTie {
+                        track,
+                        chooser,
+                        groups,
+                        settled,
+                    });
+                    self.state.pending_bids.clear();
+                    return;
+                }
+            }
+        }
+        self.state.pending_bids.clear();
+        self.state.bid_tracks.remove(0);
+        self.finish_bid_track(track, ordered);
+    }
+
+    /// The deterministic track order: most power, then Iron Throne, then the
+    /// house's previous position on this track; eliminated houses go last.
+    fn bid_order(&self, track: Track, bids: &[(HouseId, u8)]) -> SmallVec<[HouseId; 6]> {
         let throne = self.state.tracks[Track::IronThrone.index()].clone();
         let current = self.state.tracks[track.index()].clone();
         let mut ordered: SmallVec<[HouseId; 6]> = current
@@ -728,8 +776,6 @@ impl Game {
                 .map(|(_, amount)| *amount)
                 .unwrap_or(0)
         };
-        // Stable sort on the Python key: most power first, then Iron Throne, then
-        // the house's previous position on this track.
         ordered.sort_by_key(|house| {
             (
                 std::cmp::Reverse(bid_of(*house)),
@@ -747,16 +793,86 @@ impl Game {
                 ordered.push(house);
             }
         }
+        ordered
+    }
+
+    /// Maximal runs of equal bids in the ordered list; only runs longer than
+    /// one need the Iron Throne holder.
+    fn bid_tie_groups(
+        &self,
+        ordered: &[HouseId],
+        bids: &[(HouseId, u8)],
+    ) -> SmallVec<[SmallVec<[HouseId; 6]>; 6]> {
+        let bid_of = |house: HouseId| {
+            bids.iter()
+                .find(|(bidder, _)| *bidder == house)
+                .map(|(_, amount)| *amount)
+                .unwrap_or(0)
+        };
+        let mut groups: SmallVec<[SmallVec<[HouseId; 6]>; 6]> = SmallVec::new();
+        for house in ordered {
+            let amount = bid_of(*house);
+            match groups.last_mut() {
+                Some(group) if bid_of(group[0]) == amount => group.push(*house),
+                _ => groups.push(SmallVec::from_slice(&[*house])),
+            }
+        }
+        groups
+    }
+
+    /// Apply a finished track order and move the phase on.
+    fn finish_bid_track(&mut self, track: Track, ordered: SmallVec<[HouseId; 6]>) {
+        let previous_blade = if track == Track::Fiefdoms {
+            self.state.blade_holder()
+        } else {
+            None
+        };
         self.state.tracks[track.index()] = ordered;
         if track == Track::Fiefdoms {
             self.state.transfer_blade_used(previous_blade);
         }
         self.state
-            .note(format!("bids resolved for {} ({bids:?})", track.as_str()));
-        self.state.pending_bids.clear();
+            .note(format!("bids resolved for {}", track.as_str()));
         if self.state.bid_tracks.is_empty() {
             self.resume_after_extra_step();
         }
+    }
+
+    /// The Iron Throne holder places the next tied bidder.
+    pub(crate) fn apply_bid_tie(&mut self, action: Action) -> Result<(), EngineError> {
+        let Some(mut tie) = self.state.pending_bid_tie.take() else {
+            return Ok(());
+        };
+        let index = action.amount.unwrap_or(0) as usize;
+        let Some(group) = tie.groups.first_mut() else {
+            return Ok(());
+        };
+        if index >= group.len() {
+            return Err(EngineError::IllegalAction(
+                "the chosen bidder is not part of the tie".into(),
+            ));
+        }
+        let house = group.remove(index);
+        tie.settled.push(house);
+        if group.is_empty() {
+            tie.groups.remove(0);
+        }
+        while tie
+            .groups
+            .first()
+            .map(|group| group.len() == 1)
+            .unwrap_or(false)
+        {
+            tie.settled.push(tie.groups.remove(0)[0]);
+        }
+        if tie.groups.is_empty() {
+            let track = tie.track;
+            self.state.bid_tracks.remove(0);
+            self.finish_bid_track(track, tie.settled);
+        } else {
+            self.state.pending_bid_tie = Some(tie);
+        }
+        Ok(())
     }
 
     /// Return to an interrupted Westeros phase, or move on if it is done.

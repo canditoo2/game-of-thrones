@@ -64,6 +64,8 @@ class GameConfig:
     #: Python training/evaluation include the decision; the raw Rust fixture
     #: default stays deterministic.
     wildling_tie_choice: bool = True
+    #: The Iron Throne holder orders tied Clash of Kings bids.
+    bid_tie_choice: bool = True
     #: Expose House-card and Wildling sub-choices as real decisions. Python
     #: training/evaluation enable them; the low-level Rust helpers keep their
     #: deterministic defaults.

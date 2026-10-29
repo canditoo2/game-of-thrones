@@ -351,6 +351,21 @@ pub struct WildlingTie {
     pub chooser: HouseId,
 }
 
+/// The Iron Throne holder's ordering of tied Clash of Kings bids.
+///
+/// Bids are public once the track is resolved, so the holder decides the order
+/// of the tied bidders (one choice per position). Groups are ordered by bid,
+/// highest first, and `settled` accumulates the final track order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BidTie {
+    pub track: Track,
+    pub chooser: HouseId,
+    /// Tied groups still to order, highest bid first.
+    pub groups: SmallVec<[SmallVec<[HouseId; 6]>; 6]>,
+    /// Houses already placed, in final order.
+    pub settled: SmallVec<[HouseId; 6]>,
+}
+
 /// What to resume once the generic choice queue is empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChoiceResume {
@@ -625,6 +640,8 @@ pub struct State {
     /// Set when the current attack's extreme bid is tied and the Iron Throne
     /// holder must choose the affected bidder.
     pub pending_wildling_tie: Option<WildlingTie>,
+    /// The Iron Throne holder's pending ordering of tied Clash bids.
+    pub pending_bid_tie: Option<BidTie>,
     pub westeros_decks: [DeckState; 3],
     /// Westeros card effects still to resolve this round.
     pub pending_westeros: Option<SmallVec<[u16; 3]>>,
@@ -696,6 +713,7 @@ impl State {
             wildling_threat: 0,
             wildling_attack: None,
             pending_wildling_tie: None,
+            pending_bid_tie: None,
             westeros_decks: std::array::from_fn(|_| DeckState::default()),
             pending_westeros: None,
             westeros_next_deck: 0,

@@ -3433,6 +3433,48 @@ class AgotApp:
                 1100, lambda: self._continue_westeros(generation)
             )
             return
+        bid_tie = self.game.pending_bid_tie()
+        if bid_tie is not None and str(bid_tie.get("chooser")) == self.human_house:
+            self.busy = True
+            self._clear_actions()
+            track_id = str(bid_tie.get("track") or "")
+            try:
+                track_name = TRACK_LABELS[Track(track_id)]
+            except ValueError:
+                track_name = track_id.replace("_", " ").title()
+            self._set_turn_text(
+                "CLASH OF KINGS",
+                f"Tie on {track_name}: you hold the Iron Throne.",
+            )
+            index = self._ask_bid_tie(bid_tie, track_name)
+            if index is None:
+                return
+            action = next(
+                (
+                    candidate
+                    for candidate in self.game.legal_actions()
+                    if candidate.amount == index
+                ),
+                None,
+            )
+            if action is None:
+                self._fail("There was no legal tie order.")
+                return
+            try:
+                self.game.step(action)
+            except Exception as error:  # keep the window alive
+                self._fail(f"The engine rejected the tie order: {error}")
+                return
+            self.steps += 1
+            chosen = bid_tie.get("candidates")[index]
+            self._append_log(
+                f"Clash of Kings: {house_name(str(chosen))} placed next on {track_name}.",
+                "system",
+            )
+            self._refresh_all()
+            self._schedule_turn()
+            return
+
         tie = self.game.pending_wildling_tie()
         if tie is not None and str(tie.get("chooser")) == self.human_house:
             self.busy = True
@@ -3483,6 +3525,61 @@ class AgotApp:
         self.ai_after = self.root.after(
             25, lambda: self._ai_step(generation)
         )
+
+    def _ask_bid_tie(self, tie: dict, track_name: str) -> int | None:
+        """Modal: the Iron Throne holder orders the tied Clash bidders."""
+        if self.root is None:
+            return None
+        candidates = list(tie.get("candidates") or [])
+        if not candidates:
+            return None
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Clash of Kings")
+        dialog.configure(bg=BG)
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        result: list[int] = []
+
+        def pick(index: int) -> None:
+            result.append(index)
+            dialog.destroy()
+
+        tk.Label(
+            dialog,
+            text=f"Clash of Kings - {track_name}",
+            bg=BG,
+            fg=GOLD,
+            font=("Georgia", 12, "bold"),
+        ).pack(padx=20, pady=(14, 2))
+        tk.Label(
+            dialog,
+            text=(
+                "Tied bids: you hold the Iron Throne, so you choose who goes "
+                "next on this track."
+            ),
+            bg=BG,
+            fg=TEXT,
+            font=("Segoe UI", 9),
+            wraplength=320,
+            justify="left",
+        ).pack(padx=20, pady=(0, 10))
+        for index, house_id in enumerate(candidates):
+            tk.Button(
+                dialog,
+                text=house_name(str(house_id)),
+                command=lambda value=index: pick(value),
+                bg=PANEL_ALT,
+                fg=TEXT,
+                activebackground=BORDER,
+                activeforeground=TEXT,
+                relief="flat",
+                padx=12,
+                pady=5,
+                font=("Segoe UI", 9, "bold"),
+            ).pack(fill="x", padx=20, pady=2)
+        self.root.wait_window(dialog)
+        return result[0] if result else None
 
     def _ask_wildling_tie(self, tie: dict) -> int | None:
         """Modal: the Iron Throne holder picks between tied bidders."""

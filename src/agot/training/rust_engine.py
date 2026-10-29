@@ -95,6 +95,7 @@ def spec_for(plan: SelfPlayPlan, base_config: GameConfig | None = None) -> dict:
         "sequential_westeros": base.sequential_westeros,
         "doran_choice": base.doran_choice,
         "wildling_tie_choice": base.wildling_tie_choice,
+        "bid_tie_choice": base.bid_tie_choice,
         "choice_choices": base.choice_choices,
         "houses": list(base.houses),
     }
@@ -217,6 +218,7 @@ def try_batched_self_play(
         first.sequential_westeros,
         first.doran_choice,
         first.wildling_tie_choice,
+        first.bid_tie_choice,
         first.choice_choices,
         tuple(first.houses),
     )
@@ -229,6 +231,7 @@ def try_batched_self_play(
             config.sequential_westeros,
             config.doran_choice,
             config.wildling_tie_choice,
+            config.bid_tie_choice,
             config.choice_choices,
             tuple(config.houses),
         ) != shared:
@@ -259,6 +262,7 @@ def try_batched_self_play(
         "sequential_westeros": first.sequential_westeros,
         "doran_choice": first.doran_choice,
         "wildling_tie_choice": first.wildling_tie_choice,
+        "bid_tie_choice": first.bid_tie_choice,
         "choice_choices": first.choice_choices,
         "houses": list(first.houses),
         "step_limit": step_limit,

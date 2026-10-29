@@ -414,6 +414,7 @@ class RustGame:
             sequential_westeros=config.sequential_westeros,
             doran_choice=config.doran_choice,
             wildling_tie_choice=config.wildling_tie_choice,
+            bid_tie_choice=config.bid_tie_choice,
             choice_choices=config.choice_choices,
         )
         return cls(inner, config)
@@ -488,6 +489,10 @@ class RustGame:
         self._inner.choose_doran_track(track)
         self._version += 1
         self._snapshot = None
+
+    def pending_bid_tie(self) -> dict | None:
+        """The Clash of Kings tie the Iron Throne holder must order, if any."""
+        return self._inner.pending_bid_tie()
 
     def pending_wildling_tie(self) -> dict | None:
         """The Wildling bid tie the Iron Throne holder must break, if any."""

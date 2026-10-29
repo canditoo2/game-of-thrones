@@ -187,6 +187,7 @@ pub fn selfplay<'py>(
     let sequential_westeros: bool = spec_or(spec, "sequential_westeros", false)?;
     let doran_choice: bool = spec_or(spec, "doran_choice", false)?;
     let wildling_tie_choice: bool = spec_or(spec, "wildling_tie_choice", false)?;
+    let bid_tie_choice: bool = spec_or(spec, "bid_tie_choice", false)?;
     let choice_choices: bool = spec_or(spec, "choice_choices", false)?;
     let houses: Option<Vec<String>> = spec_value(spec, "houses")?;
     let data_dir: Option<String> = spec_value(spec, "data_dir")?;
@@ -266,6 +267,7 @@ pub fn selfplay<'py>(
                 game.sequential_westeros = sequential_westeros;
                 game.doran_choice = doran_choice;
                 game.wildling_tie_choice = wildling_tie_choice;
+                game.bid_tie_choice = bid_tie_choice;
                 game.choice_choices = choice_choices;
                 game.state.choice_choices = choice_choices;
                 Ok(game)

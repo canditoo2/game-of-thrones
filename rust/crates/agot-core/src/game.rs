@@ -79,6 +79,10 @@ pub struct Game {
     /// Python training and desktop play enable this; the raw Rust fixture
     /// default stays deterministic so the frozen parity corpus remains valid.
     pub wildling_tie_choice: bool,
+    /// Ask the Iron Throne holder to order tied Clash of Kings bids. Python
+    /// training and desktop play enable it; the raw Rust fixture default stays
+    /// deterministic so the frozen parity corpus remains valid.
+    pub bid_tie_choice: bool,
     /// Expose every House-card and Wildling sub-choice as a real decision.
     /// Training/desktop enable it; direct low-level rule tests keep the old
     /// deterministic defaults.
@@ -105,6 +109,7 @@ impl Clone for Game {
             sequential_westeros: self.sequential_westeros,
             doran_choice: self.doran_choice,
             wildling_tie_choice: self.wildling_tie_choice,
+            bid_tie_choice: self.bid_tie_choice,
             choice_choices: self.choice_choices,
             rng: source.fork(),
         }
@@ -136,6 +141,7 @@ impl Game {
             sequential_westeros: false,
             doran_choice: false,
             wildling_tie_choice: false,
+            bid_tie_choice: false,
             choice_choices: false,
             rng,
         };
@@ -240,7 +246,9 @@ impl Game {
             ActionKind::Disband => self.apply_disband(action)?,
             ActionKind::Bid => self.apply_bid(action)?,
             ActionKind::WesterosChoice => {
-                if self.state.phase == Phase::WildlingAttack
+                if self.state.phase == Phase::Bidding && self.state.pending_bid_tie.is_some() {
+                    self.apply_bid_tie(action)?;
+                } else if self.state.phase == Phase::WildlingAttack
                     && self.state.pending_wildling_tie.is_some()
                 {
                     self.apply_wildling_tie(action)?;

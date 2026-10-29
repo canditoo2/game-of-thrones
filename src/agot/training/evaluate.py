@@ -105,6 +105,7 @@ def evaluate_match(
             sequential_westeros=base.sequential_westeros,
             doran_choice=base.doran_choice,
             wildling_tie_choice=base.wildling_tie_choice,
+            bid_tie_choice=base.bid_tie_choice,
             choice_choices=base.choice_choices,
         )
         policies = seat_policies(
@@ -193,6 +194,7 @@ def _game_config(
         sequential_westeros=base.sequential_westeros,
         doran_choice=base.doran_choice,
         wildling_tie_choice=base.wildling_tie_choice,
+        bid_tie_choice=base.bid_tie_choice,
         choice_choices=base.choice_choices,
     )
 
@@ -257,6 +259,7 @@ def _play_model_games(
         "sequential_westeros": config.sequential_westeros,
         "doran_choice": config.doran_choice,
         "wildling_tie_choice": config.wildling_tie_choice,
+        "bid_tie_choice": config.bid_tie_choice,
         "choice_choices": config.choice_choices,
         "houses": list(houses),
         "step_limit": step_limit,
@@ -576,6 +579,7 @@ def evaluate_net_vs_field(
         "sequential_westeros": base.sequential_westeros,
         "doran_choice": base.doran_choice,
         "wildling_tie_choice": base.wildling_tie_choice,
+        "bid_tie_choice": base.bid_tie_choice,
         "choice_choices": base.choice_choices,
         "houses": list(houses),
         "step_limit": step_limit,

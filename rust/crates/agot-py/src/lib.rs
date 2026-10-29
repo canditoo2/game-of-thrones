@@ -367,7 +367,7 @@ impl PyGame {
     /// frozen fixtures pin.
     #[classmethod]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, deferred_battles=false, sequential_westeros=false, doran_choice=false, wildling_tie_choice=false, choice_choices=false, data_dir=None))]
+    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, deferred_battles=false, sequential_westeros=false, doran_choice=false, wildling_tie_choice=false, bid_tie_choice=false, choice_choices=false, data_dir=None))]
     fn new(
         _cls: &Bound<'_, PyType>,
         houses: Option<Vec<String>>,
@@ -379,6 +379,7 @@ impl PyGame {
         sequential_westeros: bool,
         doran_choice: bool,
         wildling_tie_choice: bool,
+        bid_tie_choice: bool,
         choice_choices: bool,
         data_dir: Option<String>,
     ) -> PyResult<PyGame> {
@@ -412,6 +413,7 @@ impl PyGame {
         game.sequential_westeros = sequential_westeros;
         game.doran_choice = doran_choice;
         game.wildling_tie_choice = wildling_tie_choice;
+        game.bid_tie_choice = bid_tie_choice;
         game.choice_choices = choice_choices;
         game.state.choice_choices = choice_choices;
         Ok(PyGame { game })
@@ -424,6 +426,33 @@ impl PyGame {
             .into_iter()
             .map(|action| self.wrap(action))
             .collect()
+    }
+
+    /// The pending Clash of Kings tie, as `{track, chooser, candidates}`.
+    fn pending_bid_tie(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let Some(tie) = self.game.state.pending_bid_tie.as_ref() else {
+            return Ok(py.None());
+        };
+        let candidates: Vec<String> = tie
+            .groups
+            .first()
+            .map(|group| group.iter().map(|house| house.name().to_string()).collect())
+            .unwrap_or_default();
+        let settled: Vec<String> = tie
+            .settled
+            .iter()
+            .map(|house| house.name().to_string())
+            .collect();
+        let payload = serde_json::json!({
+            "track": tie.track.as_str(),
+            "chooser": tie.chooser.name(),
+            "candidates": candidates,
+            "settled": settled,
+        });
+        let text = serde_json::to_string(&payload)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let json = py.import("json")?;
+        Ok(json.call_method1("loads", (text,))?.unbind())
     }
 
     /// The pending Wildling bid tie, as `{chooser, highest, candidates}`.

@@ -505,6 +505,19 @@ impl Action {
         }
     }
 
+    /// The Iron Throne holder's pick among tied Clash of Kings bidders.
+    ///
+    /// Like the Wildling tie this reuses `WesterosChoice` with the candidate
+    /// index in `amount`, keeping the action-feature layout stable.
+    pub fn bid_tie_choice(house: HouseId, candidate: u8) -> Action {
+        Action {
+            kind: ActionKind::WesterosChoice,
+            house: Some(house),
+            amount: Some(candidate),
+            ..Action::new(ActionKind::WesterosChoice)
+        }
+    }
+
     /// The Iron Throne holder's pick among tied Wildling bidders.
     ///
     /// Like Doran's choice this reuses `WesterosChoice` and stores the

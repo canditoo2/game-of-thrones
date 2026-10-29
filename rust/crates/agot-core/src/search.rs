@@ -244,6 +244,7 @@ struct Node {
     sequential_westeros: bool,
     doran_choice: bool,
     wildling_tie_choice: bool,
+    bid_tie_choice: bool,
     choice_choices: bool,
     /// The position, or `None` while the node is still pending.
     ///
@@ -285,6 +286,7 @@ impl Node {
             sequential_westeros: game.sequential_westeros,
             doran_choice: game.doran_choice,
             wildling_tie_choice: game.wildling_tie_choice,
+            bid_tie_choice: game.bid_tie_choice,
             choice_choices: game.choice_choices,
             state: Some(Box::new(game.state.clone())),
             rng: source.fork(),
@@ -345,6 +347,7 @@ fn with_node_game<R>(nodes: &mut [Node], index: u32, body: impl FnOnce(&mut Game
         sequential_westeros: node.sequential_westeros,
         doran_choice: node.doran_choice,
         wildling_tie_choice: node.wildling_tie_choice,
+        bid_tie_choice: node.bid_tie_choice,
         choice_choices: node.choice_choices,
         rng: node.rng.clone(),
     };
@@ -762,6 +765,7 @@ impl<E: Evaluator> Mcts<E> {
             sequential_westeros: node.sequential_westeros,
             doran_choice: node.doran_choice,
             wildling_tie_choice: node.wildling_tie_choice,
+            bid_tie_choice: node.bid_tie_choice,
             choice_choices: node.choice_choices,
             rng: node.rng.clone(),
         })
@@ -821,6 +825,7 @@ impl<E: Evaluator> Mcts<E> {
                 sequential_westeros: parent.sequential_westeros,
                 doran_choice: parent.doran_choice,
                 wildling_tie_choice: parent.wildling_tie_choice,
+                bid_tie_choice: parent.bid_tie_choice,
                 choice_choices: parent.choice_choices,
                 rng: parent.rng.clone(),
             }
@@ -929,6 +934,7 @@ impl<E: Evaluator> Mcts<E> {
             sequential_westeros,
             doran_choice,
             wildling_tie_choice,
+            bid_tie_choice,
             choice_choices,
         ) = {
             let parent = &self.nodes[index as usize];
@@ -940,6 +946,7 @@ impl<E: Evaluator> Mcts<E> {
                 parent.sequential_westeros,
                 parent.doran_choice,
                 parent.wildling_tie_choice,
+                parent.bid_tie_choice,
                 parent.choice_choices,
             )
         };
@@ -952,6 +959,7 @@ impl<E: Evaluator> Mcts<E> {
                 sequential_westeros,
                 doran_choice,
                 wildling_tie_choice,
+                bid_tie_choice,
                 choice_choices,
                 state: None,
                 rng: rng.clone(),
