@@ -109,8 +109,15 @@ eval rather than assuming the last checkpoint is strongest.
   numbers as a pre-change baseline and start a fresh run rather than resuming it.
 - `run4` uses a relative checkpoint gate: every 10 iterations it plays 60 games of the
   candidate (3 seats) against `agot-best.pt` (3 seats), swapping seats, and only replaces the
-  best when the overall win rate clears `--gate-threshold` and every house matches the previous
-  best in that seat. Three consecutive failures stop the run with the best preserved.
+  best when the overall win rate clears `--gate-threshold` and every house stays within
+  `--gate-house-tolerance` (default 0.10, about one standard error at 30 games per house) of the
+  previous best in that seat; `--gate-house-margin` is an optional *required* advantage on top of
+  that. Three consecutive failures stop the run with the best preserved, and the counter is
+  stored in `agot.state.pt` so patience also covers resumed sessions.
+- `run4` finished 60 iterations but the gate never promoted past its iteration-10 seed: the
+  overall rate against it rose to 0.70 while the strict per-house rule kept rejecting. That
+  evidence is why the tolerance exists; judge a checkpoint by a direct head-to-head, not by
+  the `agot-best.pt` name.
 - A run writes `agot.pt` (weights), `agot.state.pt` (iteration/best-eval/optimizer for
   `--resume`), `agot.log.jsonl` (one line per iteration) and `agot-best.pt` (best gauntlet eval).
   The replay buffer is deliberately not saved — a resumed run refills it and shows a transient
