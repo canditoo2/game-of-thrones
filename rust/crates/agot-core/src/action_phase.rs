@@ -339,7 +339,7 @@ impl Game {
         let is_fort = self.data.map.region(target).is_fortification();
         combat::units_strength(&units, is_fort) as u32
             + combat::order_modifier(&self.state, origin, house, true).max(0) as u32
-            + combat::potential_support_strength(&self.state, &self.data.map, target, true) as u32
+            + combat::own_support_strength(&self.state, &self.data.map, target, house, true) as u32
     }
 
     fn beats_neutral(

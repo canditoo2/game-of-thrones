@@ -85,5 +85,7 @@ def test_pick_honours_a_temperature_override() -> None:
     action, target = mcts.pick(result, temperature=0.25)
 
     assert action in result.actions
-    np.testing.assert_allclose(target, result.probabilities(0.25), atol=1e-6)
+    # The move follows the schedule, but the training target is always the raw
+    # visit distribution: sharpening it would teach certainty the search lacks.
+    np.testing.assert_allclose(target, result.probabilities(1.0), atol=1e-6)
     assert mcts.temperature == 1.0, "the instance's own temperature is unchanged"

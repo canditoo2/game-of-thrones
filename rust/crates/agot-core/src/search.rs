@@ -505,13 +505,20 @@ impl<E: Evaluator> Mcts<E> {
             ));
         }
         let temperature = temperature.unwrap_or(self.temperature);
-        let probabilities = result.probabilities(temperature);
+        let sampling = result.probabilities(temperature);
         let index = if temperature <= 1e-3 {
             result.argmax_visits().unwrap_or(0)
         } else {
-            self.sample_index(&probabilities)
+            self.sample_index(&sampling)
         };
-        let target = probabilities.iter().map(|value| *value as f32).collect();
+        // The recorded target is always the visit distribution: sharpening it
+        // with 1/T would turn differences of one or two visits into one-hot
+        // labels and teach the network certainty the search does not have.
+        let target = result
+            .probabilities(1.0)
+            .iter()
+            .map(|value| *value as f32)
+            .collect();
         Ok((result.actions[index], target))
     }
 
@@ -863,6 +870,24 @@ impl<E: Evaluator> Mcts<E> {
         debug_assert!(node.expanded(), "only an expanded node selects a child");
         let sqrt_total = (node.visits.max(1) as f64).sqrt();
         let value_index = node_value_index(node.player);
+        // A house's value is almost always negative (five of six lose), so a
+        // fixed zero would make every unvisited child look like a win and turn
+        // the search into a breadth-first one-visit-per-candidate screen. The
+        // neutral first-play value is the mean of the children seen so far.
+        let mut seen_total = 0.0;
+        let mut seen_count = 0u32;
+        for child_index in node.first_child..node.first_child + node.child_count {
+            let child = &self.nodes[child_index as usize];
+            if child.visits > 0 {
+                seen_total += child.value_sums[value_index] / child.visits as f64;
+                seen_count += 1;
+            }
+        }
+        let first_play = if seen_count > 0 {
+            seen_total / seen_count as f64
+        } else {
+            0.0
+        };
         let mut best = node.first_child;
         let mut best_score = f64::NEG_INFINITY;
         for child_index in node.first_child..node.first_child + node.child_count {
@@ -870,7 +895,7 @@ impl<E: Evaluator> Mcts<E> {
             let q = if child.visits > 0 {
                 child.value_sums[value_index] / child.visits as f64
             } else {
-                0.0
+                first_play
             };
             let u = self.c_puct * child.prior * sqrt_total / (1.0 + child.visits as f64);
             let score = q + u;

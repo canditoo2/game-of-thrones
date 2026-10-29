@@ -217,6 +217,7 @@ def _model_config(model) -> dict:
         "hidden": model.hidden,
         "trunk_layers": model.trunk_layers,
         "n_houses": model.n_houses,
+        "value_context": model.value_context,
     }
 
 

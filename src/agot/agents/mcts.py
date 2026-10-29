@@ -285,9 +285,8 @@ class MCTS(Policy):
 
         ``temperature`` overrides this policy's own value for the one call, which
         is how a training driver applies a per-round schedule without rebuilding
-        the policy. It also sharpens the *returned target*: the target is the
-        same distribution the action is drawn from, so a flat temperature of 1
-        records a near-uniform target whenever visits are scarce.
+        the policy. The returned target is the raw visit distribution, so the
+        sampling temperature never sharpens the training label.
         """
         if not result.actions:  # pragma: no cover - defensive
             raise RuntimeError("MCTS was asked to move in a terminal position")
@@ -297,7 +296,10 @@ class MCTS(Policy):
             index = int(np.argmax(result.visits))
         else:
             index = int(self.rng.choice(len(result.actions), p=probs))
-        return result.actions[index], probs.astype(np.float32)
+        # The target is always the visit distribution; sharpening it with 1/T
+        # would teach the network certainty the search does not have.
+        target = result.probabilities(1.0).astype(np.float32)
+        return result.actions[index], target
 
     def act(self, game: Game) -> Action:  # deterministic greedy play
         result = self.search(game)
@@ -400,13 +402,22 @@ class MCTS(Policy):
         assert node.player is not None
         sqrt_total = math.sqrt(max(1, node.visits))
         value_index = node_value_index(node.player)
+        # Values here are almost always negative, so a fixed zero first-play
+        # value would make every unvisited child look like a win. Use the mean
+        # of the children already seen instead.
+        seen = [
+            child.value_sums[value_index] / child.visits
+            for child in node.children
+            if child.visits
+        ]
+        first_play = sum(seen) / len(seen) if seen else 0.0
         best_index = 0
         best_score = -math.inf
         for index, child in enumerate(node.children):
             if child.visits:
                 q = child.value_sums[value_index] / child.visits
             else:
-                q = 0.0
+                q = first_play
             u = (
                 self.c_puct
                 * node.priors[index]

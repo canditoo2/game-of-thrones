@@ -329,11 +329,39 @@ pub fn potential_support_strength(
     region_id: RegionId,
     supporting_attacker: bool,
 ) -> u16 {
+    support_strength_for(state, map, region_id, supporting_attacker, None)
+}
+
+/// Support strength that only counts orders owned by `house`.
+///
+/// A rival's Support order is not guaranteed to be declared for this attack, so
+/// the legal-march filter must not treat it as available. The battle itself
+/// only counts the support each house actually declares.
+pub fn own_support_strength(
+    state: &State,
+    map: &GameMap,
+    region_id: RegionId,
+    house: HouseId,
+    supporting_attacker: bool,
+) -> u16 {
+    support_strength_for(state, map, region_id, supporting_attacker, Some(house))
+}
+
+fn support_strength_for(
+    state: &State,
+    map: &GameMap,
+    region_id: RegionId,
+    supporting_attacker: bool,
+    owner: Option<HouseId>,
+) -> u16 {
     let battle_is_sea = map.region(region_id).is_sea();
     let is_fort = map.region(region_id).is_fortification();
     let mut total: i32 = 0;
 
-    for (neighbour, _owner) in support_orders(state, map, region_id) {
+    for (neighbour, order_owner) in support_orders(state, map, region_id) {
+        if owner.is_some() && Some(order_owner) != owner {
+            continue;
+        }
         if state.region(neighbour).total(true) == 0 {
             continue;
         }

@@ -153,12 +153,13 @@ def test_scripted_seats_are_not_imitated_by_default() -> None:
     )
 
 
-def test_batched_selfplay_applies_the_temperature_schedule() -> None:
-    """A cold schedule must reach the recorded targets, not just the moves.
+def test_batched_selfplay_keeps_targets_unsharpened() -> None:
+    """The schedule moves the sampled action, not the recorded target.
 
-    Wiring a schedule into the driver while leaving ``pick`` on the policy's own
-    temperature is a silent no-op: the games change but the targets do not, and
-    the target is the whole point of the schedule.
+    Sharpening the target with the sampling temperature turned one- and
+    two-visit differences into near one-hot labels, which taught the network
+    certainty the search did not have. The recorded policy must stay the raw
+    visit distribution whatever the schedule is.
     """
     configs = [GameConfig(seed=seed, max_rounds=3) for seed in (0, 1)]
     hot = batched_self_play(
@@ -176,20 +177,20 @@ def test_batched_selfplay_applies_the_temperature_schedule() -> None:
         temperature_schedule=((10_000, 0.0),),
     )
 
-    def mean_entropy(records) -> float:
+    def mean_top(records) -> float:
         policies = [
             example.policy for record in records for example in record.examples
         ]
         assert policies
-        return float(np.mean([-(p * np.log(p + 1e-12)).sum() for p in policies]))
+        return float(np.mean([p.max() for p in policies]))
 
-    hot_entropy = mean_entropy(hot)
-    cold_entropy = mean_entropy(cold)
-    assert cold_entropy < hot_entropy, (
-        f"the schedule never reached the targets: cold={cold_entropy:.3f} "
-        f"hot={hot_entropy:.3f}"
+    hot_top = mean_top(hot)
+    cold_top = mean_top(cold)
+    assert abs(hot_top - cold_top) < 0.25, (
+        f"the target must not follow the sampling temperature: "
+        f"cold={cold_top:.3f} hot={hot_top:.3f}"
     )
-    assert cold_entropy < 1e-6, "temperature 0 must record a one-hot target"
+    assert cold_top < 0.999, "a cold schedule must not record a one-hot target"
 
 
 def test_batched_selfplay_with_pimc() -> None:

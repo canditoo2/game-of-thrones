@@ -365,7 +365,7 @@ def _run_training(args: argparse.Namespace) -> int:
     model = (
         PolicyValueNet.load(args.resume)
         if args.resume
-        else PolicyValueNet(hidden=args.hidden)
+        else PolicyValueNet(hidden=args.hidden, value_context=True)
     )
     trainer = Trainer(
         model,

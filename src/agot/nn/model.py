@@ -53,6 +53,7 @@ class PolicyValueNet(nn.Module):
         hidden: int = 256,
         trunk_layers: int = 2,
         n_houses: int = N_HOUSES,
+        value_context: bool = False,
     ) -> None:
         super().__init__()
         self.state_dim = state_dim
@@ -60,6 +61,11 @@ class PolicyValueNet(nn.Module):
         self.hidden = hidden
         self.trunk_layers = trunk_layers
         self.n_houses = n_houses
+        #: Let the value head see the candidate actions, not just the 97-dim
+        #: aggregate state. Without this the value is blind to where the armies
+        #: are and returns nearly the same number for every child, which turns
+        #: PUCT into a copy of the prior.
+        self.value_context = value_context
 
         self.state_trunk = _mlp(state_dim, hidden, trunk_layers)
         self.action_trunk = _mlp(action_dim, hidden, trunk_layers)
@@ -70,6 +76,8 @@ class PolicyValueNet(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, 1),
         )
+        if value_context:
+            self.value_merge = nn.Linear(2 * hidden, hidden)
         self.value_head = nn.Sequential(
             nn.Linear(hidden, hidden),
             nn.ReLU(),
@@ -95,6 +103,9 @@ class PolicyValueNet(nn.Module):
         logits = self.policy_head(torch.cat([context, a], dim=-1)).squeeze(-1)  # (B, N)
         if mask is not None:
             logits = logits.masked_fill(mask <= 0, -1e9)
+        if self.value_context:
+            pooled = a.mean(dim=1)
+            h = self.value_merge(torch.cat([h, pooled], dim=-1))
         values = self.value_head(h)  # (B, n_houses)
         return logits, values
 
@@ -121,6 +132,16 @@ class PolicyValueNet(nn.Module):
         h = self.state_trunk(state)  # (B, H)
         a = self.action_trunk(actions)  # (T, H)
         logits = self.policy_head(torch.cat([h[index], a], dim=-1)).squeeze(-1)
+        if self.value_context:
+            # Mean of each row's candidate embeddings: the only place the two
+            # region blocks reach the value head.
+            pooled = torch.zeros(
+                h.size(0), h.size(1), dtype=a.dtype, device=a.device
+            ).index_add_(0, index, a)
+            counts = torch.zeros(h.size(0), dtype=a.dtype, device=a.device)
+            counts = counts.index_add_(0, index, torch.ones_like(index, dtype=a.dtype))
+            pooled = pooled / counts.clamp_min(1.0).unsqueeze(1)
+            h = self.value_merge(torch.cat([h, pooled], dim=-1))
         return logits, self.value_head(h)
 
     # -- inference helpers ----------------------------------------------
@@ -226,6 +247,7 @@ class PolicyValueNet(nn.Module):
                     "hidden": self.hidden,
                     "trunk_layers": self.trunk_layers,
                     "n_houses": self.n_houses,
+                    "value_context": self.value_context,
                 },
             },
             temporary,
