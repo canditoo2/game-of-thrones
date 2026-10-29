@@ -2847,6 +2847,9 @@ class AgotApp:
         name = str(card.get("name") or "Wildling card")
         wildling = str(card.get("wildling") or "").strip()
         watch = str(card.get("nights_watch") or "").strip()
+        self._append_log(
+            f"Messenger Raven: {name} is on top of the Wildling deck.", "system"
+        )
         detail = ""
         if wildling:
             detail += f"\n\nIf the Wildlings win:\n{wildling}"
