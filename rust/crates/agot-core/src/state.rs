@@ -20,7 +20,7 @@ use crate::action::Side;
 use crate::combat::BattleResult;
 use crate::enums::{
     ActionStep, CardId, HouseId, OrderKey, OrderType, Phase, RegionId, Track, UnitType, N_HOUSES,
-    STAR_ALLOWANCE_BY_COURT_POSITION, SUPPLY_LIMITS,
+    POWER_LIMIT, STAR_ALLOWANCE_BY_COURT_POSITION, SUPPLY_LIMITS,
 };
 use crate::house_cards::BattleContext;
 
@@ -846,6 +846,14 @@ impl State {
             .iter()
             .filter(|id| self.region(**id).controller == Some(house))
             .count() as u32
+    }
+
+    /// Gain Power tokens, never past the twenty supplied with the house.
+    pub fn gain_power(&mut self, house: HouseId, amount: u8) {
+        let Some(state) = self.house_mut(house) else {
+            return;
+        };
+        state.power = state.power.saturating_add(amount).min(POWER_LIMIT);
     }
 
     /// Regions that hold this house's units, in board order.

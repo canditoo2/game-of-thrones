@@ -204,6 +204,12 @@ pub const GARRISON_STRENGTH: u8 = 2;
 /// Upgrading a Footman to a Knight or Siege Engine costs 1 point instead.
 pub const MUSTER_COST: [u8; 4] = [1, 2, 2, 1];
 
+/// Power tokens supplied with each house.
+///
+/// The box holds 120 Power tokens, twenty per house, and the same "Exceeding
+/// the Components Provided" rule applies: a house at twenty cannot gain more.
+pub const POWER_LIMIT: u8 = 20;
+
 /// Plastic figures supplied with each house, indexed by [`UnitType::index`].
 ///
 /// This is the physical component cap from the rulebook ("Exceeding the

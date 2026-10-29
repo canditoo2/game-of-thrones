@@ -824,9 +824,7 @@ pub fn apply_post_battle(
 
     match winner_ability {
         "tywin_lannister" => {
-            if let Some(house_state) = state.house_mut(winner) {
-                house_state.power += 2;
-            }
+            state.gain_power(winner, 2);
             state.note("Tywin Lannister gains 2 Power".to_string());
         }
         "renly_baratheon" if !state.choice_choices => renly_upgrade(ctx, state, map, winner),

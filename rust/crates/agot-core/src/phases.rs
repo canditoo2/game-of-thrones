@@ -582,9 +582,8 @@ impl Game {
                 .map(|region| self.data.map.region(*region).power as u16)
                 .sum();
             gained += self.port_power_bonus(house) as u16;
-            if let Some(state) = self.state.house_mut(house) {
-                state.power = state.power.saturating_add(gained.min(u8::MAX as u16) as u8);
-            }
+            self.state
+                .gain_power(house, gained.min(u8::MAX as u16) as u8);
         }
         self.state.note("power gained per crown icon".to_string());
     }
@@ -1515,9 +1514,7 @@ impl Game {
                 }
                 "refund_bid" => {
                     let refund = attack.bid_of(chosen).unwrap_or(0);
-                    if let Some(state) = self.state.house_mut(chosen) {
-                        state.power = state.power.saturating_add(refund);
-                    }
+                    self.state.gain_power(chosen, refund);
                 }
                 _ => {}
             }
@@ -1609,9 +1606,7 @@ impl Game {
             }
             "refund_bid" => {
                 let refund = attack.bid_of(chosen).unwrap_or(0);
-                if let Some(state) = self.state.house_mut(chosen) {
-                    state.power = state.power.saturating_add(refund);
-                }
+                self.state.gain_power(chosen, refund);
             }
             _ => {}
         }

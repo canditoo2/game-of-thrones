@@ -490,6 +490,36 @@ fn special_consolidate_may_muster_in_its_own_area() {
     assert_eq!(game.state.return_phase, Some(Phase::Action));
 }
 
+/// A house never holds more than the twenty Power tokens it is given.
+#[test]
+fn power_gains_stop_at_twenty_tokens() {
+    let (mut game, data) = blank(1);
+    let house = HouseId(2);
+    let winterfell = region_of(&data, "winterfell");
+    {
+        let region = game.state.region_mut(winterfell);
+        region.controller = Some(house);
+        region.owner = Some(house);
+        region.units = [1, 0, 0, 0];
+        region.order = Some(OrderKey::from_name("consolidate_a").unwrap());
+        region.order_house = Some(house);
+    }
+    game.state.house_mut(house).unwrap().power = 19;
+    game.apply_consolidate(Action::resolve_consolidate(house, winterfell))
+        .expect("the action is legal");
+    assert_eq!(
+        game.state.house(house).unwrap().power,
+        20,
+        "Winterfell would pay 2, but the box holds twenty"
+    );
+    game.state.gain_power(house, 5);
+    assert_eq!(
+        game.state.house(house).unwrap().power,
+        20,
+        "no further Power can be gained at the limit"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Messenger Raven
 // ---------------------------------------------------------------------------

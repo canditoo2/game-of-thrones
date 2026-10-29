@@ -537,9 +537,7 @@ impl Game {
                 owner_state.return_order(order);
             }
             if pillaging {
-                if let Some(gainer) = self.state.house_mut(house) {
-                    gainer.power += 1;
-                }
+                self.state.gain_power(house, 1);
                 if let Some(victim) = self.state.house_mut(owner) {
                     victim.power = victim.power.saturating_sub(1);
                 }
@@ -919,9 +917,7 @@ impl Game {
             }
         }
         let gained = 1 + static_region.power;
-        if let Some(state) = self.state.house_mut(house) {
-            state.power += gained;
-        }
+        self.state.gain_power(house, gained);
         let region_text = self.data.map.id_of(region).to_string();
         self.state.note(format!(
             "{house} consolidates in {region_text} for {gained} power"
