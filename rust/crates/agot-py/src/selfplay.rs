@@ -13,13 +13,19 @@
 //!   matrix and the visit distribution the search produced at the scheduled
 //!   temperature — the target the network is trained to imitate;
 //! * `determinizations > 1` gives each seat PIMC, aggregating the root visits of
-//!   that many resampled worlds.
+//!   that many resampled worlds;
+//! * bit-identical leaves are evaluated once per batch (`dedupe_leaves`,
+//!   default on): the driver identifies each leaf by its state row plus its
+//!   ordered action rows, scores the unique leaves, and scatters the logits
+//!   and values back to the original packed positions, so the search, the
+//!   seeds and the recorded examples are unchanged.
 //!
 //! The evaluator callback receives
 //! `(state (B, STATE_DIM), actions (T, ACTION_DIM), index (T,), mask (T,))` as
 //! float32/int32 arrays and returns `(logits (T,), values (B, N_HOUSES))`. Rust
 //! applies the per-leaf softmax, so the callback stays a single torch expression.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
@@ -29,6 +35,7 @@ use pyo3::types::{PyDict, PyTuple};
 
 use agot_core::enums::{HouseId, Phase, N_HOUSES};
 use agot_core::game::Game;
+use agot_core::leaf_dedupe::LeafDedupe;
 use agot_core::map::DataSet;
 use agot_core::observation::{self, ACTION_DIM, STATE_DIM};
 use agot_core::search::{Evaluation, Mcts, SearchResult, Simulation, UniformEvaluator};
@@ -189,6 +196,10 @@ pub fn selfplay<'py>(
     let wildling_tie_choice: bool = spec_or(spec, "wildling_tie_choice", false)?;
     let bid_tie_choice: bool = spec_or(spec, "bid_tie_choice", false)?;
     let choice_choices: bool = spec_or(spec, "choice_choices", false)?;
+    // Exact duplicate leaves (the same 97-float state and candidate rows) are
+    // common under PIMC and across games. The evaluator is pure, so scoring
+    // each unique leaf once is exact; the switch exists for A/B runs.
+    let dedupe_leaves: bool = spec_or(spec, "dedupe_leaves", true)?;
     let houses: Option<Vec<String>> = spec_value(spec, "houses")?;
     let data_dir: Option<String> = spec_value(spec, "data_dir")?;
     let step_limit: u32 = spec_or(spec, "step_limit", 20_000)?;
@@ -473,18 +484,51 @@ pub fn selfplay<'py>(
                     })
                     .collect();
 
-                for group in groups {
+                for mut group in groups {
                     let rows = group.positions.len();
                     if rows == 0 {
                         continue;
                     }
                     let total = group.index.len();
-                    let state_array = array2(py, rows, STATE_DIM, group.states)?;
-                    let action_array = array2(py, total, ACTION_DIM, group.actions)?;
-                    let index_array = numpy::ndarray::Array1::from_vec(group.index.clone())
+
+                    // Index the batch by exact contents. A leaf is identified
+                    // by its state row *and* its ordered action rows, so two
+                    // positions with the same board but different candidates
+                    // stay separate. The evaluator never sees a duplicate.
+                    let dedupe = if dedupe_leaves {
+                        Some(LeafDedupe::from_packed(
+                            &group.states,
+                            STATE_DIM,
+                            &group.actions,
+                            ACTION_DIM,
+                            &group.index,
+                            rows,
+                        ))
+                    } else {
+                        None
+                    };
+                    let (scored_rows, scored_slots) = match &dedupe {
+                        Some(dedupe) => (dedupe.unique_rows(), dedupe.unique_slots()),
+                        None => (rows, total),
+                    };
+                    let (scored_states, scored_actions) = match &dedupe {
+                        Some(dedupe) => (dedupe.states().to_vec(), dedupe.actions().to_vec()),
+                        None => (
+                            std::mem::take(&mut group.states),
+                            std::mem::take(&mut group.actions),
+                        ),
+                    };
+                    let scored_index = match &dedupe {
+                        Some(dedupe) => dedupe.index().to_vec(),
+                        None => group.index.clone(),
+                    };
+
+                    let state_array = array2(py, scored_rows, STATE_DIM, scored_states)?;
+                    let action_array = array2(py, scored_slots, ACTION_DIM, scored_actions)?;
+                    let index_array = numpy::ndarray::Array1::from_vec(scored_index)
                         .into_pyarray(py)
                         .unbind();
-                    let mask = vec![1.0f32; total];
+                    let mask = vec![1.0f32; scored_slots];
                     let mask_array = PyArray1::from_vec(py, mask).unbind();
 
                     let reply = evaluators[group.model]
@@ -493,19 +537,33 @@ pub fn selfplay<'py>(
                         reply.extract(py)?;
                     let logits = logits.as_slice()?;
                     let values = values.as_slice()?;
-                    if logits.len() != total {
+                    if logits.len() != scored_slots {
                         return Err(PyValueError::new_err(format!(
-                            "evaluator returned {} logits for {total} candidates",
+                            "evaluator returned {} logits for {scored_slots} candidates",
                             logits.len()
                         )));
                     }
-                    if values.len() != rows * N_HOUSES {
+                    if values.len() != scored_rows * N_HOUSES {
                         return Err(PyValueError::new_err(format!(
-                            "evaluator returned {} values for {rows} leaves",
+                            "evaluator returned {} values for {scored_rows} leaves",
                             values.len()
                         )));
                     }
-                    let priors = segment_softmax(logits, &group.index, rows);
+
+                    // Restore the full packed layout before the per-leaf
+                    // softmax: each duplicate gets exactly the bits its own
+                    // forward pass would have produced.
+                    let logits: Cow<'_, [f32]> = match &dedupe {
+                        Some(dedupe) => Cow::Owned(dedupe.scatter_logits(logits)),
+                        None => Cow::Borrowed(logits),
+                    };
+                    let values: Cow<'_, [f32]> = match &dedupe {
+                        Some(dedupe) => Cow::Owned(dedupe.scatter_values(values, N_HOUSES)),
+                        None => Cow::Borrowed(values),
+                    };
+                    debug_assert_eq!(logits.len(), total);
+                    debug_assert_eq!(values.len(), rows * N_HOUSES);
+                    let priors = segment_softmax(logits.as_ref(), &group.index, rows);
 
                     // Scatter each leaf's slice back to its simulation.
                     let mut bounds = Vec::with_capacity(rows + 1);

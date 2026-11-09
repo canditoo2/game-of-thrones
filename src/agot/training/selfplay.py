@@ -167,6 +167,7 @@ def batched_self_play(
     record_opponents: bool = False,
     step_limit: int = DEFAULT_STEP_LIMIT,
     batch_games: int = 4,
+    dedupe_leaves: bool = True,
 ) -> list[GameRecord]:
     """Play several games in lockstep, batching every network call.
 
@@ -194,6 +195,12 @@ def batched_self_play(
     distribution at that temperature, so a flat 1.0 all game records a
     near-uniform target whenever visits are scarce. See
     :data:`DEFAULT_TEMPERATURE_SCHEDULE`.
+
+    ``dedupe_leaves`` (default true) lets the Rust driver score bit-identical
+    leaves once per batch and scatter the results back; it is exact for a pure
+    evaluator and exists as an off switch for A/B runs. The Python reference
+    driver has no batching to deduplicate, so the flag only affects the fast
+    path.
     """
     # Fast path: when the Rust extension is installed and the request needs
     # nothing it does not implement, the whole game runs natively and only the
@@ -214,6 +221,7 @@ def batched_self_play(
         record_opponents=record_opponents,
         step_limit=step_limit,
         batch_games=batch_games,
+        dedupe_leaves=dedupe_leaves,
     )
     if rust_records is not None:
         LAST_BACKEND = "rust"

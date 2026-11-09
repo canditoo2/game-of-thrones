@@ -75,14 +75,25 @@ def game_seeds(configs, fallback: int) -> list[int]:
     ]
 
 
-def spec_for(plan: SelfPlayPlan, base_config: GameConfig | None = None) -> dict:
-    """Translate a :class:`SelfPlayPlan` into the driver's spec mapping."""
+def spec_for(
+    plan: SelfPlayPlan,
+    base_config: GameConfig | None = None,
+    *,
+    dedupe_leaves: bool = True,
+) -> dict:
+    """Translate a :class:`SelfPlayPlan` into the driver's spec mapping.
+
+    ``dedupe_leaves`` is the A/B switch for exact leaf deduplication: with it
+    on (the default) the driver scores bit-identical leaves once per batch and
+    scatters the results back, which is exact for a pure evaluator.
+    """
     base = base_config or GameConfig()
     return {
         "games": plan.games,
         "simulations": plan.simulations,
         "determinizations": plan.determinizations,
         "batch_games": max(1, plan.batch_games),
+        "dedupe_leaves": dedupe_leaves,
         "seed": plan.seed,
         "seeds": [plan.seed + index for index in range(plan.games)],
         "temperature": plan.temperature,
@@ -161,15 +172,20 @@ def self_play_records(
     plan: SelfPlayPlan,
     *,
     base_config: GameConfig | None = None,
+    dedupe_leaves: bool = True,
 ) -> list[GameRecord]:
-    """Play ``plan.games`` games with the Rust driver and return the records."""
+    """Play ``plan.games`` games with the Rust driver and return the records.
+
+    ``dedupe_leaves`` is forwarded to :func:`spec_for`; turn it off to compare
+    a run against the same leaves scored individually.
+    """
     extension = core()
     if extension is None:  # pragma: no cover - depends on the environment
         raise RuntimeError(
             f"{MODULE} is not installed; build it with maturin or use "
             "agot.training.selfplay.batched_self_play"
         )
-    spec = spec_for(plan, base_config)
+    spec = spec_for(plan, base_config, dedupe_leaves=dedupe_leaves)
     result = extension.selfplay(spec, leaf_evaluator(model))
     return _unpack(result, plan.games)
 
@@ -187,6 +203,7 @@ def try_batched_self_play(
     record_opponents: bool = False,
     step_limit: int = 20_000,
     batch_games: int = 4,
+    dedupe_leaves: bool = True,
 ) -> list[GameRecord] | None:
     """Run a ``batched_self_play`` request on the Rust driver, or return ``None``.
 
@@ -194,6 +211,9 @@ def try_batched_self_play(
     decision at a time (never one per simulation), so a scripted seat costs a
     Python policy call rather than a Python search. ``record_opponents`` decides
     whether those decisions are imitated.
+
+    ``dedupe_leaves`` (default true) scores bit-identical leaves once per batch;
+    turn it off to A/B the exactness-preserving shortcut.
 
     Returns ``None`` — leaving the caller to use the Python driver — when the
     games do not share one configuration or when the evaluator is not a
@@ -250,6 +270,7 @@ def try_batched_self_play(
         "simulations": simulations,
         "determinizations": determinizations,
         "batch_games": max(1, batch_games),
+        "dedupe_leaves": dedupe_leaves,
         "seed": first.seed if first.seed is not None else seed,
         "seeds": game_seeds(configs, seed),
         "temperature": temperature,

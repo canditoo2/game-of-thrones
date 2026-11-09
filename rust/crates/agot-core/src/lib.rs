@@ -23,6 +23,7 @@ pub mod fingerprint;
 pub mod game;
 pub mod hidden;
 pub mod house_cards;
+pub mod leaf_dedupe;
 pub mod map;
 pub mod observation;
 pub mod phases;
@@ -49,6 +50,7 @@ pub use enums::{
 pub use game::{EngineError, Game};
 pub use hidden::determinize;
 pub use house_cards::BattleContext;
+pub use leaf_dedupe::LeafDedupe;
 pub use map::{DataSet, GameMap, MapDataError};
 pub use observation::{
     encode_action, encode_action_into, encode_state, observe, Observation, RegionCache,
