@@ -99,8 +99,18 @@ class PolicyValueNet(nn.Module):
         """
         h = self.state_trunk(state)  # (B, H)
         a = self.action_trunk(actions)  # (B, N, H)
-        context = h.unsqueeze(1).expand(-1, a.size(1), -1)  # (B, N, H)
-        logits = self.policy_head(torch.cat([context, a], dim=-1)).squeeze(-1)  # (B, N)
+        # The first head layer is [state, action] -> hidden, so the state half
+        # can be computed once per leaf instead of once per candidate. The
+        # result is algebraically identical (same weights, same layer).
+        first = self.policy_head[0]
+        weight = first.weight  # (H, 2H)
+        state_part = nn.functional.linear(
+            h, weight[:, : self.hidden], first.bias
+        ).unsqueeze(1)
+        action_part = nn.functional.linear(a, weight[:, self.hidden :])
+        logits = self.policy_head[2](
+            torch.relu(state_part + action_part)
+        ).squeeze(-1)  # (B, N)
         if mask is not None:
             logits = logits.masked_fill(mask <= 0, -1e9)
         if self.value_context:
@@ -131,7 +141,13 @@ class PolicyValueNet(nn.Module):
         """
         h = self.state_trunk(state)  # (B, H)
         a = self.action_trunk(actions)  # (T, H)
-        logits = self.policy_head(torch.cat([h[index], a], dim=-1)).squeeze(-1)
+        first = self.policy_head[0]
+        weight = first.weight
+        state_part = nn.functional.linear(h, weight[:, : self.hidden], first.bias)
+        action_part = nn.functional.linear(a, weight[:, self.hidden :])
+        logits = self.policy_head[2](
+            torch.relu(state_part[index] + action_part)
+        ).squeeze(-1)
         if self.value_context:
             # Mean of each row's candidate embeddings: the only place the two
             # region blocks reach the value head.

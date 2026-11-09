@@ -174,15 +174,15 @@ class ReplayBuffer:
         np.savez_compressed(
             path,
             states=states,
-            actions=self._actions[: self._rows].astype(np.float32),
+            actions=np.asarray(self._actions[: self._rows], dtype=np.float32),
             offsets=self._offsets[: self._size + 1].astype(np.int64),
-            policies=self._policies[: self._rows].astype(np.float32),
+            policies=np.asarray(self._policies[: self._rows], dtype=np.float32),
             players=self._players[: self._size].astype(np.int64),
             outcomes=outcomes.astype(np.float32),
         )
 
     @classmethod
-    def load(cls, path: str) -> ReplayBuffer:
+    def load(cls, path: str, capacity: int | None = None) -> ReplayBuffer:
         with np.load(path, allow_pickle=True) as data:
             states = data["states"]
             actions = data["actions"]
@@ -193,7 +193,7 @@ class ReplayBuffer:
             # Older files stored one object array per example in `policies`;
             # current files store one flat float32 vector.
             legacy = policies.dtype == object
-            buffer = cls(capacity=max(1, len(states)))
+            buffer = cls(capacity=max(1, capacity or len(states)))
             for index in range(len(states)):
                 start, stop = int(offsets[index]), int(offsets[index + 1])
                 policy = (

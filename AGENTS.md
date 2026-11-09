@@ -121,9 +121,12 @@ target's entropy and the gate trend, not the policy loss alone.
   evidence is why the tolerance exists; judge a checkpoint by a direct head-to-head, not by
   the `agot-best.pt` name.
 - A run writes `agot.pt` (weights), `agot.state.pt` (iteration/best-eval/optimizer for
-  `--resume`), `agot.log.jsonl` (one line per iteration) and `agot-best.pt` (best gauntlet eval).
-  The replay buffer is deliberately not saved — a resumed run refills it and shows a transient
-  loss spike.
+  `--resume`), `agot.log.jsonl` (one line per iteration), `agot-best.pt` (gate-approved best)
+  and `agot.replay.npz` (compressed replay snapshot, ~15-60 MB at 100k examples, written every
+  `--buffer-save-every` iterations and restored on resume, which removes the empty-buffer loss
+  spike). The log carries `seconds_selfplay`, `seconds_train`, `target_entropy` and
+  `buffer_restored`; with raw-visit targets the policy-loss floor is the mean target entropy
+  (~2.2-2.6 nats), so the old "<2.0" smoke reading no longer applies.
 - The GUI writes human-vs-bot matches under `checkpoints/play-logs/`: a JSONL decision/result
   log and, for MCTS bot seats, a ReplayBuffer-compatible NPZ of those decisions. Undo truncates
   the NPZ but leaves an undo event in the JSONL.

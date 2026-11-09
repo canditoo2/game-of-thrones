@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import time
 import webbrowser
@@ -385,6 +386,22 @@ def _run_training(args: argparse.Namespace) -> int:
     )
     state_file = state_path(checkpoint)
     log = RunLog(log_path(checkpoint))
+    replay_file = checkpoint.with_name(checkpoint.stem + ".replay.npz")
+    buffer_restored = False
+    if args.resume and replay_file.exists():
+        try:
+            buffer = ReplayBuffer.load(str(replay_file), capacity=args.buffer)
+            buffer_restored = True
+            print(
+                f"restored replay buffer: {len(buffer)} examples from "
+                f"{replay_file.name}",
+                flush=True,
+            )
+        except Exception as error:  # a bad snapshot must never block a resume
+            print(
+                f"replay buffer not restored ({error}); starting empty",
+                flush=True,
+            )
 
     run = RunState()
     if args.resume:
@@ -394,7 +411,8 @@ def _run_training(args: argparse.Namespace) -> int:
             trainer.load_state_dict(run.trainer)
             print(
                 f"resumed {args.resume} at iter {run.iteration} "
-                f"(best={run.best_rate:.3f}); replay buffer starts empty",
+                f"(best={run.best_rate:.3f}); replay buffer "
+                f"{'restored' if replay_file.exists() else 'starts empty'}",
                 flush=True,
             )
         else:
@@ -456,15 +474,40 @@ def _run_training(args: argparse.Namespace) -> int:
             iteration_started = time.time()
             plan.seed = args.seed + iteration * 100_000
             model.to("cpu")
+            selfplay_started = time.time()
             records = parallel_self_play(
                 model, plan, base_config=config, executor=executor
             )
+            seconds_selfplay = time.time() - selfplay_started
             for record in records:
                 buffer.extend(record.examples)
+            sample = [
+                example.policy
+                for record in records[:4]
+                for example in record.examples[:25]
+            ]
+            entropies = []
+            for policy in sample:
+                total = float(sum(policy))
+                if total <= 0:
+                    continue
+                entropies.append(
+                    -sum(
+                        (value / total) * math.log(max(value / total, 1e-12))
+                        for value in policy
+                    )
+                )
+            target_entropy = (
+                float(round(sum(entropies) / len(entropies), 4))
+                if entropies
+                else None
+            )
             # The search and its leaf batches stay on CPU; only the gradient
             # pass moves to the GPU.
             model.to(device)
+            train_started = time.time()
             history = trainer.train(buffer)
+            seconds_train = time.time() - train_started
             last = history[-1] if history else {}
             model.to("cpu")
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -477,6 +520,11 @@ def _run_training(args: argparse.Namespace) -> int:
             )
             record = {
                 "iteration": iteration + 1,
+                "seconds_selfplay": round(seconds_selfplay, 3),
+                "seconds_train": round(seconds_train, 3),
+                "target_entropy": target_entropy,
+                "buffer_restored": buffer_restored,
+                "examples_new": sum(len(record.examples) for record in records),
                 "games": len(records),
                 "buffer": len(buffer),
                 "policy_loss": last.get("policy_loss"),
@@ -589,6 +637,13 @@ def _run_training(args: argparse.Namespace) -> int:
             run.gate_failures = gate_failures
             run.trainer = trainer.state_dict()
             run.save(state_file)
+            if args.buffer_save_every > 0 and (
+                (iteration + 1) % args.buffer_save_every == 0
+            ):
+                try:
+                    buffer.save(str(replay_file))
+                except Exception as error:  # never lose training over a snapshot
+                    print(f"replay buffer not saved: {error}", flush=True)
             print(f"{line} ({elapsed:.1f}s) -> {checkpoint}", flush=True)
             if stop_training:
                 break
@@ -845,6 +900,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     train.add_argument("--buffer", type=int, default=200_000)
+    train.add_argument(
+        "--buffer-save-every",
+        type=int,
+        default=1,
+        help=(
+            "write the replay buffer next to the checkpoint every N iterations "
+            "(0 disables it); the snapshot is compressed and resumes exactly"
+        ),
+    )
     train.add_argument("--resume", default=None)
     train.add_argument("--checkpoint", default="checkpoints/agot.pt")
     train.add_argument(

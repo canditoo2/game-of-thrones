@@ -283,3 +283,26 @@ def test_load_rejects_the_collapsed_old_checkpoint(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="dot-product policy head"):
         PolicyValueNet.load(str(path))
+
+
+def test_split_policy_head_matches_the_concatenated_form() -> None:
+    """The state half of the first head layer must be precomputable.
+
+    `[h, a] -> hidden` is split into `h -> hidden` (once per leaf) plus
+    `a -> hidden`, which is the same arithmetic with the same weights.
+    """
+    import torch
+
+    from agot.engine.observation import ACTION_DIM, STATE_DIM
+
+    torch.manual_seed(0)
+    model = PolicyValueNet(hidden=32, value_context=True)
+    model.eval()
+    state = torch.randn(4, STATE_DIM)
+    actions = torch.randn(4, 7, ACTION_DIM)
+    logits, _ = model(state, actions)
+    h = model.state_trunk(state)
+    a = model.action_trunk(actions)
+    context = h.unsqueeze(1).expand(-1, 7, -1)
+    flat = model.policy_head(torch.cat([context, a], dim=-1)).squeeze(-1)
+    assert torch.allclose(logits, flat, atol=1e-5)
