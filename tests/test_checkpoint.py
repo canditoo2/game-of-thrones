@@ -72,6 +72,15 @@ def test_run_state_gate_failures_round_trip(tmp_path) -> None:
     assert loaded.gate_failures == 2
 
 
+def test_run_state_gate_mode_round_trips(tmp_path) -> None:
+    path = tmp_path / "run.state.pt"
+    RunState(iteration=3, gate_mode="deferred").save(path)
+
+    loaded = RunState.load(path)
+    assert loaded is not None
+    assert loaded.gate_mode == "deferred"
+
+
 def test_run_state_without_gate_failures_loads_zero(tmp_path) -> None:
     # State files written before the counter existed must still resume.
     path = tmp_path / "old.state.pt"
@@ -80,6 +89,7 @@ def test_run_state_without_gate_failures_loads_zero(tmp_path) -> None:
     loaded = RunState.load(path)
     assert loaded is not None
     assert loaded.gate_failures == 0
+    assert loaded.gate_mode == ""
 
 
 def test_run_log_appends_records(tmp_path) -> None:

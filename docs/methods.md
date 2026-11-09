@@ -98,6 +98,35 @@ best on the random/greedy anchor:
 * the 12-game random/greedy anchor remains in the log for continuity, but it
   no longer chooses the best checkpoint.
 
+### Deferred gate (disconnect-safe)
+
+A 200-game gate takes about two hours on the Colab CPU runtime, and when it
+runs inside the training iteration a disconnect loses the whole iteration. The
+`--gate-mode deferred` path keeps the same match and the same acceptance rule
+but moves the work into files:
+
+* after the iteration is committed, the loop only copies the candidate into
+  `<checkpoint stem>.gate/candidates/iter-NNNNNN/` with `candidate.pt`,
+  `best.pt` (the current gate opponent, or a copy of the candidate for the
+  first gate) and `spec.json` written **last**; an interrupted enqueue is never
+  picked up;
+* `agot gate --checkpoint checkpoints/run4/agot.pt` plays the queue in
+  `--batch-games`-sized chunks aligned to game 0 and writes one atomic
+  `shards/chunk-XX.json` per chunk. Re-running after a disconnect resumes at
+  the first missing chunk; `--max-minutes` bounds a session and `--shard i/N`
+  lets several processes split the chunks;
+* `verdict.json` is written only when every chunk exists, and it repeats the
+  inline rule: overall win rate above `--gate-threshold`, every house within
+  tolerance of the previous best, and the optional `--gate-min-house` floor.
+  `agot-best.pt` is promoted only on a pass (temporary copy + `os.replace`,
+  then the verdict); the first gate seeds it;
+* patience is recomputed from the trailing pass/fail lines of
+  `gate.log.jsonl`, never incremented in place: a queued candidate without a
+  verdict is not a strike, and a pass resets the count;
+* `gate_mode` is stored in `agot.state.pt`; a resumed run refuses to switch
+  between inline and deferred mode. The deferred mode never writes
+  `agot-best.pt` from the training process.
+
 ### How the weights change between versions
 
 Every iteration is one AlphaZero-style update, not an interpolation between two
@@ -255,6 +284,16 @@ checkpoints on Drive, resume across disconnects).
    `agot-best.pt` is replaced only by a checkpoint that wins the 3v3 gate and
    stays within per-house tolerance of the previous best in every house. It is
    the checkpoint to use even when the last iteration is weaker.
+
+   On a flaky Colab runtime add `--gate-mode deferred`: the iteration then only
+   queues the candidate, and the gate is played outside training, resumably:
+
+   ```bash
+   agot gate --checkpoint checkpoints/run4/agot.pt --max-minutes 90
+   ```
+
+   Re-run it after a disconnect (or run `--shard 1/2` and `--shard 2/2` in two
+   processes); verdicts appear in `agot.gate/gate.log.jsonl`.
 
    Watch it in another terminal:
 

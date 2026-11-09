@@ -116,6 +116,11 @@ agot train --iterations 100 --games 48 --workers 12 --batch-games 4 \
 agot train --iterations 100 --resume checkpoints/agot.pt \
   --checkpoint checkpoints/agot.pt
 
+# Deferred gate: `agot train --gate-mode deferred` queues each candidate after
+# the iteration commit instead of playing 200 games inside it. Play the queue in
+# resumable chunks; re-run after a disconnect (or split with --shard 1/2).
+agot gate --checkpoint checkpoints/agot.pt --max-minutes 90
+
 # Watch a run: renders the companion *.log.jsonl as a self-contained HTML page
 # (loss curves, seconds per iteration, eval trend vs parity/greedy, ETA). No
 # extra dependencies. The page is a snapshot; --watch regenerates it so an open

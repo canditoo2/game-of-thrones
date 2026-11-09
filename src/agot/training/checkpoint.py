@@ -47,6 +47,9 @@ class RunState:
     trainer: dict = field(default_factory=dict)
     #: Consecutive failed gates, so ``--gate-patience`` spans resumed sessions.
     gate_failures: int = 0
+    #: ``inline`` or ``deferred``; empty for state files written before the
+    #: mode existed. A run refuses to switch modes across a resume.
+    gate_mode: str = ""
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
@@ -60,6 +63,7 @@ class RunState:
                 "best_rate": self.best_rate,
                 "trainer": self.trainer,
                 "gate_failures": self.gate_failures,
+                "gate_mode": self.gate_mode,
             },
             temporary,
         )
@@ -81,6 +85,7 @@ class RunState:
             best_rate=float(payload.get("best_rate", -1.0)),
             trainer=payload.get("trainer", {}) or {},
             gate_failures=int(payload.get("gate_failures", 0)),
+            gate_mode=str(payload.get("gate_mode", "") or ""),
         )
 
 

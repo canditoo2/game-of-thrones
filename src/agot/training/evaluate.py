@@ -56,6 +56,98 @@ def split_houses(houses: tuple[str, ...], swap: bool) -> tuple[set[str], set[str
     return first, second
 
 
+@dataclass(frozen=True)
+class MatchGame:
+    """One game of a match: its global index, RNG seed and seat split."""
+
+    index: int
+    seed: int
+    swap: bool
+
+
+@dataclass(frozen=True)
+class MatchPlan:
+    """The per-game schedule of a head-to-head match.
+
+    ``MatchGame.index`` is the game's position in the *whole* match, not in
+    the slice being played. A plan can therefore be split into chunks (one per
+    gate shard) and the results merged without renumbering anything.
+    """
+
+    houses: tuple[str, ...]
+    seed: int
+    games: tuple[MatchGame, ...]
+
+    def __len__(self) -> int:
+        return len(self.games)
+
+    def __iter__(self):
+        return iter(self.games)
+
+    def __getitem__(self, index):
+        return self.games[index]
+
+    @property
+    def seeds(self) -> list[int]:
+        """Per-game RNG seeds, in game order."""
+        return [game.seed for game in self.games]
+
+    @property
+    def swaps(self) -> list[bool]:
+        """Per-game seat split, in game order."""
+        return [game.swap for game in self.games]
+
+    def slice(self, start: int, stop: int) -> MatchPlan:
+        """A contiguous sub-plan, keeping each game's global index."""
+        return MatchPlan(houses=self.houses, seed=self.seed, games=self.games[start:stop])
+
+    def chunks(self, size: int) -> list[MatchPlan]:
+        """Split the plan into chunks of at most ``size`` games, from index 0."""
+        size = max(1, int(size))
+        return [
+            self.slice(start, min(len(self), start + size))
+            for start in range(0, len(self), size)
+        ]
+
+    def per_game_seeds(self) -> list[int]:
+        return [game.seed for game in self.games]
+
+    def seat_models(self) -> list[list[int]]:
+        """Model index per house per game: 0 for A's seats, 1 for B's."""
+        return [
+            [
+                0 if house in split_houses(self.houses, game.swap)[0] else 1
+                for house in self.houses
+            ]
+            for game in self.games
+        ]
+
+
+@dataclass(frozen=True)
+class GameOutcome:
+    """The result of one planned game, keyed by its global index."""
+
+    index: int
+    winner: str | None
+    steps: int
+
+
+def build_match_plan(houses: tuple[str, ...], games: int, seed: int) -> MatchPlan:
+    """The deterministic schedule shared by a single call and chunked runs.
+
+    Game ``i`` gets seed ``seed + i`` and A takes the first half of the seats
+    when ``i`` is even, exactly as the historical loop did.
+    """
+    return MatchPlan(
+        houses=tuple(houses),
+        seed=seed,
+        games=tuple(
+            MatchGame(index=index, seed=seed + index, swap=bool(index % 2))
+            for index in range(games)
+        ),
+    )
+
+
 def seat_policies(
     factory_a,
     factory_b,
@@ -211,6 +303,7 @@ def _play_model_games(
     seed: int,
     step_limit: int,
     batch_games: int,
+    seeds: list[int] | None = None,
 ) -> tuple[list[str | None], list[int]]:
     """Play ``games`` with one model per search seat, plus optional scripted seats.
 
@@ -218,6 +311,10 @@ def _play_model_games(
     ``None`` means the seat is scripted and lives in ``scripted[game]``. The
     driver groups each leaf batch by model, so two checkpoints can play each
     other without falling back to Python MCTS.
+
+    ``seeds`` gives every game an explicit RNG seed. Chunked callers (the
+    deferred gate) pass the seeds from the whole-match plan so splitting the
+    games across processes does not replay neighbouring games.
     """
     from agot.engine.rust import RustGame
     from agot.training import rust_engine
@@ -225,6 +322,11 @@ def _play_model_games(
     extension = rust_engine.core()
     if extension is None:  # pragma: no cover - the extension is mandatory now
         raise RuntimeError("the Rust extension is not installed")
+
+    if seeds is None:
+        seeds = [seed + index for index in range(games)]
+    elif len(seeds) != games:
+        raise ValueError(f"expected {games} seeds, got {len(seeds)}")
 
     houses = config.houses
     evaluators = [rust_engine.leaf_evaluator(model) for model in models]
@@ -248,7 +350,7 @@ def _play_model_games(
         "determinizations": max(1, determinizations),
         "batch_games": max(1, min(batch_games, games)),
         "seed": seed,
-        "seeds": [seed + index for index in range(games)],
+        "seeds": list(seeds),
         "temperature": 0.0,
         "temperature_rounds": 0,
         "final_temperature": 0.0,
@@ -337,41 +439,72 @@ def evaluate_model_vs_factory(
     return result
 
 
-def evaluate_models_match(
-    model_a,
-    model_b,
+def play_plan(
+    models: list,
+    plan: MatchPlan,
     *,
     simulations: int = 128,
     determinizations: int = 1,
-    games: int = 10,
     config: GameConfig | None = None,
-    seed: int = 0,
     step_limit: int = DEFAULT_STEP_LIMIT,
     batch_games: int = 4,
-) -> MatchResult:
-    """Two networks, three seats each, swapped each game, all on the Rust driver."""
+) -> list[GameOutcome]:
+    """Play every game in ``plan`` with one model per search seat.
+
+    The plan carries explicit per-game seeds, so playing a chunk of a match in
+    one process produces the same games as playing the whole match at once.
+    """
     base = config or GameConfig()
-    houses = base.houses
-    seat_models: list[list[int | None]] = []
-    scripted: list[dict[str, Policy]] = []
-    for game_index in range(games):
-        seats_a, _ = split_houses(houses, bool(game_index % 2))
-        seat_models.append(
-            [0 if house in seats_a else 1 for house in houses]
-        )
-        scripted.append({})
+    if tuple(plan.houses) != tuple(base.houses):
+        raise ValueError("the match plan and the game config disagree on the houses")
+    if not plan.games:
+        return []
+    seat_models = plan.seat_models()
+    needed = max(max(row, default=0) for row in seat_models) + 1
+    if len(models) < needed:
+        raise ValueError(f"the plan needs {needed} models, got {len(models)}")
     winners, steps = _play_model_games(
-        [model_a, model_b],
+        models,
         seat_models,
-        scripted,
+        [{} for _ in plan.games],
         simulations=simulations,
         determinizations=determinizations,
-        games=games,
+        games=len(plan),
         config=base,
-        seed=seed,
+        seed=plan.seed,
+        seeds=plan.per_game_seeds(),
         step_limit=step_limit,
         batch_games=batch_games,
     )
+    return [
+        GameOutcome(index=game.index, winner=winners[position], steps=steps[position])
+        for position, game in enumerate(plan.games)
+    ]
+
+
+def summarize_plan(
+    results: list[GameOutcome],
+    plan: MatchPlan,
+    houses: tuple[str, ...],
+) -> MatchResult:
+    """Aggregate per-game outcomes into the historical :class:`MatchResult`.
+
+    ``results`` may arrive in any order (the gate merges one file per chunk),
+    but the plan decides the order and every planned game must be present.
+    """
+    houses = tuple(houses)
+    if houses != plan.houses:
+        raise ValueError("the match plan and the summary disagree on the houses")
+    by_index = {outcome.index: outcome for outcome in results}
+    if len(by_index) != len(results):
+        raise ValueError("the match results contain a duplicate game index")
+    expected = [game.index for game in plan.games]
+    missing = [index for index in expected if index not in by_index]
+    extra = sorted(set(by_index) - set(expected))
+    if missing or extra:
+        raise ValueError(
+            f"the match results do not cover the plan (missing={missing}, extra={extra})"
+        )
 
     result = MatchResult()
     total_steps = 0
@@ -379,10 +512,12 @@ def evaluate_models_match(
     a_wins = {house: 0 for house in houses}
     b_games = {house: 0 for house in houses}
     b_wins = {house: 0 for house in houses}
-    for game_index, winner in enumerate(winners):
-        seats_a, seats_b = split_houses(houses, bool(game_index % 2))
+    for game in plan.games:
+        outcome = by_index[game.index]
+        seats_a, seats_b = split_houses(houses, game.swap)
+        winner = outcome.winner
         result.games += 1
-        total_steps += steps[game_index]
+        total_steps += outcome.steps
         for house in seats_a:
             a_games[house] += 1
             if winner == house:
@@ -410,6 +545,33 @@ def evaluate_models_match(
         if b_games[house]
     }
     return result
+
+
+def evaluate_models_match(
+    model_a,
+    model_b,
+    *,
+    simulations: int = 128,
+    determinizations: int = 1,
+    games: int = 10,
+    config: GameConfig | None = None,
+    seed: int = 0,
+    step_limit: int = DEFAULT_STEP_LIMIT,
+    batch_games: int = 4,
+) -> MatchResult:
+    """Two networks, three seats each, swapped each game, all on the Rust driver."""
+    base = config or GameConfig()
+    plan = build_match_plan(base.houses, games, seed)
+    results = play_plan(
+        [model_a, model_b],
+        plan,
+        simulations=simulations,
+        determinizations=determinizations,
+        config=base,
+        step_limit=step_limit,
+        batch_games=batch_games,
+    )
+    return summarize_plan(results, plan, base.houses)
 
 
 def evaluate_models_vs_field(

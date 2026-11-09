@@ -20,7 +20,7 @@ target's entropy and the gate trend, not the policy loss alone.
   the final summary line can be swallowed — trust `$LASTEXITCODE` (0 = pass).
 - One file: `.venv\Scripts\python -m pytest tests/test_nn.py -q`
 - Lint: `.venv\Scripts\ruff check src tests` (line-length 100, py310 target).
-- CLI: `.venv\Scripts\agot <demo|play|legal|evaluate|gauntlet|round-robin|train|report>`. One
+- CLI: `.venv\Scripts\agot <demo|play|legal|evaluate|gauntlet|round-robin|train|gate|report>`. One
   full game is ~0.2 s: `agot demo --policy greedy --seed 1`. `agot play --checkpoint <dir|pt>
   --house stark` opens the local Tkinter desktop game: the setup screen chooses the human
   house, opponent and checkpoint, then the full board and action list are shown. When
@@ -116,6 +116,14 @@ target's entropy and the gate trend, not the policy loss alone.
   previous best in that seat; `--gate-house-margin` is an optional *required* advantage on top of
   that. Three consecutive failures stop the run with the best preserved, and the counter is
   stored in `agot.state.pt` so patience also covers resumed sessions.
+- `--gate-mode deferred` moves the gate outside the training iteration for flaky Colab
+  runtimes: after the iteration commit the loop only writes
+  `<stem>.gate/candidates/iter-NNNNNN/{candidate.pt,best.pt,spec.json}` (spec last), then
+  `agot gate --checkpoint <ckpt>` plays it in `--batch-games` chunks, one atomic
+  `shards/chunk-XX.json` each. A verdict (and `agot-best.pt` promotion on a pass) waits until
+  every chunk exists; patience is recomputed from `gate.log.jsonl`, where a candidate without
+  a verdict is not a strike. `agot.state.pt` records `gate_mode`, and a resume refuses to
+  switch modes.
 - `run4` finished 60 iterations but the gate never promoted past its iteration-10 seed: the
   overall rate against it rose to 0.70 while the strict per-house rule kept rejecting. That
   evidence is why the tolerance exists; judge a checkpoint by a direct head-to-head, not by

@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agot.cli import _policy_factory, main
+from agot.cli import _policy_factory, build_parser, main
 from agot.engine.game import Game, GameConfig
 
 
@@ -26,6 +26,29 @@ def test_net_policy_without_a_checkpoint_is_rejected() -> None:
     """A bare ``net`` has no weights to load, so it fails with a message."""
     with pytest.raises(SystemExit):
         _policy_factory("net")
+
+
+def test_train_gate_mode_defaults_to_inline() -> None:
+    args = build_parser().parse_args(["train"])
+    assert args.gate_mode == "inline"
+
+
+def test_gate_subcommand_parses_the_queue_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "gate",
+            "--checkpoint",
+            "checkpoints/run5/agot.pt",
+            "--max-minutes",
+            "90",
+            "--shard",
+            "2/3",
+        ]
+    )
+    assert args.func.__name__ == "cmd_gate"
+    assert args.checkpoint == "checkpoints/run5/agot.pt"
+    assert args.max_minutes == 90
+    assert args.shard == "2/3"
 
 
 def test_net_policy_with_a_missing_checkpoint_is_rejected(tmp_path) -> None:

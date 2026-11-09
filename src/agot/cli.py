@@ -8,11 +8,12 @@ Examples::
     agot round-robin --checkpoints checkpoints/run4/agot.pt checkpoints/run4/agot-best.pt
     agot play --checkpoint checkpoints/run4/agot-best.pt --house stark
     agot train --iterations 100 --games 48 --workers 12 --checkpoint checkpoints/agot.pt
+    agot gate --checkpoint checkpoints/agot.pt --max-minutes 90
     agot report --checkpoint checkpoints/agot.pt --open
 
 Every policy argument also accepts ``net:<checkpoint path>``, which searches
-with MCTS over that saved network. The ``train`` subcommand and ``net:``
-policies are the only parts that need PyTorch.
+with MCTS over that saved network. The ``train`` and ``gate`` subcommands and
+``net:`` policies are the only parts that need PyTorch.
 """
 
 from __future__ import annotations
@@ -313,6 +314,49 @@ def cmd_round_robin(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gate(args: argparse.Namespace) -> int:
+    """Play queued deferred gate candidates in resumable chunks."""
+    from agot.training import gate as gate_module
+
+    checkpoint = Path(args.checkpoint)
+    try:
+        shard = gate_module.parse_shard(args.shard) if args.shard else None
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+
+    root = gate_module.gate_dir(checkpoint)
+    if not root.exists():
+        print(f"no deferred gate queue at {root}", flush=True)
+        return 0
+    pending = gate_module.pending_candidates(checkpoint)
+    if not pending:
+        print(f"no pending gate candidates in {root}", flush=True)
+        return 0
+
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        print(
+            "The deferred gate needs PyTorch. Install it with:\n"
+            "    pip install -e \".[rl]\""
+        )
+        return 1
+
+    results = gate_module.run_pending(
+        checkpoint,
+        max_minutes=args.max_minutes,
+        shard=shard,
+        progress=lambda message: print(message, flush=True),
+    )
+    print(
+        json.dumps(
+            {"checkpoint": str(checkpoint), "candidates": results},
+            indent=2,
+        )
+    )
+    return 0
+
+
 def cmd_train(args: argparse.Namespace) -> int:
     try:
         import torch  # noqa: F401
@@ -329,6 +373,7 @@ def _run_training(args: argparse.Namespace) -> int:
     import torch
 
     from agot.nn.model import PolicyValueNet
+    from agot.training import gate as gate_module
     from agot.training.checkpoint import RunLog, RunState, log_path, state_path
     from agot.training.parallel import (
         SelfPlayPlan,
@@ -338,6 +383,12 @@ def _run_training(args: argparse.Namespace) -> int:
     )
     from agot.training.replay import ReplayBuffer
     from agot.training.trainer import TrainConfig, Trainer
+
+    if args.gate_mode == "deferred" and args.gate_games <= 0:
+        raise SystemExit(
+            "--gate-mode deferred needs something to queue: use --gate-games > 0 "
+            "(or --gate-mode inline)"
+        )
 
     train_threads = args.train_threads
     if train_threads is None:
@@ -421,9 +472,22 @@ def _run_training(args: argparse.Namespace) -> int:
                 "iteration counter and best-eval reset)",
                 flush=True,
             )
+    if run.gate_mode and run.gate_mode != args.gate_mode:
+        raise SystemExit(
+            f"{checkpoint} was trained with --gate-mode {run.gate_mode}; "
+            f"resume with --gate-mode {run.gate_mode} or start a fresh run"
+        )
+    run.gate_mode = args.gate_mode
+
     best_rate = run.best_rate
-    # Carried in the state file so a resumed Colab session keeps its patience.
-    gate_failures = run.gate_failures
+    # Inline keeps the counter in the state file; deferred recomputes it from
+    # the verdict log, because a queued-but-unplayed candidate is not a strike.
+    gate_failures = (
+        gate_module.gate_failures(checkpoint)
+        if args.gate_mode == "deferred"
+        else run.gate_failures
+    )
+    run.gate_failures = gate_failures
     # Self-play and the native evaluators run on CPU; the trainer owns the
     # GPU copy. Move the shared model back before the first self-play batch.
     model.to("cpu")
@@ -450,18 +514,26 @@ def _run_training(args: argparse.Namespace) -> int:
         )
         return 0
 
-    # A run stopped by --gate-patience keeps the count in its state file. Re-running
-    # the same command must not burn another window of self-play to stop again.
+    # A run stopped by --gate-patience keeps the count in its state file (inline)
+    # or in the verdict log (deferred). Re-running the same command must not
+    # burn another window of self-play to stop again.
     if args.gate_patience > 0 and gate_failures >= args.gate_patience:
         print(
             f"nothing to do: {gate_failures} consecutive gate failures are already "
             f"recorded for {checkpoint}",
             flush=True,
         )
-        print(
-            f"raise --gate-patience or move {best_checkpoint.name} aside to continue",
-            flush=True,
-        )
+        if args.gate_mode == "deferred":
+            print(
+                "raise --gate-patience or remove "
+                f"{gate_module.gate_dir(checkpoint) / gate_module.LOG_NAME} to continue",
+                flush=True,
+            )
+        else:
+            print(
+                f"raise --gate-patience or move {best_checkpoint.name} aside to continue",
+                flush=True,
+            )
         return 0
 
     # One long-lived pool for the whole run: re-spawning workers and re-importing
@@ -472,6 +544,18 @@ def _run_training(args: argparse.Namespace) -> int:
     try:
         for iteration in range(run.iteration, args.iterations):
             iteration_started = time.time()
+            if args.gate_mode == "deferred":
+                gate_failures = gate_module.gate_failures(checkpoint)
+                run.gate_failures = gate_failures
+                if args.gate_patience > 0 and gate_failures >= args.gate_patience:
+                    run.save(state_file)
+                    print(
+                        f"stopping before iter {iteration + 1}: {gate_failures} "
+                        f"consecutive gate failures (patience "
+                        f"{args.gate_patience}); best preserved",
+                        flush=True,
+                    )
+                    break
             plan.seed = args.seed + iteration * 100_000
             model.to("cpu")
             selfplay_started = time.time()
@@ -547,12 +631,16 @@ def _run_training(args: argparse.Namespace) -> int:
                     record["eval_high"] = result.ci_high
                     # The random/greedy anchor is a sanity check, not the
                     # relative gate: do not let it replace a gate-approved best.
-                    if args.gate_games <= 0 and result.win_rate > best_rate:
+                    if (
+                        args.gate_mode == "inline"
+                        and args.gate_games <= 0
+                        and result.win_rate > best_rate
+                    ):
                         best_rate = result.win_rate
                         model.save(str(best_checkpoint))
                         line += f" -> best {best_checkpoint}"
 
-                if args.gate_games > 0:
+                if args.gate_mode == "inline" and args.gate_games > 0:
                     from agot.training.evaluate import (
                         evaluate_models_match,
                         wilson_interval,
@@ -629,13 +717,11 @@ def _run_training(args: argparse.Namespace) -> int:
                         record["gate_seeded"] = True
                         gate_failures = 0
                         line += " -> seeded gate best"
-            elapsed = time.time() - iteration_started
-            record["seconds"] = round(elapsed, 3)
-            log.append(record)
             run.iteration = iteration + 1
             run.best_rate = best_rate
             run.gate_failures = gate_failures
             run.trainer = trainer.state_dict()
+            run.gate_mode = args.gate_mode
             run.save(state_file)
             if args.buffer_save_every > 0 and (
                 (iteration + 1) % args.buffer_save_every == 0
@@ -644,6 +730,39 @@ def _run_training(args: argparse.Namespace) -> int:
                     buffer.save(str(replay_file))
                 except Exception as error:  # never lose training over a snapshot
                     print(f"replay buffer not saved: {error}", flush=True)
+            # The iteration is committed from here on: a resume cannot re-run
+            # it, so enqueueing the gate candidate now cannot duplicate a
+            # directory while another process is playing it.
+            if args.gate_mode == "deferred" and gate_due:
+                try:
+                    directory = gate_module.enqueue_candidate(
+                        checkpoint,
+                        iteration + 1,
+                        model,
+                        best_checkpoint=best_checkpoint,
+                        games=args.gate_games,
+                        seed=args.seed + 900_000,
+                        simulations=args.simulations,
+                        determinizations=args.determinizations,
+                        batch_games=args.batch_games,
+                        threshold=args.gate_threshold,
+                        min_house=args.gate_min_house,
+                        house_tolerance=args.gate_house_tolerance,
+                        house_margin=args.gate_house_margin,
+                        config=config,
+                    )
+                except Exception as error:  # noqa: BLE001 - never lose the iteration
+                    # A full/unmounted gate directory, or an unexpected save
+                    # failure, must not throw away the iteration just committed.
+                    record["gate_enqueue_error"] = str(error)
+                    line += f" -> gate enqueue failed: {error}"
+                else:
+                    record["gate_queued"] = str(directory)
+                    line += f" -> queued gate {directory.name}"
+            elapsed = time.time() - iteration_started
+            record["seconds"] = round(elapsed, 3)
+            log.append(record)
+
             print(f"{line} ({elapsed:.1f}s) -> {checkpoint}", flush=True)
             if stop_training:
                 break
@@ -880,6 +999,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     report.set_defaults(func=cmd_report)
 
+    gate = sub.add_parser(
+        "gate",
+        help="play queued deferred gate candidates in resumable chunks",
+    )
+    gate.add_argument(
+        "--checkpoint",
+        default="checkpoints/agot.pt",
+        help="training checkpoint whose <stem>.gate/ queue to play",
+    )
+    gate.add_argument(
+        "--max-minutes",
+        type=float,
+        default=0.0,
+        help="stop starting new chunks after this many minutes (0 = no limit)",
+    )
+    gate.add_argument(
+        "--shard",
+        default=None,
+        metavar="i/N",
+        help="only play chunk i of N (1-based), for parallel gate processes",
+    )
+    gate.set_defaults(func=cmd_gate)
+
     train = sub.add_parser("train", help="run the self-play training loop (needs torch)")
     # Training needs a search deep enough to produce a target worth imitating:
     # at 24 simulations spread over 1 determinization a leaf's candidates get
@@ -988,6 +1130,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "head-to-head games against the current agot-best.pt; 0 disables the "
             "relative gate and keeps the random/greedy best selection"
+        ),
+    )
+    train.add_argument(
+        "--gate-mode",
+        choices=("inline", "deferred"),
+        default="inline",
+        help=(
+            "inline runs the gate inside the iteration (default, today's "
+            "behaviour); deferred only queues the candidate in <checkpoint>.gate/ "
+            "after the iteration commit, so `agot gate` can play it later and a "
+            "Colab disconnect cannot lose the whole iteration"
         ),
     )
     train.add_argument(
