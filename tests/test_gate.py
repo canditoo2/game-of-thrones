@@ -26,11 +26,16 @@ def test_chunked_plan_equals_the_single_call_plan() -> None:
     rebuilt = [game for chunk in chunks for game in chunk.games]
     assert rebuilt == list(whole.games)
     assert [game.seed for game in rebuilt] == [123 + index for index in range(10)]
-    assert [game.swap for game in rebuilt] == [bool(index % 2) for index in range(10)]
+    # The 3v3 split is random per game but reproducible from the match seed,
+    # and every game gives A exactly half the houses.
+    again = build_match_plan(DEFAULT_HOUSES, 10, 123)
+    assert [game.seats_a for game in again.games] == [
+        game.seats_a for game in rebuilt
+    ]
     for game in rebuilt:
-        assert split_houses(DEFAULT_HOUSES, game.swap) == split_houses(
-            DEFAULT_HOUSES, bool(game.index % 2)
-        )
+        assert len(game.seats_a) == len(DEFAULT_HOUSES) // 2
+        assert len(set(game.seats_a)) == len(game.seats_a)
+        assert set(game.seats_a) <= set(DEFAULT_HOUSES)
 
 
 def _append_verdict(log: Path, *, passed: bool, iteration: int | None = None) -> None:
@@ -110,7 +115,10 @@ def _winners(spec: gate.GateSpec, *, candidate_wins: bool) -> list[str]:
     plan = build_match_plan(spec.houses, spec.games, spec.seed)
     winners = []
     for game in plan.games:
-        seats_a, seats_b = split_houses(plan.houses, game.swap)
+        seats_a = set(game.seats_a) if game.seats_a else split_houses(
+            plan.houses, game.swap
+        )[0]
+        seats_b = set(plan.houses) - seats_a
         winners.append(sorted(seats_a if candidate_wins else seats_b)[0])
     return winners
 

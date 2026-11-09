@@ -8,6 +8,7 @@ out in expectation.
 from __future__ import annotations
 
 import math
+import random
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -63,6 +64,9 @@ class MatchGame:
     index: int
     seed: int
     swap: bool
+    #: The houses model A plays this game. Empty means the historical
+    #: first-half/second-half split, kept for old plans and tests.
+    seats_a: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,7 +120,9 @@ class MatchPlan:
         """Model index per house per game: 0 for A's seats, 1 for B's."""
         return [
             [
-                0 if house in split_houses(self.houses, game.swap)[0] else 1
+                0
+                if house in (game.seats_a or split_houses(self.houses, game.swap)[0])
+                else 1
                 for house in self.houses
             ]
             for game in self.games
@@ -138,14 +144,31 @@ def build_match_plan(houses: tuple[str, ...], games: int, seed: int) -> MatchPla
     Game ``i`` gets seed ``seed + i`` and A takes the first half of the seats
     when ``i`` is even, exactly as the historical loop did.
     """
-    return MatchPlan(
-        houses=tuple(houses),
-        seed=seed,
-        games=tuple(
-            MatchGame(index=index, seed=seed + index, swap=bool(index % 2))
-            for index in range(games)
-        ),
-    )
+    # The 3v3 split is drawn at random for every game: a fixed split would
+    # confound model strength with house strength and would always pair the
+    # same three houses against the other three. The draw is seeded, so a plan
+    # is reproducible and a chunk of it is identical to the whole match.
+    rng = random.Random(seed)
+    half = len(houses) // 2
+    schedule = []
+    drawn: tuple[str, ...] = ()
+    for index in range(games):
+        if index % 2 == 0 or not drawn:
+            seats = tuple(rng.sample(list(houses), half))
+            drawn = seats
+        else:
+            # Complement of the previous game: every house plays for A exactly
+            # half the time, while which houses are paired stays random.
+            seats = tuple(house for house in houses if house not in drawn)
+        schedule.append(
+            MatchGame(
+                index=index,
+                seed=seed + index,
+                swap=bool(seats[0] in houses[half:]),
+                seats_a=seats,
+            )
+        )
+    return MatchPlan(houses=tuple(houses), seed=seed, games=tuple(schedule))
 
 
 def seat_policies(
@@ -514,7 +537,11 @@ def summarize_plan(
     b_wins = {house: 0 for house in houses}
     for game in plan.games:
         outcome = by_index[game.index]
-        seats_a, seats_b = split_houses(houses, game.swap)
+        if game.seats_a:
+            seats_a = set(game.seats_a)
+            seats_b = set(houses) - seats_a
+        else:
+            seats_a, seats_b = split_houses(houses, game.swap)
         winner = outcome.winner
         result.games += 1
         total_steps += outcome.steps
