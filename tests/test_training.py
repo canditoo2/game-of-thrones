@@ -59,6 +59,32 @@ def test_temperature_schedule_sharpens_after_the_opening() -> None:
     assert scheduled_temperature(((1, 0.5),), 7) == 0.5
 
 
+def test_phase_budget_presets_reach_the_driver_spec() -> None:
+    """``--phase-budgets default`` is a per-decision cap table, ``off`` is None."""
+    from agot.training import rust_engine
+    from agot.training.parallel import SelfPlayPlan
+
+    assert rust_engine.resolve_phase_budgets("off") is None
+    assert rust_engine.resolve_phase_budgets(None) is None
+    preset = rust_engine.resolve_phase_budgets("default")
+    assert preset["planning"] == 32
+    assert preset["wildling_attack"] == 16
+    assert preset["action"] == 32
+    assert preset["combat"] == 64
+    # A caller gets a copy: mutating it must not corrupt the shared preset.
+    preset["planning"] = 1
+    assert rust_engine.PHASE_BUDGETS["default"]["planning"] == 32
+
+    plan = SelfPlayPlan(games=2, simulations=128)
+    assert plan.phase_budgets is None
+    assert rust_engine.spec_for(plan)["phase_budgets"] is None
+    spec = rust_engine.spec_for(
+        plan, phase_budgets=rust_engine.resolve_phase_budgets("default")
+    )
+    assert spec["phase_budgets"]["planning"] == 32
+    assert spec["simulations"] == 128
+
+
 def _factory(house: str, seed: int) -> RandomPolicy:
     return RandomPolicy(seed=seed)
 

@@ -98,10 +98,18 @@ Accepted, in order of measured gain per week of work:
    identical: `encode_state`/`encode_actions` come out bit-identical across
    determinizations, and KL(128/2||64/1) = 0.00000 on ten positions in every
    phase. The second world costs +33% rows for zero signal.
-3. **Per-phase simulation budgets** (planning 32, wildling 16, mustering /
-   bidding / action 32, raven / combat / westeros 64): -44% rows on top of the
-   above, with a pooled target change of 0.075 nats, 8-20x below the label noise
-   it replaces.
+3. **Per-phase simulation budgets** *(landed: `--phase-budgets default`)* -
+   planning 32, wildling 16, mustering / bidding / action 32, raven / combat /
+   westeros 64: -44% rows on top of the above, with a pooled target change of
+   0.075 nats, 8-20x below the label noise it replaces. Re-measured on two real
+   games at 64 simulations / 2 determinizations: 75 942 -> 45 333 scored rows
+   (-40.3%), 63.7 -> 36.5 rows per decision, Planning 64.0 -> 37.7 and Wildling
+   attacks 64.0 -> 16.0. The cap is per decision and is divided by the
+   determinizations exactly like `simulations`; it never goes below one
+   simulation per legal action, which is why a 45-candidate Planning decision
+   lands on 46 rather than 32. At 16 simulations the preset is a no-op (every
+   cap is at or above the ceiling), so it only pays off at the training budget
+   of 128 or more. `off` (the default) is the fixed budget, bit for bit.
 4. **Sharpened target plus a planning teacher, and a per-candidate Q head** - the
    root cause of weak play is that the 97-dim state has no board: the children of
    a planning node encode to bit-identical vectors (verified on 40/40 positions),

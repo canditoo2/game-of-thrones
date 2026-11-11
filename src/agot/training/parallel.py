@@ -54,6 +54,10 @@ class SelfPlayPlan:
     #: enough to be worth imitating (see ``selfplay.DEFAULT_TEMPERATURE_SCHEDULE``).
     temperature_rounds: int = 3
     final_temperature: float = 0.25
+    #: Per-phase simulation caps for the Rust driver (``rust_engine.PHASE_BUDGETS``).
+    #: ``None`` is the fixed budget; any table is a per-decision cap that the
+    #: driver divides by ``determinizations`` like ``simulations``.
+    phase_budgets: dict[str, int] | None = None
 
     def temperature_schedule(self) -> tuple[tuple[int, float], ...]:
         """``(last_round, temperature)`` bands handed to the self-play loop."""
@@ -73,6 +77,7 @@ def _options(plan: SelfPlayPlan) -> dict:
         "batch_games": max(1, plan.batch_games),
         "opponent_rate": plan.opponent_rate,
         "greedy_noise": plan.greedy_noise,
+        "phase_budgets": plan.phase_budgets,
     }
 
 
@@ -135,6 +140,7 @@ def _play_chunk(configs: list[GameConfig], options: dict) -> list[GameRecord]:
                 seed=options["seed"] + start,
                 opponents=opponents,
                 batch_games=batch,
+                phase_budgets=options["phase_budgets"],
             )
         )
     return records

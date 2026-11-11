@@ -105,7 +105,10 @@ agot legal
 # turns on the periodic gauntlet and best net (its budget follows --simulations
 # unless --eval-simulations says otherwise). --train-threads caps torch in the
 # training process (small mini-batches are faster on a few threads than on every
-# core; the workers stay single-threaded).
+# core; the workers stay single-threaded). --phase-budgets default caps the
+# simulations one decision may spend by phase (planning/mustering/action/bidding
+# 32, wildling attacks 16, raven/combat/westeros 64), divided by
+# --determinizations exactly like --simulations; 'off' is the fixed budget.
 agot train --iterations 100 --games 48 --workers 12 --batch-games 4 \
   --opponent-rate 0.2 --train-threads 4 \
   --temperature-rounds 3 --final-temperature 0.25 \

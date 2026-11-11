@@ -168,6 +168,7 @@ def batched_self_play(
     step_limit: int = DEFAULT_STEP_LIMIT,
     batch_games: int = 4,
     dedupe_leaves: bool = True,
+    phase_budgets: dict[str, int] | None = None,
 ) -> list[GameRecord]:
     """Play several games in lockstep, batching every network call.
 
@@ -201,6 +202,11 @@ def batched_self_play(
     evaluator and exists as an off switch for A/B runs. The Python reference
     driver has no batching to deduplicate, so the flag only affects the fast
     path.
+
+    ``phase_budgets`` (``None`` = off) caps the simulations one decision may
+    spend, by phase; see ``rust_engine.PHASE_BUDGETS``. It only exists on the
+    fast path: a search seat's depth is a property of the Rust driver, and the
+    reference driver keeps the fixed budget it has always used.
     """
     # Fast path: when the Rust extension is installed and the request needs
     # nothing it does not implement, the whole game runs natively and only the
@@ -222,6 +228,7 @@ def batched_self_play(
         step_limit=step_limit,
         batch_games=batch_games,
         dedupe_leaves=dedupe_leaves,
+        phase_budgets=phase_budgets,
     )
     if rust_records is not None:
         LAST_BACKEND = "rust"

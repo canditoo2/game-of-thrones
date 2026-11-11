@@ -30,6 +30,57 @@ from agot.training.selfplay import GameRecord
 #: import this module without failing.
 MODULE = "agot._core"
 
+#: Per-phase simulation caps for the stepwise driver, tuned on the batched tier.
+#:
+#: A fixed budget spends most of its leaves on Planning and Wildling-attack
+#: decisions, whose candidate Q values barely differ and whose target sits
+#: ~0.03 nats from the prior, while the rare board-changing phases keep the
+#: fixed depth. ``off`` (``None``) reproduces the fixed budget exactly, so a
+#: run that does not ask for the feature is unchanged. The caps are per
+#: *decision*: the driver divides them by ``determinizations`` exactly as it
+#: divides ``simulations``, and never goes below one simulation per candidate.
+#:
+#: Keep these numbers in step with ``PhaseBudgets::DEFAULT`` in
+#: ``rust/crates/agot-core/src/budget.rs``: a table is an override of that
+#: preset, so a phase missing here (``game_over``, which never opens a root)
+#: keeps the Rust value.
+PHASE_BUDGETS: dict[str, dict[str, int] | None] = {
+    "off": None,
+    "default": {
+        "planning": 32,
+        "wildling_attack": 16,
+        "mustering": 32,
+        "bidding": 32,
+        "action": 32,
+        "raven": 64,
+        "combat": 64,
+        "westeros": 64,
+        "westeros_choice": 64,
+        "cleanup": 64,
+    },
+}
+
+#: Values the ``--phase-budgets`` switch accepts, in CLI order.
+PHASE_BUDGET_CHOICES = ("off", "default")
+
+
+def resolve_phase_budgets(name: str | None) -> dict[str, int] | None:
+    """The ``phase_budgets`` spec table for a preset name (``None`` is ``off``).
+
+    A copy is returned so a caller cannot mutate the shared preset. Unknown
+    names raise instead of silently falling back to the fixed budget.
+    """
+    if name is None:
+        return None
+    try:
+        preset = PHASE_BUDGETS[name]
+    except KeyError as error:
+        raise ValueError(
+            f"unknown phase budget preset {name!r}; "
+            f"choose from {', '.join(PHASE_BUDGET_CHOICES)}"
+        ) from error
+    return None if preset is None else dict(preset)
+
 
 def core():
     """The extension module, or ``None`` when it is not installed."""
@@ -80,12 +131,16 @@ def spec_for(
     base_config: GameConfig | None = None,
     *,
     dedupe_leaves: bool = True,
+    phase_budgets: dict[str, int] | None = None,
 ) -> dict:
     """Translate a :class:`SelfPlayPlan` into the driver's spec mapping.
 
     ``dedupe_leaves`` is the A/B switch for exact leaf deduplication: with it
     on (the default) the driver scores bit-identical leaves once per batch and
     scatters the results back, which is exact for a pure evaluator.
+
+    ``phase_budgets`` is the per-phase cap table (see :data:`PHASE_BUDGETS`);
+    ``None`` keeps the fixed simulation budget.
     """
     base = base_config or GameConfig()
     return {
@@ -94,6 +149,7 @@ def spec_for(
         "determinizations": plan.determinizations,
         "batch_games": max(1, plan.batch_games),
         "dedupe_leaves": dedupe_leaves,
+        "phase_budgets": phase_budgets,
         "seed": plan.seed,
         "seeds": [plan.seed + index for index in range(plan.games)],
         "temperature": plan.temperature,
@@ -173,11 +229,13 @@ def self_play_records(
     *,
     base_config: GameConfig | None = None,
     dedupe_leaves: bool = True,
+    phase_budgets: dict[str, int] | None = None,
 ) -> list[GameRecord]:
     """Play ``plan.games`` games with the Rust driver and return the records.
 
     ``dedupe_leaves`` is forwarded to :func:`spec_for`; turn it off to compare
-    a run against the same leaves scored individually.
+    a run against the same leaves scored individually. ``phase_budgets`` is the
+    per-phase cap table; ``None`` keeps the fixed budget.
     """
     extension = core()
     if extension is None:  # pragma: no cover - depends on the environment
@@ -185,7 +243,12 @@ def self_play_records(
             f"{MODULE} is not installed; build it with maturin or use "
             "agot.training.selfplay.batched_self_play"
         )
-    spec = spec_for(plan, base_config, dedupe_leaves=dedupe_leaves)
+    spec = spec_for(
+        plan,
+        base_config,
+        dedupe_leaves=dedupe_leaves,
+        phase_budgets=phase_budgets,
+    )
     result = extension.selfplay(spec, leaf_evaluator(model))
     return _unpack(result, plan.games)
 
@@ -204,6 +267,7 @@ def try_batched_self_play(
     step_limit: int = 20_000,
     batch_games: int = 4,
     dedupe_leaves: bool = True,
+    phase_budgets: dict[str, int] | None = None,
 ) -> list[GameRecord] | None:
     """Run a ``batched_self_play`` request on the Rust driver, or return ``None``.
 
@@ -214,6 +278,10 @@ def try_batched_self_play(
 
     ``dedupe_leaves`` (default true) scores bit-identical leaves once per batch;
     turn it off to A/B the exactness-preserving shortcut.
+
+    ``phase_budgets`` caps the simulations a decision may spend by phase (see
+    :data:`PHASE_BUDGETS`). ``None`` is the fixed budget; the driver divides a
+    cap by ``determinizations`` exactly as it divides ``simulations``.
 
     Returns ``None`` — leaving the caller to use the Python driver — when the
     games do not share one configuration or when the evaluator is not a
@@ -271,6 +339,7 @@ def try_batched_self_play(
         "determinizations": determinizations,
         "batch_games": max(1, batch_games),
         "dedupe_leaves": dedupe_leaves,
+        "phase_budgets": phase_budgets,
         "seed": first.seed if first.seed is not None else seed,
         "seeds": game_seeds(configs, seed),
         "temperature": temperature,

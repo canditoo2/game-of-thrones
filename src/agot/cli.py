@@ -374,6 +374,7 @@ def _run_training(args: argparse.Namespace) -> int:
 
     from agot.nn.model import PolicyValueNet
     from agot.training import gate as gate_module
+    from agot.training import rust_engine
     from agot.training.checkpoint import RunLog, RunState, log_path, state_path
     from agot.training.parallel import (
         SelfPlayPlan,
@@ -504,7 +505,21 @@ def _run_training(args: argparse.Namespace) -> int:
         temperature=args.temperature,
         temperature_rounds=args.temperature_rounds,
         final_temperature=args.final_temperature,
+        phase_budgets=rust_engine.resolve_phase_budgets(args.phase_budgets),
     )
+    # The caps are per decision and divided by --determinizations like
+    # --simulations, so a run that kept the switch off is byte-identical to the
+    # fixed-budget runs before the feature.
+    if plan.phase_budgets:
+        print(
+            "phase budgets: "
+            + ", ".join(
+                f"{phase}={cap}" for phase, cap in sorted(plan.phase_budgets.items())
+            ),
+            flush=True,
+        )
+    else:
+        print("phase budgets: off (fixed budget per decision)", flush=True)
 
     if run.iteration >= args.iterations:
         print(
@@ -608,6 +623,7 @@ def _run_training(args: argparse.Namespace) -> int:
                 "seconds_train": round(seconds_train, 3),
                 "target_entropy": target_entropy,
                 "buffer_restored": buffer_restored,
+                "phase_budgets": args.phase_budgets,
                 "examples_new": sum(len(record.examples) for record in records),
                 "games": len(records),
                 "buffer": len(buffer),
@@ -1098,6 +1114,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "self-play temperature once past --temperature-rounds; the target "
             "is built from it, so 1.0 for a whole game trains on noise"
+        ),
+    )
+    train.add_argument(
+        "--phase-budgets",
+        choices=("off", "default"),
+        default="off",
+        help=(
+            "per-phase cap on the simulations one decision may spend "
+            "(default: off = today's fixed --simulations). 'default' caps "
+            "Planning/Mustering/Action/Bidding at 32, Wildling attacks at 16 and "
+            "keeps 64 for Raven/Combat/Westeros; the cap is divided by "
+            "--determinizations exactly like --simulations"
         ),
     )
     train.add_argument(

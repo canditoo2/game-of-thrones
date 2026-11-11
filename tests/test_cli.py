@@ -33,6 +33,15 @@ def test_train_gate_mode_defaults_to_inline() -> None:
     assert args.gate_mode == "inline"
 
 
+def test_train_phase_budgets_defaults_to_off() -> None:
+    """The per-phase caps are opt-in: a run without the switch is unchanged."""
+    assert build_parser().parse_args(["train"]).phase_budgets == "off"
+    args = build_parser().parse_args(["train", "--phase-budgets", "default"])
+    assert args.phase_budgets == "default"
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["train", "--phase-budgets", "bogus"])
+
+
 def test_gate_subcommand_parses_the_queue_options() -> None:
     args = build_parser().parse_args(
         [

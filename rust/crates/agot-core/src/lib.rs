@@ -16,6 +16,7 @@
 
 pub mod action;
 pub mod action_phase;
+pub mod budget;
 pub mod choices;
 pub mod combat;
 pub mod enums;
@@ -37,6 +38,7 @@ pub mod state;
 mod support_semantics;
 
 pub use action::{Action, ActionKind, Side};
+pub use budget::{decision_budget, PhaseBudgets};
 pub use combat::{
     apply_battle_result, apply_casualties, destroy_army, legal_retreats, order_modifier,
     potential_support_strength, resolve_and_apply, resolve_battle, retreat, retreat_keeps_supply,

@@ -14,6 +14,10 @@
 //!   temperature — the target the network is trained to imitate;
 //! * `determinizations > 1` gives each seat PIMC, aggregating the root visits of
 //!   that many resampled worlds;
+//! * `phase_budgets` (default `null`) caps the simulations a decision may spend
+//!   by phase, so a Planning decision stops buying leaves the target cannot use;
+//!   the cap is per decision and is divided by the determinizations exactly as
+//!   the fixed `simulations` setting is, so an existing run keeps its split;
 //! * bit-identical leaves are evaluated once per batch (`dedupe_leaves`,
 //!   default on): the driver identifies each leaf by its state row plus its
 //!   ordered action rows, scores the unique leaves, and scatters the logits
@@ -31,8 +35,9 @@ use std::sync::Arc;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyTuple};
 
+use agot_core::budget::{decision_budget, PhaseBudgets};
 use agot_core::enums::{HouseId, Phase, N_HOUSES};
 use agot_core::game::Game;
 use agot_core::leaf_dedupe::LeafDedupe;
@@ -95,6 +100,35 @@ where
     T: for<'a> FromPyObject<'a, 'py, Error = PyErr>,
 {
     Ok(spec_value::<T>(spec, key)?.unwrap_or(default))
+}
+
+/// Parse the `phase_budgets` spec key into a cap table.
+///
+/// `None` (the default when the key is absent or `null`) keeps the fixed
+/// simulation budget, which is what every existing run and test expects. A
+/// mapping such as `{"planning": 32, "wildling_attack": 16}` starts from
+/// [`PhaseBudgets::DEFAULT`] and replaces only the phases it names, so a caller
+/// spells out the ones it wants to differ. Keys are the engine's own phase
+/// names (`planning`, `wildling_attack`, ...); an unknown name is an error
+/// rather than a typo that silently does nothing.
+fn parse_phase_budgets(value: &Bound<'_, PyAny>) -> PyResult<Option<PhaseBudgets>> {
+    if value.is_none() {
+        return Ok(None);
+    }
+    let dict = value.cast::<PyDict>().map_err(|_| {
+        PyValueError::new_err(
+            "phase_budgets must be a mapping of phase name to simulation cap, or None",
+        )
+    })?;
+    let mut budgets = PhaseBudgets::DEFAULT;
+    for (key, cap) in dict.iter() {
+        let name: String = key.extract()?;
+        let phase = Phase::from_name(&name).ok_or_else(|| {
+            PyValueError::new_err(format!("unknown phase {name:?} in phase_budgets"))
+        })?;
+        budgets.set_cap(phase, cap.extract()?);
+    }
+    Ok(Some(budgets))
 }
 
 /// The temperature for a round, from a `(last_round, temperature)` schedule.
@@ -200,6 +234,12 @@ pub fn selfplay<'py>(
     // common under PIMC and across games. The evaluator is pure, so scoring
     // each unique leaf once is exact; the switch exists for A/B runs.
     let dedupe_leaves: bool = spec_or(spec, "dedupe_leaves", true)?;
+    // Per-phase caps on the simulations one decision may spend. Absent or
+    // `null` is the fixed budget, so existing specs are unchanged.
+    let phase_budgets = match spec.get_item("phase_budgets")? {
+        Some(value) => parse_phase_budgets(&value)?,
+        None => None,
+    };
     let houses: Option<Vec<String>> = spec_value(spec, "houses")?;
     let data_dir: Option<String> = spec_value(spec, "data_dir")?;
     let step_limit: u32 = spec_or(spec, "step_limit", 20_000)?;
@@ -248,7 +288,6 @@ pub fn selfplay<'py>(
         (temperature_rounds, temperature),
         (u8::MAX, final_temperature),
     ];
-    let per_world = (simulations / determinizations).max(1);
 
     let mut finished: Vec<FinishedGame> = Vec::with_capacity(games);
     for start in (0..games).step_by(batch_games) {
@@ -305,7 +344,13 @@ pub fn selfplay<'py>(
             // Advance every game to its next decision. Scripted seats decide
             // immediately (possibly several in a row); search seats open their
             // roots and wait for the shared leaf batch below.
-            let mut active: Vec<(usize, Vec<u32>)> = Vec::new();
+            //
+            // The third field is this decision's simulations *per PIMC world*:
+            // the phase budget (or `simulations` when none is set) divided by
+            // the determinizations, exactly as the fixed setting was divided
+            // before. Two games in a batch may therefore ask for different
+            // depths.
+            let mut active: Vec<(usize, Vec<u32>, u32)> = Vec::new();
             let mut acted = false;
             for slot in 0..states.len() {
                 loop {
@@ -341,7 +386,13 @@ pub fn selfplay<'py>(
                         if roots.is_empty() {
                             winners[slot] = states[slot].winner();
                         } else {
-                            active.push((slot, roots));
+                            let budget = decision_budget(
+                                phase_budgets.as_ref(),
+                                states[slot].state.phase,
+                                states[slot].legal_actions().len(),
+                                simulations,
+                            );
+                            active.push((slot, roots, (budget / determinizations).max(1)));
                         }
                         break;
                     }
@@ -398,9 +449,22 @@ pub fn selfplay<'py>(
             }
 
             // Search every world of every active game, batching the leaves.
-            for _ in 0..per_world {
+            // One pass runs one simulation on every root of every game that
+            // still has budget left, so the games with the deepest decision set
+            // the pass count and the shorter ones simply wait for them. With no
+            // phase budgets every decision has the same per-world budget, which
+            // is the fixed loop this replaced.
+            let passes = active
+                .iter()
+                .map(|(_, _, per_world)| *per_world)
+                .max()
+                .unwrap_or(0);
+            for pass in 0..passes {
                 let mut pending: Vec<(usize, Simulation)> = Vec::new();
-                for (slot, roots) in &active {
+                for (slot, roots, per_world) in &active {
+                    if pass >= *per_world {
+                        continue;
+                    }
                     for root in roots {
                         let simulation = searchers[*slot]
                             .prepare_simulation(*root)
@@ -597,7 +661,7 @@ pub fn selfplay<'py>(
             }
 
             // Aggregate the worlds, pick, record, step.
-            for (slot, roots) in &active {
+            for (slot, roots, _) in &active {
                 let observer = states[*slot].current_player();
                 let result: SearchResult = if roots.len() == 1 {
                     searchers[*slot].result_from_root(roots[0])

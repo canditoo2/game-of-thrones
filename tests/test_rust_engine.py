@@ -453,6 +453,51 @@ def test_selfplay_respects_pimc_determinizations():
     assert sum(leaves for leaves, _ in calls) > states.shape[0]
 
 
+def _scored_leaves(calls) -> int:
+    return sum(leaves for leaves, _ in calls)
+
+
+def test_selfplay_phase_budgets_cut_the_planning_search():
+    """A per-phase cap reaches the Rust driver and scores fewer leaves.
+
+    The opening Planning decision has ~45 candidates, so the candidate floor
+    keeps one simulation per candidate (46) instead of the fixed 64.
+    """
+    spec = dict(SPEC, games=1, batch_games=1, simulations=64, max_rounds=2)
+    fixed: list = []
+    core.selfplay(spec, uniform_evaluator(fixed))
+    capped: list = []
+    core.selfplay(
+        dict(spec, phase_budgets={"planning": 8}), uniform_evaluator(capped)
+    )
+    assert _scored_leaves(capped) < _scored_leaves(fixed)
+    # The caps change depth, never the opening position: the first state row is
+    # the same in both runs.
+    assert np.array_equal(capped[0][0], fixed[0][0]), "the opening state"
+
+
+def test_selfplay_phase_budgets_null_is_the_fixed_budget():
+    """`phase_budgets: null` must reproduce the old rows exactly, bit for bit."""
+    spec = dict(SPEC, games=2, batch_games=2, simulations=16)
+    absent = core.selfplay(spec, uniform_evaluator([]))
+    explicit = core.selfplay(dict(spec, phase_budgets=None), uniform_evaluator([]))
+    assert np.array_equal(absent[0], explicit[0]), "states"
+    assert np.array_equal(absent[1], explicit[1]), "actions"
+    assert np.array_equal(absent[3], explicit[3]), "policies"
+    assert list(absent[6]) == list(explicit[6]), "winners"
+    assert list(absent[7]) == list(explicit[7]), "steps"
+    # An empty table is not null: it asks for the default preset, which at 16
+    # simulations is a no-op (every cap is at or above the ceiling).
+    default = core.selfplay(dict(spec, phase_budgets={}), uniform_evaluator([]))
+    assert np.array_equal(absent[3], default[3]), "policies under a no-op preset"
+
+
+def test_selfplay_rejects_an_unknown_phase_budget():
+    spec = dict(SPEC, games=1, batch_games=1, phase_budgets={"plannning": 8})
+    with pytest.raises(ValueError, match="unknown phase"):
+        core.selfplay(spec, uniform_evaluator([]))
+
+
 # ---------------------------------------------------------------------------
 # The training-loop adapter
 # ---------------------------------------------------------------------------
