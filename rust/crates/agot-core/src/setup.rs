@@ -135,7 +135,7 @@ pub fn initial_state(data: &DataSet, config: &GameConfig, rng: &mut Rng) -> Stat
     // Neutral Force tokens defend the areas printed on them.
     for (region_id, strength) in map.neutral_forces.iter().copied() {
         state.regions[region_id.index()].neutral_force = strength;
-        state.note(format!(
+        state.note_args(format_args!(
             "neutral force {strength} placed in {}",
             map.id_of(region_id)
         ));
@@ -155,7 +155,7 @@ pub fn initial_state(data: &DataSet, config: &GameConfig, rng: &mut Rng) -> Stat
     state.wildling_threat = data.wildlings.start_threat;
 
     state.pending_planning = state.tracks[Track::IronThrone.index()].clone();
-    state.note(format!(
+    state.note_args(format_args!(
         "setup complete with {} houses",
         config.houses.len()
     ));

@@ -121,4 +121,37 @@ fn main() {
         5_900.0 / clone_state,
         12_000.0 / clone_game
     );
+
+    // A whole game, every phase: the shape the self-play driver and `agot demo`
+    // actually walk. Run twice, once with the trace switched on, so the cost of
+    // the log itself is visible instead of averaged into legal_actions.
+    for trace in [false, true] {
+        let games = 200;
+        let mut decisions = 0u64;
+        let start = Instant::now();
+        for _ in 0..games {
+            let mut child = Game::new(Arc::clone(&data), config.clone()).unwrap();
+            if trace {
+                child.state.log = Some(Vec::new());
+            }
+            let mut guard = 0;
+            while !child.is_terminal() && guard < 5_000 {
+                guard += 1;
+                let actions = child.legal_actions();
+                if actions.is_empty() {
+                    break;
+                }
+                let _ = child.step(actions[0]);
+                decisions += 1;
+            }
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        println!(
+            "full game ({:3})      {:.0} decisions/s ({} games in {:.3} s)",
+            if trace { "log on" } else { "log off" },
+            decisions as f64 / elapsed,
+            games,
+            elapsed
+        );
+    }
 }

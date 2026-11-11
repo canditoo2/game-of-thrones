@@ -159,7 +159,7 @@ impl Game {
                 if !usable || options.is_empty() {
                     let name = card["name"].as_str().unwrap_or("card").to_string();
                     self.state
-                        .note(format!("{name}: holder cannot choose; no effect"));
+                        .note_args(format_args!("{name}: holder cannot choose; no effect"));
                     self.pop_pending_westeros();
                     continue;
                 }
@@ -271,12 +271,17 @@ impl Game {
                             .order_restrictions
                             .push(crate::state::Restriction::Type(order_type));
                     }
-                    self.state
-                        .note(format!("{name}: {restricted} orders banned this round"));
+                    self.state.note_args(format_args!(
+                        "{name}: {restricted} orders banned this round"
+                    ));
                 }
             }
-            "none" => self.state.note(format!("{name}: nothing happens")),
-            other => self.state.note(format!("{name}: unknown effect {other:?}")),
+            "none" => self
+                .state
+                .note_args(format_args!("{name}: nothing happens")),
+            other => self
+                .state
+                .note_args(format_args!("{name}: unknown effect {other:?}")),
         }
         Ok(false)
     }
@@ -323,7 +328,7 @@ impl Game {
         let entered_extra_step = match picked {
             None => {
                 self.state
-                    .note(format!("{card_name}: holder chooses no effect"));
+                    .note_args(format_args!("{card_name}: holder chooses no effect"));
                 false
             }
             Some(picked) => {
@@ -332,7 +337,7 @@ impl Game {
                     .unwrap_or("card")
                     .to_string();
                 self.state
-                    .note(format!("{card_name}: holder chooses {picked_name}"));
+                    .note_args(format_args!("{card_name}: holder chooses {picked_name}"));
                 self.apply_westeros_effect(picked)?
             }
         };
@@ -361,7 +366,7 @@ impl Game {
         let track_max = self.data.wildlings.track_max;
         self.state.wildling_threat = (self.state.wildling_threat + amount).min(track_max);
         if self.state.wildling_threat >= track_max {
-            self.state.note(format!(
+            self.state.note_args(format_args!(
                 "wildling threat reached {track_max}; the wildlings attack"
             ));
             self.resolve_wildlings()?;
@@ -532,7 +537,7 @@ impl Game {
         }
         let region_text = self.data.map.id_of(region).to_string();
         self.state
-            .note(format!("{house} disbands a {unit} in {region_text}"));
+            .note_args(format_args!("{house} disbands a {unit} in {region_text}"));
         Ok(())
     }
 
@@ -832,7 +837,7 @@ impl Game {
             self.state.transfer_blade_used(previous_blade);
         }
         self.state
-            .note(format!("bids resolved for {}", track.as_str()));
+            .note_args(format_args!("bids resolved for {}", track.as_str()));
         if self.state.bid_tracks.is_empty() {
             self.resume_after_extra_step();
         }
@@ -944,7 +949,7 @@ impl Game {
             self.state.transfer_blade_used(previous_blade);
         }
         let direction = if to_top { "top" } else { "bottom" };
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "{house} moves to the {direction} of {}",
             track.as_str()
         ));
@@ -1146,7 +1151,7 @@ impl Game {
             .saturating_sub(cost);
         let destination_text = self.data.map.id_of(destination).to_string();
         self.state
-            .note(format!("{house} musters {unit} in {destination_text}"));
+            .note_args(format_args!("{house} musters {unit} in {destination_text}"));
         Ok(())
     }
 
@@ -1174,7 +1179,7 @@ impl Game {
             state.mustering_points = state.mustering_points.saturating_sub(1);
         }
         let region_text = self.data.map.id_of(region).to_string();
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "{house} upgrades a footman to {unit} in {region_text}"
         ));
         Ok(())
@@ -1227,7 +1232,7 @@ impl Game {
             second_strength: 6,
         });
         self.state
-            .note(format!("wildlings attack with strength {strength}"));
+            .note_args(format_args!("wildlings attack with strength {strength}"));
         self.state.phase = Phase::WildlingAttack;
     }
 
@@ -1365,7 +1370,7 @@ impl Game {
         } else {
             0
         };
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "wildling attack: Night's Watch {nights_watch} vs wildlings {}; {}",
             attack.strength,
             if wildlings_win {
@@ -1394,7 +1399,7 @@ impl Game {
             self.state.wildling_discard.push(card_id);
             let name = card["name"].as_str().unwrap_or("card").to_string();
             let effect = spec["effect"].as_str().unwrap_or("nothing").to_string();
-            self.state.note(format!(
+            self.state.note_args(format_args!(
                 "{name} ({branch}): {effect} for {}",
                 chosen
                     .map(|house| house.name().to_string())
@@ -2010,7 +2015,7 @@ impl Game {
             }
         }
         let region_text = self.data.map.id_of(region).to_string();
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "{house} musters at {region_text} from a Wildling reward"
         ));
     }
@@ -2025,7 +2030,7 @@ impl Game {
         let card = state.house_cards_used.pop().expect("checked non-empty");
         state.house_cards_available.push(card);
         let card_text = self.data.house_cards.card(house, card).id.clone();
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "{house} retrieves House card {card_text} from the discard"
         ));
     }
@@ -2037,7 +2042,7 @@ impl Game {
         let used: SmallVec<[CardId; 7]> = state.house_cards_used.iter().copied().collect();
         state.house_cards_available.extend(used);
         state.house_cards_used.clear();
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "{house} returns its whole House card discard to hand"
         ));
     }
@@ -2087,7 +2092,7 @@ impl Game {
             .map(|card| self.data.house_cards.card(house, *card).id.as_str())
             .collect();
         self.state
-            .note(format!("{house} discards House card(s) {names:?}"));
+            .note_args(format_args!("{house} discards House card(s) {names:?}"));
     }
 
     fn adjust_supply(&mut self, house: HouseId, delta: i16) {

@@ -470,7 +470,7 @@ impl Game {
         self.state.winner = Some(house);
         self.state.phase = Phase::GameOver;
         self.state.active_house = None;
-        self.state.note(format!("{house} wins: {reason}"));
+        self.state.note_args(format_args!("{house} wins: {reason}"));
     }
 
     // -- Planning Phase --------------------------------------------------
@@ -752,7 +752,7 @@ impl Game {
             deck.drawn = None;
         }
         let round = self.state.round;
-        self.state.note(format!("round {round} begins"));
+        self.state.note_args(format_args!("round {round} begins"));
         self.state.phase = Phase::Westeros;
         Ok(())
     }
@@ -923,7 +923,7 @@ impl Game {
         self.state.raven_used = true;
         let old_text = old_order.map(|key| key.key()).unwrap_or("none");
         let region_text = self.data.map.id_of(region_id).to_string();
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "{house} swaps {old_text} for {order} in {region_text} with the Messenger Raven"
         ));
         Ok(())
@@ -943,7 +943,7 @@ impl Game {
         }
         self.state.raven_used = true;
         let direction = if to_bottom { "bottom" } else { "top" };
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "{house} inspects the top Wildling card and returns it to the {direction}"
         ));
         Ok(())

@@ -1031,7 +1031,7 @@ fn remove_any_order(_ctx: &BattleContext, state: &mut State, map: &GameMap, hous
                 house_state.orders_placed.remove(position);
             }
         }
-        state.note(format!(
+        state.note_args(format_args!(
             "Cersei Lannister removes the {house} Order in {}",
             map.id_of(region_id)
         ));
@@ -1058,7 +1058,7 @@ fn patchface(ctx: &BattleContext, state: &mut State, cards: &HouseCardData, hous
     }
     house_state.house_cards_used.push(card);
     let name = card_name(cards, opponent, Some(card)).unwrap_or_default();
-    state.note(format!("Patchface discards {opponent}'s {name}"));
+    state.note_args(format_args!("Patchface discards {opponent}'s {name}"));
 }
 
 /// True when Robb Stark won and gets to pick the retreat of the loser.

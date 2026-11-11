@@ -542,13 +542,13 @@ impl Game {
                     victim.power = victim.power.saturating_sub(1);
                 }
                 let target_text = self.data.map.id_of(target_id).to_string();
-                self.state.note(format!(
+                self.state.note_args(format_args!(
                     "{house} pillages {target_text}: +1 power, {owner} loses 1"
                 ));
             } else {
                 let target_text = self.data.map.id_of(target_id).to_string();
                 self.state
-                    .note(format!("{house} raids {order} from {target_text}"));
+                    .note_args(format_args!("{house} raids {order} from {target_text}"));
             }
         }
         Ok(())
@@ -594,7 +594,7 @@ impl Game {
             }
             let origin_text = self.data.map.id_of(origin).to_string();
             self.state
-                .note(format!("{house} establishes control of {origin_text}"));
+                .note_args(format_args!("{house} establishes control of {origin_text}"));
         }
 
         let target = self.state.region(target_id);
@@ -651,7 +651,7 @@ impl Game {
             if self.deferred_battles {
                 self.state.deferred_battle = Some(battle);
                 self.state.pending_march = Some(PendingMarch { house, origin });
-                self.state.note(format!(
+                self.state.note_args(format_args!(
                     "{house} marches into {target_text}; the Neutral Force battle is queued"
                 ));
                 self.settle_source_control(origin);
@@ -661,7 +661,7 @@ impl Game {
             self.consume_order(house, origin);
             self.state.pending_march = None;
             self.state.phase = Phase::Combat;
-            self.state.note(format!(
+            self.state.note_args(format_args!(
                 "{house} marches into {target_text} and attacks the Neutral Force"
             ));
             if self
@@ -726,7 +726,7 @@ impl Game {
             if self.deferred_battles {
                 self.state.deferred_battle = Some(battle);
                 self.state.pending_march = Some(PendingMarch { house, origin });
-                self.state.note(format!(
+                self.state.note_args(format_args!(
                     "{house} marches into {target_text}; the battle is queued"
                 ));
                 self.settle_source_control(origin);
@@ -736,7 +736,7 @@ impl Game {
             self.consume_order(house, origin);
             self.state.pending_march = None;
             self.state.phase = Phase::Combat;
-            self.state.note(format!(
+            self.state.note_args(format_args!(
                 "{house} marches into {target_text} and attacks {defender}"
             ));
             self.settle_source_control(origin);
@@ -760,8 +760,9 @@ impl Game {
         }
         let origin_text = self.data.map.id_of(origin).to_string();
         let target_text = self.data.map.id_of(target_id).to_string();
-        self.state
-            .note(format!("{house} marches {origin_text} -> {target_text}"));
+        self.state.note_args(format_args!(
+            "{house} marches {origin_text} -> {target_text}"
+        ));
         // The order is only spent once there is nothing left to move.
         self.state.pending_march = Some(PendingMarch { house, origin });
         if self.march_actions(house, origin).is_empty() {
@@ -860,7 +861,7 @@ impl Game {
         }
         if enemy_ships > 0 {
             let port_text = self.data.map.id_of(port_id).to_string();
-            self.state.note(format!(
+            self.state.note_args(format_args!(
                 "{house} captures {port_text}, replacing {placed}/{enemy_ships} Ships"
             ));
         }
@@ -897,7 +898,7 @@ impl Game {
         // A Consolidate Power Order in a Sea area has no effect.
         if static_region.is_sea() {
             let region_text = self.data.map.id_of(region).to_string();
-            self.state.note(format!(
+            self.state.note_args(format_args!(
                 "{house}'s consolidate in {region_text} on open water: no effect"
             ));
             return Ok(());
@@ -909,7 +910,7 @@ impl Game {
                 let enemy_ships = sea.unit_count(UnitType::Ship) + sea.routed_count(UnitType::Ship);
                 if sea.controller.is_some() && sea.controller != Some(house) && enemy_ships > 0 {
                     let region_text = self.data.map.id_of(region).to_string();
-                    self.state.note(format!(
+                    self.state.note_args(format_args!(
                         "{house}'s consolidate in {region_text} cancelled by enemy ships"
                     ));
                     return Ok(());
@@ -919,7 +920,7 @@ impl Game {
         let gained = 1 + static_region.power;
         self.state.gain_power(house, gained);
         let region_text = self.data.map.id_of(region).to_string();
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "{house} consolidates in {region_text} for {gained} power"
         ));
         Ok(())
@@ -938,7 +939,7 @@ impl Game {
         self.state.return_phase = Some(Phase::Action);
         self.state.phase = Phase::Mustering;
         let region_text = self.data.map.id_of(region).to_string();
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "{house} musters in {region_text} from a Special Consolidate Power Order"
         ));
         Ok(())
@@ -1314,7 +1315,7 @@ impl Game {
         };
         let region_text = self.data.map.id_of(region).to_string();
         self.state
-            .note(format!("{house} {verb} from {region_text}"));
+            .note_args(format_args!("{house} {verb} from {region_text}"));
         Ok(())
     }
 
@@ -1330,7 +1331,7 @@ impl Game {
         }
         battle.blade_done = true;
         self.state
-            .note(format!("{house} uses the Valyrian Steel Blade"));
+            .note_args(format_args!("{house} uses the Valyrian Steel Blade"));
         Ok(())
     }
 
@@ -1374,7 +1375,7 @@ impl Game {
             let region_text = self.data.map.id_of(result.region).to_string();
             let loser = result.loser;
             self.state
-                .note(format!("{loser} destroys a {unit} in {region_text}"));
+                .note_args(format_args!("{loser} destroys a {unit} in {region_text}"));
         }
         Ok(())
     }
@@ -1493,7 +1494,7 @@ impl Game {
         // unit. They can therefore never appear in the casualty action list.
         let siege = result.context.remove_siege_engines(result.loser);
         if siege > 0 {
-            self.state.note(format!(
+            self.state.note_args(format_args!(
                 "{} Siege Engine(s) destroyed automatically in {}",
                 result.loser,
                 self.data.map.id_of(result.region)
@@ -1601,7 +1602,7 @@ impl Game {
                     },
                 },
             );
-            self.state.note(format!(
+            self.state.note_args(format_args!(
                 "{winner} may choose {loser}'s retreat with Robb Stark"
             ));
             return;
@@ -1684,7 +1685,7 @@ impl Game {
             self.capture_port(attacker, region_id);
         }
         let region_text = self.data.map.id_of(region_id).to_string();
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "battle in {region_text}: {} defeats {} ({} vs {})",
             result.winner,
             result.loser,
@@ -1781,7 +1782,7 @@ impl Game {
                 }
             }
             let target_text = self.data.map.id_of(target_id).to_string();
-            self.state.note(format!(
+            self.state.note_args(format_args!(
                 "{house} cannot destroy the Neutral Force in {target_text} ({strength} < {neutral}); march cancelled"
             ));
             return Ok(());
@@ -1799,7 +1800,7 @@ impl Game {
             self.capture_port(house, target_id);
         }
         let target_text = self.data.map.id_of(target_id).to_string();
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "{house} destroys the Neutral Force ({neutral}) in {target_text} with strength {strength}"
         ));
         Ok(())

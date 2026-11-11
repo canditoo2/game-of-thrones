@@ -998,6 +998,17 @@ impl State {
 
     /// Appends a trace line when the log is enabled.
     pub fn note(&mut self, message: String) {
+        self.note_args(format_args!("{message}"));
+    }
+
+    /// Appends a trace line built from lazy arguments.
+    ///
+    /// Search runs with `log == None`, and every step of every simulation used
+    /// to format (and allocate) the message at the call site before `note`
+    /// discovered it had nowhere to put it. `format_args!` costs a stack frame
+    /// and no allocation, so the trace stays free when nobody reads it.
+    #[inline]
+    pub fn note_args(&mut self, message: std::fmt::Arguments<'_>) {
         if let Some(log) = self.log.as_mut() {
             log.push(format!(
                 "R{} {}: {}",

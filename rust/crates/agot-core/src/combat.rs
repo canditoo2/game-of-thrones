@@ -982,7 +982,7 @@ pub fn resolve_and_apply(
     // automatically, in addition to the normal casualties.
     let siege = result.context.remove_siege_engines(result.loser);
     if siege > 0 {
-        state.note(format!(
+        state.note_args(format_args!(
             "{} Siege Engine(s) destroyed automatically in {}",
             result.loser,
             map.id_of(result.region)
@@ -1236,7 +1236,7 @@ fn retreat_attacker(
     origin: Option<RegionId>,
 ) {
     let Some(origin) = origin else {
-        state.note(format!(
+        state.note_args(format_args!(
             "{house} has no retreat from {}; army destroyed",
             map.id_of(region_id)
         ));
@@ -1244,7 +1244,7 @@ fn retreat_attacker(
     };
     let (retreaters, destroyed) = split_non_retreaters(units);
     if has_units(&destroyed) {
-        state.note(format!(
+        state.note_args(format_args!(
             "{house} Siege Engine(s) destroyed retreating from {}",
             map.id_of(region_id)
         ));
@@ -1253,7 +1253,7 @@ fn retreat_attacker(
         return;
     }
     if !can_retreat_to(state, map, origin, house, false) {
-        state.note(format!(
+        state.note_args(format_args!(
             "{house} cannot retreat to {}; army destroyed",
             map.id_of(origin)
         ));
@@ -1281,7 +1281,7 @@ fn retreat_defender(
     let naval = all_ships(units);
     let (retreaters, destroyed) = split_non_retreaters(units);
     if has_units(&destroyed) {
-        state.note(format!(
+        state.note_args(format_args!(
             "{house} Siege Engine(s) destroyed retreating from {}",
             map.id_of(region_id)
         ));
@@ -1291,7 +1291,7 @@ fn retreat_defender(
     }
     let options = legal_retreats(state, map, region_id, house, naval, attacker_origin);
     if options.is_empty() {
-        state.note(format!(
+        state.note_args(format_args!(
             "{house} has no retreat from {}; army destroyed",
             map.id_of(region_id)
         ));

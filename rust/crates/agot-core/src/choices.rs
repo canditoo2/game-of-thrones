@@ -439,7 +439,7 @@ impl Game {
                 }
                 region_state.settle_control();
                 let state_text = if routed { "routed " } else { "" };
-                self.state.note(format!(
+                self.state.note_args(format_args!(
                     "{house} destroys a {state_text}{unit} in {region:?}"
                 ));
             }
@@ -456,7 +456,7 @@ impl Game {
                     region_state.units[UnitType::Knight.index()] -= 1;
                     region_state.units[UnitType::Footman.index()] += 1;
                 }
-                self.state.note(format!(
+                self.state.note_args(format_args!(
                     "{house} replaces a Knight with a Footman in {region:?}"
                 ));
             }
@@ -473,7 +473,7 @@ impl Game {
                     region_state.units[UnitType::Footman.index()] -= 1;
                     region_state.units[UnitType::Knight.index()] += 1;
                 }
-                self.state.note(format!(
+                self.state.note_args(format_args!(
                     "{house} upgrades a Footman to a Knight in {region:?}"
                 ));
             }
@@ -522,7 +522,7 @@ impl Game {
                     target_state.house_cards_used.push(card);
                 }
                 self.set_battle_card(*target, card);
-                self.state.note(format!(
+                self.state.note_args(format_args!(
                     "{target} plays {} after Tyrion's choice",
                     card.map(|card| format!("{card:?}"))
                         .unwrap_or("no card".into())
@@ -581,7 +581,7 @@ impl Game {
                 }
                 state.house_cards_used.push(card);
                 self.state
-                    .note(format!("Patchface discards {target}'s {card:?}"));
+                    .note_args(format_args!("Patchface discards {target}'s {card:?}"));
             }
             CardChoice::MassingDiscard => {
                 let Some(card) = card else {
@@ -600,8 +600,9 @@ impl Game {
                     ));
                 }
                 state.house_cards_used.push(card);
-                self.state
-                    .note(format!("{house} discards {card:?} to Massing at Milkwater"));
+                self.state.note_args(format_args!(
+                    "{house} discards {card:?} to Massing at Milkwater"
+                ));
             }
             CardChoice::MammothRetrieve => {
                 let Some(card) = card else {
@@ -621,7 +622,7 @@ impl Game {
                     ));
                 }
                 self.state
-                    .note(format!("{house} retrieves {card:?} from the discard"));
+                    .note_args(format_args!("{house} retrieves {card:?} from the discard"));
             }
         }
         Ok(())
@@ -636,13 +637,13 @@ impl Game {
         match purpose {
             RegionChoice::QueenOrder { opponent } => {
                 self.remove_order_at(region, *opponent)?;
-                self.state.note(format!(
+                self.state.note_args(format_args!(
                     "Queen of Thorns removes {opponent}'s Order in {region:?}"
                 ));
             }
             RegionChoice::CerseiOrder { opponent } => {
                 self.remove_order_at(region, *opponent)?;
-                self.state.note(format!(
+                self.state.note_args(format_args!(
                     "Cersei Lannister removes {opponent}'s Order in {region:?}"
                 ));
             }
@@ -681,8 +682,9 @@ impl Game {
                     self.destroy_tasks(house, *count)
                 };
                 self.push_choice_tasks(tasks);
-                self.state
-                    .note(format!("The Horde Descends destroys units in {region:?}"));
+                self.state.note_args(format_args!(
+                    "The Horde Descends destroys units in {region:?}"
+                ));
             }
             RegionChoice::HordeMusterFort => {
                 let points = self.data.map.region(region).mustering;
@@ -762,7 +764,7 @@ impl Game {
                 region_state.units[unit.index()] += 1;
                 *points -= cost;
                 self.state
-                    .note(format!("{house} musters a {unit} in {destination:?}"));
+                    .note_args(format_args!("{house} musters a {unit} in {destination:?}"));
             }
             crate::action::ActionKind::Upgrade => {
                 let target = action.unit.unwrap_or(UnitType::Knight);
@@ -783,7 +785,7 @@ impl Game {
                 region_state.units[UnitType::Footman.index()] -= 1;
                 region_state.units[target.index()] += 1;
                 *points -= 1;
-                self.state.note(format!(
+                self.state.note_args(format_args!(
                     "{house} upgrades a Footman to a {target} in {region:?}"
                 ));
             }
@@ -800,7 +802,7 @@ impl Game {
         if option == 0 {
             self.push_choice_tasks(self.destroy_tasks(house, 2));
             self.state
-                .note(format!("{house} chooses to destroy 2 units"));
+                .note_args(format_args!("{house} chooses to destroy 2 units"));
             return Ok(());
         }
         // Option B: the house falls exactly two positions on its *highest*
@@ -837,8 +839,9 @@ impl Game {
                     },
                 },
             );
-            self.state
-                .note(format!("{house} chooses which highest track to fall on"));
+            self.state.note_args(format_args!(
+                "{house} chooses which highest track to fall on"
+            ));
             return Ok(());
         }
         self.apply_preemptive_track_drop(house, highest[0]);
@@ -865,8 +868,10 @@ impl Game {
         if track == Track::Fiefdoms {
             self.state.transfer_blade_used(previous_blade);
         }
-        self.state
-            .note(format!("{house} drops two positions on {}", track.as_str()));
+        self.state.note_args(format_args!(
+            "{house} drops two positions on {}",
+            track.as_str()
+        ));
     }
 
     /// Tyrion Lannister's controller decides whether to use the card.
@@ -883,7 +888,7 @@ impl Game {
     ) -> Result<(), EngineError> {
         if option == 0 {
             self.state
-                .note(format!("{house} declines to use Tyrion Lannister"));
+                .note_args(format_args!("{house} declines to use Tyrion Lannister"));
             return Ok(());
         }
         let cards = self
@@ -902,7 +907,7 @@ impl Game {
                 },
             },
         );
-        self.state.note(format!(
+        self.state.note_args(format_args!(
             "{house} uses Tyrion Lannister: {target} must play another card"
         ));
         Ok(())
@@ -924,7 +929,7 @@ impl Game {
                 battle.retreat_house = Some(loser);
             }
             self.state
-                .note(format!("{house} declines Robb Stark's retreat choice"));
+                .note_args(format_args!("{house} declines Robb Stark's retreat choice"));
             return Ok(());
         }
         let retreaters: [u8; 4] = self
@@ -957,7 +962,7 @@ impl Game {
             battle.retreat_house = Some(house);
         }
         self.state
-            .note(format!("{house} chooses the retreat for {loser}"));
+            .note_args(format_args!("{house} chooses the retreat for {loser}"));
         Ok(())
     }
 
