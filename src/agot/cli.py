@@ -22,6 +22,7 @@ import argparse
 import json
 import math
 import os
+import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -33,6 +34,11 @@ from agot.engine.game import DEFAULT_HOUSES, Game, GameConfig
 #: validates the same names; ``tests/test_onnx_backend.py`` pins the two lists
 #: together so they cannot drift.
 LEAF_BACKENDS = ("torch", "onnx-int8", "onnx-fp32")
+
+#: ``auto`` is a CLI-only alias that resolves to a concrete engine before it
+#: reaches a spec, so nothing downstream (a checkpoint, a gate, a replay) ever
+#: records an ambiguous name.
+LEAF_BACKEND_CHOICES = ("auto", *LEAF_BACKENDS)
 
 #: Loaded networks, keyed by checkpoint path. A gauntlet builds a fresh policy
 #: per seat per game, so the checkpoint is loaded once and the model shared.
@@ -152,6 +158,9 @@ def cmd_play(args: argparse.Namespace) -> int:
 
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
+    from agot.training import rust_engine
+
+    args.leaf_backend = rust_engine.resolve_leaf_backend(args.leaf_backend)
     config = GameConfig(
         seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True, deferred_battles=True
     )
@@ -206,6 +215,9 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 
 def cmd_gauntlet(args: argparse.Namespace) -> int:
     """Measure one candidate's single-seat win rate against a field."""
+    from agot.training import rust_engine
+
+    args.leaf_backend = rust_engine.resolve_leaf_backend(args.leaf_backend)
     names = [name for name in args.opponents.split(",") if name]
     config = GameConfig(
         seed=args.seed, max_rounds=args.max_rounds, sequential_westeros=True, deferred_battles=True
@@ -325,7 +337,9 @@ def cmd_round_robin(args: argparse.Namespace) -> int:
 def cmd_gate(args: argparse.Namespace) -> int:
     """Play queued deferred gate candidates in resumable chunks."""
     from agot.training import gate as gate_module
+    from agot.training import rust_engine
 
+    args.leaf_backend = rust_engine.resolve_leaf_backend(args.leaf_backend)
     checkpoint = Path(args.checkpoint)
     try:
         shard = gate_module.parse_shard(args.shard) if args.shard else None
@@ -375,7 +389,30 @@ def cmd_train(args: argparse.Namespace) -> int:
             "    pip install -e \".[rl]\""
         )
         return 1
+    from agot.training import rust_engine
+
+    args.leaf_backend = rust_engine.resolve_leaf_backend(args.leaf_backend)
     return _run_training(args)
+
+
+def _warm_optimizer_runtime() -> None:
+    """Import ``torch._dynamo`` in the background.
+
+    Building the first ``torch.optim`` optimizer imports ``torch._dynamo`` (the
+    optimizer classes are wrapped by ``torch._compile._disable_dynamo``), which
+    measured ~1.5 s on this machine. The trainer builds its optimizer only after
+    the first self-play round, so the import runs during the games instead of
+    blocking startup. A failure is harmless: the optimizer import does the same
+    work later, on the critical path, exactly as before.
+    """
+
+    def warm() -> None:
+        try:
+            import torch._dynamo  # noqa: F401, PLC0415 - optional, warmed on purpose
+        except Exception:  # pragma: no cover - a broken dynamo install is not fatal
+            pass
+
+    threading.Thread(target=warm, name="agot-warm-optimizer", daemon=True).start()
 
 
 def _run_training(args: argparse.Namespace) -> int:
@@ -393,6 +430,10 @@ def _run_training(args: argparse.Namespace) -> int:
     )
     from agot.training.replay import ReplayBuffer
     from agot.training.trainer import TrainConfig, Trainer
+
+    # torch._dynamo is imported by the first optimizer, not by `import torch`.
+    # Start that off the critical path before anything else happens.
+    _warm_optimizer_runtime()
 
     if args.gate_mode == "deferred" and args.gate_games <= 0:
         raise SystemExit(
@@ -465,11 +506,15 @@ def _run_training(args: argparse.Namespace) -> int:
             )
 
     run = RunState()
+    pending_trainer_state = None
     if args.resume:
         resumed = RunState.load(state_path(args.resume))
         if resumed is not None:
             run = resumed
-            trainer.load_state_dict(run.trainer)
+            # Applied just before the first training pass: loading the Adam
+            # moments builds the optimizer, and that is exactly the import the
+            # warm thread is paying for during self-play.
+            pending_trainer_state = run.trainer
             print(
                 f"resumed {args.resume} at iter {run.iteration} "
                 f"(best={run.best_rate:.3f}); replay buffer "
@@ -584,10 +629,11 @@ def _run_training(args: argparse.Namespace) -> int:
                     break
             plan.seed = args.seed + iteration * 100_000
             model.to("cpu")
-            # The checkpoint on disk always holds these weights (save() runs at
-            # the end of every iteration), so the workers can share one graph.
-            if checkpoint.exists():
-                _prepare_leaf_graph(model, checkpoint, args.leaf_backend)
+            # Export once in the parent so every worker gets a cache hit. The
+            # graph key covers the weights, not just the checkpoint file, so this
+            # is also correct for the first iteration of a fresh run, when the
+            # checkpoint does not exist yet.
+            _prepare_leaf_graph(model, checkpoint, args.leaf_backend)
             selfplay_started = time.time()
             records = parallel_self_play(
                 model, plan, base_config=config, executor=executor
@@ -619,6 +665,9 @@ def _run_training(args: argparse.Namespace) -> int:
             # The search and its leaf batches stay on CPU; only the gradient
             # pass moves to the GPU.
             model.to(device)
+            if pending_trainer_state is not None:
+                trainer.load_state_dict(pending_trainer_state)
+                pending_trainer_state = None
             train_started = time.time()
             history = trainer.train(buffer)
             seconds_train = time.time() - train_started
@@ -626,7 +675,9 @@ def _run_training(args: argparse.Namespace) -> int:
             model.to("cpu")
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             model.save(str(checkpoint))
-            _prepare_leaf_graph(model, checkpoint, args.leaf_backend)
+            # No graph preparation here: the next iteration exports once, right
+            # before the games, from exactly these weights. Doing it in both
+            # places exported the same graph twice per iteration.
             line = (
                 f"iter {iteration + 1}/{args.iterations} "
                 f"games={len(records)} buffer={len(buffer)} "
@@ -909,19 +960,21 @@ def build_parser() -> argparse.ArgumentParser:
     def add_leaf_backend(
         target: argparse.ArgumentParser,
         *,
-        default: str | None = "torch",
+        default: str | None = "auto",
         help_text: str | None = None,
     ) -> None:
         target.add_argument(
             "--leaf-backend",
-            choices=list(LEAF_BACKENDS),
+            choices=list(LEAF_BACKEND_CHOICES),
             default=default,
             help=help_text
             or (
-                "inference engine for the network's leaf batches: torch (default) "
-                "or an ONNX Runtime graph, fp32 or dynamically quantized int8, "
-                "cached beside the checkpoint. int8 is ~2x faster per leaf at "
-                "the cost of a ~5e-4 nat policy KL"
+                "inference engine for the network's leaf batches: auto (default) "
+                "picks the ONNX Runtime float32 graph when the onnx extra is "
+                "installed and falls back to torch; torch and the ONNX graphs "
+                "(fp32 or dynamically quantized int8, cached beside the "
+                "checkpoint) can also be forced. int8 is ~2x faster than fp32 per "
+                "leaf at the cost of a ~5e-4 nat policy KL"
             ),
         )
 

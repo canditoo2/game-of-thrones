@@ -85,6 +85,34 @@ def resolve_phase_budgets(name: str | None) -> dict[str, int] | None:
 #: optional ``onnx`` extra and cache their graph beside the checkpoint.
 LEAF_BACKENDS = ("torch", "onnx-int8", "onnx-fp32")
 
+#: What ``--leaf-backend auto`` means when the optional extra is installed. The
+#: float32 graph is the numerically faithful one (same logits as the torch
+#: closure up to round-off), so making it the default costs nothing in the
+#: learning signal while still being 1.5-2x faster on the small leaf batches
+#: that gate, evaluate and the tiny training runs use.
+AUTO_LEAF_BACKEND = "onnx-fp32"
+
+
+def onnx_runtime_available() -> bool:
+    """Whether the optional ONNX stack (runtime *and* exporter) is importable."""
+    try:
+        import onnx  # noqa: F401, PLC0415 - optional dependency probe
+        import onnxruntime  # noqa: F401, PLC0415 - optional dependency probe
+    except Exception:  # pragma: no cover - depends on the environment
+        return False
+    return True
+
+
+def resolve_leaf_backend(backend: str | None) -> str | None:
+    """Turn ``auto`` into a concrete engine, leaving every other value alone.
+
+    ``None`` stays ``None``: for ``agot gate`` it means "use whatever the run
+    being judged used", which is not a decision this helper can make.
+    """
+    if backend != "auto":
+        return backend
+    return AUTO_LEAF_BACKEND if onnx_runtime_available() else "torch"
+
 
 def core():
     """The extension module, or ``None`` when it is not installed."""

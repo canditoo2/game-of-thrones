@@ -142,7 +142,14 @@ class PolicyValueNet(nn.Module):
         Returns flat ``(T,)`` logits and ``(B, n_houses)`` values. The caller
         normalises each segment, because the policy is a distribution over one
         leaf's actions only (see :func:`segment_softmax`).
+
+        Under ``torch.inference_mode()`` this dispatches to the scored path in
+        :meth:`_forward_packed_inference`, which is the same arithmetic with the
+        weights pre-transposed once and one call per matmul instead of a module
+        per matmul. Training keeps the module path so gradients flow.
         """
+        if not torch.is_grad_enabled():
+            return self._forward_packed_inference(state, actions, index)
         h = self.state_trunk(state)  # (B, H)
         a = self.action_trunk(actions)  # (T, H)
         first = self.policy_head[0]
@@ -163,6 +170,71 @@ class PolicyValueNet(nn.Module):
             pooled = pooled / counts.clamp_min(1.0).unsqueeze(1)
             h = self.value_merge(torch.cat([h, pooled], dim=-1))
         return logits, self.value_head(h)
+
+    def _packed_weights(self) -> dict[str, torch.Tensor]:
+        """The inference copies of the weights, rebuilt when they change.
+
+        A leaf batch is 1-16 rows, so the per-call cost is dominated by the
+        number of dispatch round-trips rather than by arithmetic. Pre-transposing
+        the matrices once (and calling ``addmm``/``mm`` directly) removes the
+        ``nn.Linear`` wrapper from every one of them. The cache is keyed on each
+        parameter's identity and in-place version, so an optimizer step or a
+        ``load_state_dict`` invalidates it without the trainer telling us.
+        """
+        key = tuple((p.data_ptr(), p._version) for p in self.parameters())
+        cached = getattr(self, "_packed_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        first, head = self.policy_head[0], self.policy_head[2]
+        weights = {
+            "state": _trunk_weights(self.state_trunk),
+            "action": _trunk_weights(self.action_trunk),
+            "ps": first.weight[:, : self.hidden].t().contiguous(),
+            "pa": first.weight[:, self.hidden :].t().contiguous(),
+            "pb": first.bias,
+            "p2": head.weight.t().contiguous(),
+            "p2b": head.bias,
+            "value": _trunk_weights(self.value_head),
+        }
+        if self.value_context:
+            weights["vm"] = self.value_merge.weight.t().contiguous()
+            weights["vmb"] = self.value_merge.bias
+        self._packed_cache = (key, weights)
+        return weights
+
+    def _apply(self, fn, recurse: bool = True):  # noqa: D102 - torch hook
+        # Any device/dtype move rebuilds the parameters, so the pre-transposed
+        # inference copies must be rebuilt too.
+        self._packed_cache = None
+        return super()._apply(fn, recurse)
+
+    def _forward_packed_inference(
+        self,
+        state: torch.Tensor,
+        actions: torch.Tensor,
+        index: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``forward_packed`` for scoring: same maths, one call per matmul."""
+        w = self._packed_weights()
+        h = _run_trunk(w["state"], state)  # (B, H)
+        a = _run_trunk(w["action"], actions)  # (T, H)
+        state_part = torch.addmm(w["pb"], h, w["ps"])
+        action_part = torch.mm(a, w["pa"])
+        logits = torch.add(state_part[index], action_part).relu_()
+        logits = torch.addmm(w["p2b"], logits, w["p2"]).squeeze(-1)
+        if self.value_context:
+            # Mean of each row's candidate embeddings: the only place the two
+            # region blocks reach the value head.
+            pooled = torch.zeros(
+                h.size(0), h.size(1), dtype=a.dtype, device=a.device
+            ).index_add_(0, index, a)
+            counts = torch.zeros(h.size(0), dtype=a.dtype, device=a.device)
+            counts = counts.index_add_(0, index, torch.ones_like(index, dtype=a.dtype))
+            pooled = pooled / counts.clamp_min(1.0).unsqueeze(1)
+            h = torch.addmm(w["vmb"], torch.cat([h, pooled], dim=-1), w["vm"])
+        return logits, _run_trunk(w["value"], h)
+
+
 
     # -- inference helpers ----------------------------------------------
 
@@ -339,6 +411,45 @@ def _mlp(input_dim: int, hidden: int, layers: int) -> nn.Sequential:
         modules += [nn.Linear(current, hidden), nn.ReLU()]
         current = hidden
     return nn.Sequential(*modules)
+
+
+def _trunk_weights(
+    sequence: nn.Sequential,
+) -> list[tuple[torch.Tensor, torch.Tensor | None, str | None]]:
+    """``[(weight.T, bias, activation)]`` for a Linear/activation stack.
+
+    The activation is the module that *follows* each ``Linear``, which is how
+    both :func:`_mlp` and the fixed heads are built. Pre-transposing here is what
+    lets the scoring path call ``addmm`` directly instead of going through a
+    module wrapper per layer.
+    """
+    modules = list(sequence)
+    pairs: list[tuple[torch.Tensor, torch.Tensor | None, str | None]] = []
+    for position, module in enumerate(modules):
+        if not isinstance(module, nn.Linear):
+            continue
+        following = modules[position + 1] if position + 1 < len(modules) else None
+        activation = None
+        if isinstance(following, nn.ReLU):
+            activation = "relu"
+        elif isinstance(following, nn.Tanh):
+            activation = "tanh"
+        pairs.append((module.weight.t().contiguous(), module.bias, activation))
+    return pairs
+
+
+def _run_trunk(
+    pairs: list[tuple[torch.Tensor, torch.Tensor | None, str | None]],
+    value: torch.Tensor,
+) -> torch.Tensor:
+    """Apply a stack built by :func:`_trunk_weights`."""
+    for weight, bias, activation in pairs:
+        value = torch.addmm(bias, value, weight) if bias is not None else torch.mm(value, weight)
+        if activation == "relu":
+            value = value.relu_()
+        elif activation == "tanh":
+            value = value.tanh_()
+    return value
 
 
 class NeuralEvaluator:

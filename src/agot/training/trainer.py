@@ -215,11 +215,23 @@ class Trainer:
         self.config = config or TrainConfig()
         self.device = self.config.device
         self.model.to(self.device)
-        self.optimizer = torch.optim.AdamW(
-            _parameter_groups(self.model, self.config.weight_decay),
-            lr=self.config.learning_rate,
-        )
+        #: Built on first use. Constructing any ``torch.optim`` optimizer
+        #: imports ``torch._dynamo`` on the first call (the optimizer classes
+        #: are wrapped by ``torch._compile._disable_dynamo``), which costs about
+        #: 1.5 s. The training loop builds the first optimizer only after the
+        #: first self-play round, so ``agot.cli`` warms that import in a thread
+        #: while the games are being played instead of blocking startup on it.
+        self._optimizer: torch.optim.Optimizer | None = None
         self.rng = np.random.default_rng(0)
+
+    @property
+    def optimizer(self) -> torch.optim.Optimizer:
+        if self._optimizer is None:
+            self._optimizer = torch.optim.AdamW(
+                _parameter_groups(self.model, self.config.weight_decay),
+                lr=self.config.learning_rate,
+            )
+        return self._optimizer
 
     # -- persistence -----------------------------------------------------
 
@@ -240,7 +252,6 @@ class Trainer:
             self.optimizer.load_state_dict(state["optimizer"])
         if "rng" in state:
             self.rng.bit_generator.state = state["rng"]
-
     def train_epoch(self, examples: Sequence[Example]) -> TrainStats:
         if not examples:
             return TrainStats()
