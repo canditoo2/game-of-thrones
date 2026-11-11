@@ -5,13 +5,14 @@ rules engine, search and encoder (`rust/`) behind a thin Python facade, an optio
 scorer network (`nn/`) and the self-play training loop (`training/`). Everything is driven by
 the `agot` CLI.
 
-**Current direction (2026-10-29):** the next Colab run is **`run5`** (checkpoints under
-`/content/drive/MyDrive/agot/run5`), on code commit `9443761`: first-play value from the seen
-children, raw-visit policy targets, a value head that also reads the candidate actions, the
-neutral-support legality fix and a 200-game gate. This PC remains the build-and-verify machine
-and must not start heavy runs unless asked. `run4` is the pre-fix baseline (60 iterations, policy
-loss 1.98 -> 0.62, gate never promoted; its final beat the gate best 119-81). Watch the policy
-target's entropy and the gate trend, not the policy loss alone.
+**Current direction (2026-11-11):** the next Colab run is **`run6`** (checkpoints under
+`/content/drive/MyDrive/agot/run6`). The notebook launches `--simulations 128
+--determinizations 1 --phase-budgets default --leaf-backend onnx-int8 --games 64
+--batch-games 16 --buffer 80000 --gate-games 120 --gate-mode deferred`. The single PIMC
+world is exact (the two determinizations encode bit-identically), the phase caps cut scored
+rows by ~40%, and ONNX int8 cuts the leaf forward 2.6x. This PC remains the build-and-verify
+machine and must not start heavy runs unless asked. `run5` reached 105 iterations and is the
+warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also valid.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
