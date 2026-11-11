@@ -405,17 +405,6 @@ def test_selfplay_returns_packed_examples():
         assert 1 <= outcomes.shape[1]
 
 
-def test_selfplay_can_record_the_played_action_index():
-    """`record_chosen` appends one index per example and keeps the old arity off."""
-    result = core.selfplay(dict(SPEC, record_chosen=True), uniform_evaluator([]))
-    assert len(result) == 11
-    offsets = result[2]
-    chosen = result[10]
-    assert chosen.shape == (result[0].shape[0],)
-    for index in range(len(offsets) - 1):
-        assert 0 <= chosen[index] < offsets[index + 1] - offsets[index]
-
-
 def test_selfplay_batches_the_network_calls():
     """The point of the batch tier: many leaves per call, not one per decision."""
     calls: list = []

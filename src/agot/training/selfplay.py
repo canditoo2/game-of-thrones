@@ -154,26 +154,6 @@ def _evaluate_leaves(
     return batch(requests)
 
 
-def _records_chosen(evaluator) -> bool:
-    """Whether the evaluator's model trains a Q head.
-
-    Only then is the played action index worth recording: a run without the
-    head would otherwise change its replay snapshots for no benefit, and a
-    buffer forbids mixing records with and without the index.
-    """
-    return bool(getattr(getattr(evaluator, "model", None), "q_head", False))
-
-
-def _chosen_index(actions, action) -> int:
-    """Position of ``action`` in ``actions``, with a readable failure."""
-    try:
-        return list(actions).index(action)
-    except ValueError as error:  # pragma: no cover - defensive
-        raise RuntimeError(
-            f"policy played an action the observation did not offer: {action!r}"
-        ) from error
-
-
 def batched_self_play(
     evaluator,
     configs: list[GameConfig],
@@ -234,9 +214,6 @@ def batched_self_play(
     :func:`agot.training.rust_engine.leaf_evaluator` through the Rust driver: an
     ONNX graph is cached at ``leaf_checkpoint`` and scored with ``leaf_threads``
     intra-op threads (1 by default — this function drives one process).
-    When the evaluator's model has ``q_head`` enabled, every recorded example
-    also carries the index of the action that was actually played. Runs without
-    the head record ``None`` and their data files are unchanged.
     """
     # Fast path: when the Rust extension is installed and the request needs
     # nothing it does not implement, the whole game runs natively and only the
@@ -245,7 +222,6 @@ def batched_self_play(
     from agot.training import rust_engine
 
     global LAST_BACKEND
-    record_chosen = _records_chosen(evaluator)
     rust_records = rust_engine.try_batched_self_play(
         evaluator,
         configs,
@@ -263,7 +239,6 @@ def batched_self_play(
         leaf_backend=leaf_backend,
         leaf_checkpoint=leaf_checkpoint,
         leaf_threads=leaf_threads,
-        record_chosen=record_chosen,
     )
     if rust_records is not None:
         LAST_BACKEND = "rust"
@@ -393,11 +368,6 @@ def batched_self_play(
                         policy=target.astype("float32"),
                         player=HOUSE_ORDER.index(house),
                         outcome=None,  # type: ignore[arg-type]  # filled below
-                        chosen=(
-                            _chosen_index(observation.actions, action)
-                            if record_chosen
-                            else None
-                        ),
                     )
                 )
             game.step(action)

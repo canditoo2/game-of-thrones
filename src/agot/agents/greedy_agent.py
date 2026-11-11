@@ -104,25 +104,15 @@ class GreedyPolicy(Policy):
         actions = game.legal_actions()
         if not actions:  # pragma: no cover - defensive
             raise RuntimeError("no legal actions to choose from")
-        scores = self.scores(game, actions)
+        scores = np.array(
+            [self._score(game, action) for action in actions], dtype=np.float64
+        )
         if self.noise:
             scores += np.array(
                 [self.rng.uniform(-self.noise, self.noise) for _ in actions]
             )
         best = int(np.argmax(scores))
         return actions[best], one_hot_target(best, len(actions))
-
-    def scores(self, game: Game, actions=None) -> np.ndarray:
-        """Raw deterministic heuristic score for every candidate.
-
-        Exposed so the planning teacher can turn the same yardstick into a
-        target distribution. Noise is deliberately *not* added here: it exists
-        to break ties during play, not to blur the labels.
-        """
-        actions = game.legal_actions() if actions is None else list(actions)
-        return np.array(
-            [self._score(game, action) for action in actions], dtype=np.float64
-        )
 
     # -- scoring ---------------------------------------------------------
 

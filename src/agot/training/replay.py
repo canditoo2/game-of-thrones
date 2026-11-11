@@ -2,9 +2,7 @@
 
 One :class:`Example` is a single decision point: the encoded position, the
 encoded candidate actions, the search's target distribution over them, which
-house was acting, and the final game outcome (a per-house reward vector). It
-optionally carries the index of the action that was actually played, which the
-Q head trains on; a buffer refuses to mix examples with and without it.
+house was acting, and the final game outcome (a per-house reward vector).
 
 The buffer is a *structure of arrays*, not a list of objects: positions,
 players and outcomes are dense rows, while the variable-length candidates of
@@ -33,10 +31,6 @@ class Example:
     policy: np.ndarray  # (N,)
     player: int  # index into HOUSE_ORDER
     outcome: np.ndarray  # (N_HOUSES,)
-    #: Index into ``actions`` of the action that was actually played, or
-    #: ``None`` when the producer did not record it. The optional Q head needs
-    #: it to train on the played action's outcome rather than the whole set.
-    chosen: int | None = None
 
     @property
     def value(self) -> float:
@@ -58,11 +52,6 @@ class ReplayBuffer:
         self._players = np.zeros((0,), dtype=np.int64)
         self._outcomes = np.zeros((0, N_HOUSES), dtype=np.float32)
         self._offsets = np.zeros((1,), dtype=np.int64)
-        #: Played-action indices, valid only when :attr:`_has_chosen` is set.
-        #: A buffer never mixes the two modes: a missing index would silently
-        #: train the Q head on a different action than the one played.
-        self._chosen = np.zeros((0,), dtype=np.int64)
-        self._has_chosen = False
 
     # -- sizing ----------------------------------------------------------
 
@@ -72,7 +61,7 @@ class ReplayBuffer:
         target = min(self.capacity, max(count, max(1024, len(self._states) * 2)))
         if target <= len(self._states):
             return
-        for name in ("_states", "_players", "_outcomes", "_chosen"):
+        for name in ("_states", "_players", "_outcomes"):
             array = getattr(self, name)
             grown = np.zeros((target, *array.shape[1:]), dtype=array.dtype)
             grown[: len(array)] = array
@@ -102,14 +91,11 @@ class ReplayBuffer:
         self._states[:keep] = self._states[drop : self._size]
         self._players[:keep] = self._players[drop : self._size]
         self._outcomes[:keep] = self._outcomes[drop : self._size]
-        self._chosen[:keep] = self._chosen[drop : self._size]
         self._actions[: row_end - row_start] = self._actions[row_start:row_end]
         self._policies[: row_end - row_start] = self._policies[row_start:row_end]
         self._offsets[1 : keep + 1] = self._offsets[drop + 1 : self._size + 1] - row_start
         self._size = keep
         self._rows = row_end - row_start
-        if keep == 0:
-            self._has_chosen = False
 
     # -- basic API -------------------------------------------------------
 
@@ -125,26 +111,10 @@ class ReplayBuffer:
         return self._example(index)
 
     def add(self, example: Example) -> None:
-        count = len(example.actions)
-        chosen = example.chosen
-        if chosen is not None:
-            if not 0 <= chosen < count:
-                raise ValueError(
-                    f"chosen index {chosen} is outside an action set of {count}"
-                )
-            if self._size and not self._has_chosen:
-                raise ValueError(
-                    "cannot add an example with a chosen action to a buffer "
-                    "that already holds examples without one"
-                )
-        elif self._size and self._has_chosen:
-            raise ValueError(
-                "cannot add an example without a chosen action to a buffer "
-                "that already holds examples with one"
-            )
         if self._size >= self.capacity:
             self._drop_oldest()
         self._ensure_examples(self._size + 1)
+        count = len(example.actions)
         self._ensure_rows(self._rows + count)
 
         row = self._size
@@ -154,11 +124,6 @@ class ReplayBuffer:
         self._policies[start : start + count] = example.policy
         self._players[row] = example.player
         self._outcomes[row] = example.outcome
-        if chosen is not None:
-            self._has_chosen = True
-            self._chosen[row] = chosen
-        elif self._has_chosen:  # pragma: no cover - rejected above
-            self._chosen[row] = -1
         self._offsets[row + 1] = start + count
         self._size += 1
         self._rows = start + count
@@ -176,7 +141,6 @@ class ReplayBuffer:
             policy=self._policies[start:stop],
             player=int(self._players[index]),
             outcome=self._outcomes[index],
-            chosen=int(self._chosen[index]) if self._has_chosen else None,
         )
 
     def sample(self, batch_size: int, rng: np.random.Generator) -> list[Example]:
@@ -193,7 +157,6 @@ class ReplayBuffer:
         self._size = 0
         self._rows = 0
         self._offsets[0] = 0
-        self._has_chosen = False
 
     # -- persistence -----------------------------------------------------
 
@@ -208,19 +171,15 @@ class ReplayBuffer:
             if self._size
             else np.zeros((0, N_HOUSES), dtype=np.float32)
         )
-        arrays = {
-            "states": states,
-            "actions": np.asarray(self._actions[: self._rows], dtype=np.float32),
-            "offsets": self._offsets[: self._size + 1].astype(np.int64),
-            "policies": np.asarray(self._policies[: self._rows], dtype=np.float32),
-            "players": self._players[: self._size].astype(np.int64),
-            "outcomes": outcomes.astype(np.float32),
-        }
-        if self._has_chosen:
-            # Omitted entirely when the run does not train a Q head, so its
-            # snapshot stays byte-compatible with earlier files.
-            arrays["chosen"] = self._chosen[: self._size].astype(np.int64)
-        np.savez_compressed(path, **arrays)
+        np.savez_compressed(
+            path,
+            states=states,
+            actions=np.asarray(self._actions[: self._rows], dtype=np.float32),
+            offsets=self._offsets[: self._size + 1].astype(np.int64),
+            policies=np.asarray(self._policies[: self._rows], dtype=np.float32),
+            players=self._players[: self._size].astype(np.int64),
+            outcomes=outcomes.astype(np.float32),
+        )
 
     @classmethod
     def load(cls, path: str, capacity: int | None = None) -> ReplayBuffer:
@@ -231,7 +190,6 @@ class ReplayBuffer:
             policies = data["policies"]
             players = data["players"]
             outcomes = data["outcomes"]
-            chosen = data["chosen"] if "chosen" in data.files else None
             # Older files stored one object array per example in `policies`;
             # current files store one flat float32 vector.
             legacy = policies.dtype == object
@@ -248,9 +206,6 @@ class ReplayBuffer:
                         policy=np.asarray(policy, dtype=np.float32),
                         player=int(players[index]),
                         outcome=outcomes[index],
-                        chosen=(
-                            int(chosen[index]) if chosen is not None else None
-                        ),
                     )
                 )
             return buffer

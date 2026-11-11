@@ -6,18 +6,6 @@ The training objective is the AlphaZero one, generalised to six players:
   actions and the search's target distribution;
 * value: mean-squared error between the network's per-house prediction and the
   final outcome vector, masked to the houses actually in the game.
-
-Two optional terms exist for the planning problem, where the state vector does
-not describe the board and the value head cannot rank the candidate orders:
-
-* Q: mean-squared error between the optional per-candidate Q head's prediction
-  for the *played* action and the final outcome vector (requires a model with
-  ``q_head`` and examples that carry ``chosen``);
-* teacher: cross-entropy on a separate set of greedy planning examples, mixed
-  into each mini-batch at ``auxiliary_rate`` with ``auxiliary_weight``.
-
-Both are off unless their inputs are present, so a default run computes the
-same two losses as before.
 """
 
 from __future__ import annotations
@@ -47,11 +35,6 @@ class TrainConfig:
     weight_decay: float = 1e-4
     grad_clip: float = 1.0
     device: str = "cpu"
-    #: Weight of the per-candidate Q loss. Only used when the model has a Q head
-    #: and the batch carries played-action indices.
-    q_weight: float = 0.5
-    #: Weight of the planning-teacher cross-entropy on the auxiliary examples.
-    auxiliary_weight: float = 0.3
 
 
 @dataclass
@@ -71,9 +54,6 @@ class PackedBatch:
     outcome: torch.Tensor
     outcome_mask: torch.Tensor
     rows: int
-    #: Played-action index per example row, or ``None`` when the data was
-    #: recorded without one. Never partially filled; see :func:`collate_packed`.
-    chosen: torch.Tensor | None = None
 
     def to(self, device: str) -> PackedBatch:
         return PackedBatch(
@@ -84,7 +64,6 @@ class PackedBatch:
             outcome=self.outcome.to(device),
             outcome_mask=self.outcome_mask.to(device),
             rows=self.rows,
-            chosen=None if self.chosen is None else self.chosen.to(device),
         )
 
 
@@ -98,7 +77,6 @@ class Batch:
     policy: torch.Tensor
     outcome: torch.Tensor
     outcome_mask: torch.Tensor
-    chosen: torch.Tensor | None = None
 
     def to(self, device: str) -> Batch:
         return Batch(
@@ -108,7 +86,6 @@ class Batch:
             policy=self.policy.to(device),
             outcome=self.outcome.to(device),
             outcome_mask=self.outcome_mask.to(device),
-            chosen=None if self.chosen is None else self.chosen.to(device),
         )
 
 
@@ -135,30 +112,6 @@ def _parameter_groups(model: nn.Module, weight_decay: float) -> list[dict]:
         {"params": decayed, "weight_decay": weight_decay},
         {"params": undecayed, "weight_decay": 0.0},
     ]
-
-
-def _chosen_column(examples: list[Example]) -> torch.Tensor | None:
-    """The played-action indices as a column, or ``None`` for a legacy batch.
-
-    A batch is never allowed to mix the two: half the rows would train the Q
-    head on the played action and half would silently train it on nothing.
-    """
-    values = [example.chosen for example in examples]
-    present = sum(value is not None for value in values)
-    if present == 0:
-        return None
-    if present != len(values):
-        raise ValueError(
-            "cannot mix examples with and without a chosen action in one batch"
-        )
-    for index, example in enumerate(examples):
-        chosen = example.chosen
-        if not 0 <= int(chosen) < len(example.actions):  # type: ignore[arg-type]
-            raise ValueError(
-                f"example {index}: chosen index {chosen} is outside an action "
-                f"set of {len(example.actions)}"
-            )
-    return torch.tensor(values, dtype=torch.int64)
 
 
 def collate(examples: list[Example]) -> Batch:
@@ -191,9 +144,7 @@ def collate(examples: list[Example]) -> Batch:
             (np.asarray(example.outcome) != 0).astype(np.float32)
         )
 
-    return Batch(
-        state, actions, mask, policy, outcome, outcome_mask, _chosen_column(examples)
-    )
+    return Batch(state, actions, mask, policy, outcome, outcome_mask)
 
 
 def collate_packed(examples: list[Example]) -> PackedBatch:
@@ -229,16 +180,7 @@ def collate_packed(examples: list[Example]) -> PackedBatch:
         )
         cursor += count
 
-    return PackedBatch(
-        state,
-        actions,
-        index,
-        policy,
-        outcome,
-        outcome_mask,
-        size,
-        _chosen_column(examples),
-    )
+    return PackedBatch(state, actions, index, policy, outcome, outcome_mask, size)
 
 
 @dataclass
@@ -248,8 +190,6 @@ class TrainStats:
     batches: int = 0
     policy_loss: float = 0.0
     value_loss: float = 0.0
-    q_loss: float = 0.0
-    auxiliary_loss: float = 0.0
     total_loss: float = 0.0
     extras: dict = field(default_factory=dict)
 
@@ -259,8 +199,6 @@ class TrainStats:
             "batches": self.batches,
             "policy_loss": self.policy_loss / denom,
             "value_loss": self.value_loss / denom,
-            "q_loss": self.q_loss / denom,
-            "auxiliary_loss": self.auxiliary_loss / denom,
             "total_loss": self.total_loss / denom,
         }
 
@@ -303,20 +241,7 @@ class Trainer:
         if "rng" in state:
             self.rng.bit_generator.state = state["rng"]
 
-    def train_epoch(
-        self,
-        examples: Sequence[Example],
-        *,
-        auxiliary: Sequence[Example] | None = None,
-        auxiliary_rate: float = 0.0,
-    ) -> TrainStats:
-        """One pass over ``examples``, optionally mixed with teacher examples.
-
-        ``auxiliary`` is a separate (small) dataset; ``auxiliary_rate`` is the
-        fraction of each mini-batch drawn from it and added to the auxiliary
-        cross-entropy. A rate of zero disables the term, so the default path is
-        the same computation as before.
-        """
+    def train_epoch(self, examples: Sequence[Example]) -> TrainStats:
         if not examples:
             return TrainStats()
         self.model.train()
@@ -329,70 +254,22 @@ class Trainer:
                 for index in order[start : start + batch_size]
             ]
             batch = collate_packed(chunk).to(self.device)
-            teacher = self._auxiliary_batch(auxiliary, auxiliary_rate, len(chunk))
-            policy_loss, value_loss, q_loss, aux_loss, total = self._step(
-                batch, teacher
-            )
+            policy_loss, value_loss, total = self._step(batch)
             stats.batches += 1
             stats.policy_loss += policy_loss
             stats.value_loss += value_loss
-            stats.q_loss += 0.0 if q_loss is None else q_loss
-            stats.auxiliary_loss += 0.0 if aux_loss is None else aux_loss
             stats.total_loss += total
         return stats
 
-    def _auxiliary_batch(
-        self,
-        auxiliary: Sequence[Example] | None,
-        rate: float,
-        width: int,
-    ) -> PackedBatch | None:
-        """Draw ``rate * width`` teacher examples, without replacement issues.
-
-        Drawing with replacement is fine: the teacher set is small and each
-        batch only needs a representative sample, not an epoch over it.
-        """
-        if (
-            auxiliary is None
-            or not auxiliary
-            or rate <= 0.0
-            or self.config.auxiliary_weight <= 0.0
-        ):
-            return None
-        count = int(round(rate * width))
-        if count <= 0:
-            return None
-        picks = self.rng.integers(0, len(auxiliary), size=count)
-        examples = [auxiliary[int(index)] for index in picks]
-        return collate_packed(examples).to(self.device)
-
-    def _losses(
-        self,
-        batch: Batch | PackedBatch,
-        auxiliary: PackedBatch | None = None,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor | None,
-        torch.Tensor | None,
-        torch.Tensor,
-    ]:
-        """The policy/value/Q/teacher losses for one batch, without stepping."""
-        q_values = None
+    def _step(self, batch: Batch | PackedBatch) -> tuple[float, float, float]:
         if isinstance(batch, PackedBatch):
-            output = self.model.forward_packed(
+            logits, values = self.model.forward_packed(
                 batch.state, batch.actions, batch.index
             )
-            logits, values = output[:2]
-            if getattr(self.model, "q_head", False):
-                q_values = output[2]
             log_probs = segment_log_softmax(logits, batch.index, batch.rows)
             policy_loss = -(batch.policy * log_probs).sum() / batch.rows
         else:
-            output = self.model(batch.state, batch.actions, batch.mask)
-            logits, values = output[:2]
-            if getattr(self.model, "q_head", False):
-                q_values = output[2]
+            logits, values = self.model(batch.state, batch.actions, batch.mask)
             log_probs = torch.log_softmax(logits, dim=-1)
             policy_loss = -(batch.policy * log_probs).sum(dim=-1).mean()
 
@@ -400,39 +277,8 @@ class Trainer:
         squared = (values - batch.outcome) ** 2
         value_loss = (squared * value_mask).sum() / value_mask.sum().clamp(min=1.0)
 
-        q_loss = None
-        if q_values is not None and batch.chosen is not None:
-            chosen_values = _gather_chosen(q_values, batch)
-            squared_q = (chosen_values - batch.outcome) ** 2
-            q_loss = (squared_q * value_mask).sum() / value_mask.sum().clamp(min=1.0)
-
         total = policy_loss + self.config.value_weight * value_loss
-        if q_loss is not None:
-            total = total + self.config.q_weight * q_loss
 
-        auxiliary_loss = None
-        if auxiliary is not None:
-            aux_output = self.model.forward_packed(
-                auxiliary.state, auxiliary.actions, auxiliary.index
-            )
-            aux_log_probs = segment_log_softmax(
-                aux_output[0], auxiliary.index, auxiliary.rows
-            )
-            auxiliary_loss = -(auxiliary.policy * aux_log_probs).sum() / auxiliary.rows
-            total = total + self.config.auxiliary_weight * auxiliary_loss
-
-        return policy_loss, value_loss, q_loss, auxiliary_loss, total
-
-    def _step(
-        self,
-        batch: Batch | PackedBatch,
-        auxiliary: PackedBatch | None = None,
-    ) -> tuple[
-        float, float, float | None, float | None, float
-    ]:
-        policy_loss, value_loss, q_loss, aux_loss, total = self._losses(
-            batch, auxiliary
-        )
         self.optimizer.zero_grad(set_to_none=True)
         total.backward()
         if self.config.grad_clip:
@@ -441,8 +287,6 @@ class Trainer:
         return (
             float(policy_loss.detach()),
             float(value_loss.detach()),
-            None if q_loss is None else float(q_loss.detach()),
-            None if aux_loss is None else float(aux_loss.detach()),
             float(total.detach()),
         )
 
@@ -451,45 +295,20 @@ class Trainer:
         buffer: ReplayBuffer,
         epochs: int | None = None,
         *,
-        auxiliary: Sequence[Example] | None = None,
-        auxiliary_rate: float = 0.0,
         callback=None,
     ) -> list[dict]:
         """Train for ``epochs`` passes over the current buffer contents.
 
         The buffer itself is indexed: it implements ``__len__``/``__getitem__``
         over its arrays, so an epoch no longer materialises every example as an
-        object before touching it. ``auxiliary``/``auxiliary_rate`` are handed
-        to every epoch (see :meth:`train_epoch`).
+        object before touching it.
         """
         examples = buffer
         history: list[dict] = []
         for epoch in range(epochs if epochs is not None else self.config.epochs):
-            stats = self.train_epoch(
-                examples, auxiliary=auxiliary, auxiliary_rate=auxiliary_rate
-            )
+            stats = self.train_epoch(examples)
             record = {"epoch": epoch, **stats.as_dict()}
             history.append(record)
             if callback is not None:
                 callback(record)
         return history
-
-
-def _gather_chosen(
-    q_values: torch.Tensor, batch: Batch | PackedBatch
-) -> torch.Tensor:
-    """``q_values`` at the played candidate of every example row.
-
-    Q is scored per candidate. The loss may only read the row that was actually
-    played; every other candidate's value is trained by its own decisions, not
-    by this example's outcome.
-    """
-    if batch.chosen is None:  # pragma: no cover - guarded by the caller
-        raise ValueError("batch has no chosen action indices")
-    if isinstance(batch, PackedBatch):
-        # ``index`` is sorted, so searchsorted gives each row's first slot.
-        rows = torch.arange(batch.rows, device=batch.index.device)
-        starts = torch.searchsorted(batch.index, rows)
-        return q_values[starts + batch.chosen]
-    gather_index = batch.chosen.view(-1, 1, 1).expand(-1, 1, q_values.size(-1))
-    return torch.gather(q_values, 1, gather_index).squeeze(1)
