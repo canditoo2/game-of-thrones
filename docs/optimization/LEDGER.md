@@ -15,8 +15,15 @@ Branch: `optimization/speed-leaf-engine`, based on `b01c99a`.
 | 003 | 2026-11-11 | SPEED | same | self-play, 8 games/16 sims/batch 4 | 9.71 s torch | 6.35 s | **1.53x** | kept | same |
 | 003 | 2026-11-11 | SPEED | same (opt-in int8, measured for the record) | self-play, same run | 9.71 s torch | 3.98 s | 2.44x | option, not default | same |
 | 004 | 2026-11-11 | SPEED | lazy optimizer + background `torch._dynamo` import | meso wall clock (§5 command) | 8.89–11.00 s | 8.25–8.47 s | 1.06–1.30x | kept | same |
-| — | 2026-11-11 | combined | 001+002+003+004 | meso wall clock, 4 interleaved rounds | 9.78–10.87 s | 6.88–8.40 s | **1.35–1.40x** | — | branch head |
-| — | 2026-11-11 | combined | 001+002+003+004 | `seconds_selfplay`, same rounds | 4.89–5.85 s | 3.15–4.12 s | **1.55–1.69x** | — | branch head |
+| — | 2026-11-11 | combined | 001+002+003+004 | meso wall clock, 5 rounds against `b01c99a` (`git checkout b01c99a -- src/agot`) | 10.09–11.18 s | 6.95–8.13 s | **1.36–1.51x (median 1.42x)** | — | `a9203cc` |
+| — | 2026-11-11 | combined | 001+002+003+004 | `seconds_selfplay`, same rounds | 5.64–6.48 s | 3.25–4.39 s | **1.48–1.84x (median 1.60x)** | — | `a9203cc` |
+| — | 2026-11-11 | combined | 001+002+003+004 | leaf forward, 1–2 leaves (the batch sizes gate/evaluate/play use) | 525/397 µs | 243/177 µs | **2.15x / 2.24x** | — | `a9203cc` |
+| — | 2026-11-11 | combined | 001+002+003+004 | `agot evaluate`, 2 games / 8 sims (startup-dominated) | 3.87 s | 3.59 s | 1.08x | — | `a9203cc` |
+
+The combined rows were measured against `b01c99a` itself (`git checkout b01c99a -- src/agot`, run,
+`git checkout HEAD -- src/agot`, run, five rounds) because this box's clock drifts by more than the
+effect size between sessions. Read them as the authoritative before/after; the single-arm numbers
+in `iterations/000-baseline.md` were taken in an earlier session and are only comparable inside it.
 
 ## Rejected / no effect (worth remembering)
 
