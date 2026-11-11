@@ -74,3 +74,51 @@ With raw-visit targets the policy loss floor is the mean target entropy
 for sharpened data, ~2.5 with raw visits), `seconds_selfplay` per game, and the
 gate trend. A policy loss below ~2.0 with raw-visit targets means the search got
 sharper or the net is fitting visit noise, not automatic progress.
+
+## Decisions from the second audit round (November 2026)
+
+Twelve further audits measured the same workload from new angles. The engine is
+not the lever and no rewrite is: torch already runs at ~80% of the machine's
+single-thread fp32 kernel ceiling (89 of 112 GFLOPS on a 2048^3 GEMM), candle
+measures **0.41x** of torch, C++/libtorch is bounded by 1.05x, and the Amdahl
+ceiling for rewriting every non-NN line is 1.14x.
+
+Accepted, in order of measured gain per week of work:
+
+1. **Leaves on ONNX Runtime with dynamic int8** - 2.11x end-to-end measured
+   (45.6 s -> 21.5 s on 8 games), policy KL drift 4.9e-4 nats, ~100x inside the
+   PIMC noise floor already accepted. No checkpoint, fixture or encoder change.
+   Spike rules: >=1.8x on Colab, per-leaf KL p95 < 5e-3, 60-game int8-vs-fp32
+   within one SE, no golden/fixture touched; fall back to ORT fp32 (1.18x) if the
+   Colab vCPU lacks VNNI. Two known traps: `index_add_` does not export to ONNX
+   (the value-context pooling must become a one-hot matmul) and the ONNX file is
+   derived state, so it must be cached next to the checkpoint and keyed by its
+   hash.
+2. **`--determinizations 1`** - the two PIMC worlds are observationally
+   identical: `encode_state`/`encode_actions` come out bit-identical across
+   determinizations, and KL(128/2||64/1) = 0.00000 on ten positions in every
+   phase. The second world costs +33% rows for zero signal.
+3. **Per-phase simulation budgets** (planning 32, wildling 16, mustering /
+   bidding / action 32, raven / combat / westeros 64): -44% rows on top of the
+   above, with a pooled target change of 0.075 nats, 8-20x below the label noise
+   it replaces.
+4. **Sharpened target plus a planning teacher, and a per-candidate Q head** - the
+   root cause of weak play is that the 97-dim state has no board: the children of
+   a planning node encode to bit-identical vectors (verified on 40/40 positions),
+   so the value cannot rank orders, the visits are uniform and the target is
+   uniform by construction. A fresh net trained on 4k greedy planning decisions
+   reaches 40% held-out top-1 where the self-play policy reaches 10%, so the
+   representation can learn and the search target cannot teach. Raw-visit targets
+   (commit 9443761) put the policy cross-entropy on the uniform floor; they must
+   be sharpened again *together with* a non-uniform prior, never sharpened alone.
+5. **`--hidden 160`** for a fresh run - 1.85x measured end-to-end at +0.007 nats
+   of held-out cross-entropy (128 reaches 2.38x at +0.012). Not compatible with
+   warm-starting a 256-wide checkpoint.
+6. Free items already applied: `--batch-games 16`, `OMP_NUM_THREADS=1` per
+   worker, `--buffer-save-every 1`, deferred gate.
+
+Rejected with measurements: candle/burn/tch rewrite (0.41x), C++/libtorch
+(<=1.05x), a PyO3 trainer (<=0.8%), top-K root pruning (loses the baseline top-1
+in 12% of cases), post-hoc structured pruning (+0.34 nats at 50%), tied trunks
+(no MAC change, measured slower), fp16/bf16 on CPU (17x slower), and int8 on
+batches smaller than ~1500 rows.
