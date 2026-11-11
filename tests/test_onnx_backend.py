@@ -312,3 +312,22 @@ def test_the_torch_backend_is_the_plain_forward() -> None:
 
     with pytest.raises(ValueError, match="unknown leaf backend"):
         rust_engine.leaf_evaluator(model, "onnx-fp16")
+
+
+def test_auto_resolves_to_a_concrete_engine(monkeypatch) -> None:
+    """``auto`` is a CLI alias: it must never reach a spec as-is."""
+    monkeypatch.setattr(rust_engine, "onnx_runtime_available", lambda: True)
+    assert rust_engine.resolve_leaf_backend("auto") == "onnx-fp32"
+    monkeypatch.setattr(rust_engine, "onnx_runtime_available", lambda: False)
+    assert rust_engine.resolve_leaf_backend("auto") == "torch"
+    # Everything else passes through, and None keeps meaning "inherit".
+    assert rust_engine.resolve_leaf_backend("torch") == "torch"
+    assert rust_engine.resolve_leaf_backend("onnx-int8") == "onnx-int8"
+    assert rust_engine.resolve_leaf_backend(None) is None
+
+
+def test_the_cli_defaults_to_auto_and_keeps_the_concrete_names() -> None:
+    args = cli.build_parser().parse_args(["train", "--checkpoint", "run/agot.pt"])
+    assert args.leaf_backend == "auto"
+    assert set(cli.LEAF_BACKENDS) == set(rust_engine.LEAF_BACKENDS)
+    assert set(cli.LEAF_BACKEND_CHOICES) == {"auto", *cli.LEAF_BACKENDS}

@@ -64,15 +64,19 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   share one game configuration, recording the path in `selfplay.LAST_BACKEND`. Scripted seats
   run on the Rust driver too (one Python policy call per scripted decision, search seats stay
   native). The reference driver remains only for hand-written evaluators and mixed configs.
-- Leaf inference: `--leaf-backend {torch,onnx-int8,onnx-fp32}` (train/gate/evaluate/gauntlet,
-  default `torch`) picks the engine that scores search leaves (`agot/nn/onnx_backend.py`).
-  `torch` is the default and the only one CI needs; the ONNX backends need
-  `pip install -e ".[onnx]"` (onnxruntime + onnx for quantization). They cache
+- Leaf inference: `--leaf-backend {auto,torch,onnx-int8,onnx-fp32}` (train/gate/evaluate/gauntlet,
+  default `auto`) picks the engine that scores search leaves (`agot/nn/onnx_backend.py`).
+  `auto` resolves to `onnx-fp32` when `pip install -e ".[onnx]"` (onnxruntime + onnx) is present
+  and to `torch` otherwise, so `torch` stays the only engine CI needs and a pure-PyTorch install
+  keeps working; it is resolved before the spec is built, so a checkpoint or a queued gate always
+  records a concrete engine. The ONNX backends cache
   `<checkpoint stem>.<backend>.onnx` plus a JSON key beside the checkpoint and refuse a graph
   whose key (checkpoint hash, weight digest, model config, backend, `GRAPH_REVISION`) no
   longer matches. Measured at 24 leaves x 15 candidates and one thread: torch 1316 us,
   fp32 1099 (1.2x), int8 499 (2.6x) per leaf call, int8 policy KL p95 ~1.3e-3 nats on a
-  trained-like net. The choice travels in the self-play spec (`leaf_backend`) and in the
+  trained-like net; on the 1-2 leaf batches that gate/evaluate/play actually use, fp32 is
+  2.2x the torch path and int8 3.4x (`docs/optimization/iterations/003-auto-leaf-engine.md`).
+  The choice travels in the self-play spec (`leaf_backend`) and in the
   deferred `GateSpec`, so a queued gate is judged with the engine its training run used;
   `agot gate --leaf-backend` overrides it. Repro: `python -m agot.nn.onnx_backend <ckpt>`.
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are

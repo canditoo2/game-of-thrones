@@ -864,12 +864,16 @@ def _prepare_leaf_graph(model, checkpoint: Path, backend: str) -> None:
     same weights (the cache key follows the checkpoint, which changes every
     iteration). Doing it here costs one export per iteration instead of one per
     process, and leaves the workers with a plain cache hit.
+
+    Only the graph is built here: an ``InferenceSession`` is a per-process
+    resource, and the self-play path opens its own. Creating one just to throw
+    it away cost ~0.1 s per iteration.
     """
     if backend == "torch":
         return
-    from agot.nn.onnx_backend import LeafBackend
+    from agot.nn.onnx_backend import ensure_graph
 
-    LeafBackend.from_model(model, backend, checkpoint=str(checkpoint), threads=1)
+    ensure_graph(model, backend, checkpoint=str(checkpoint))
 
 
 def _evaluate_model(model, config: GameConfig, args: argparse.Namespace):
