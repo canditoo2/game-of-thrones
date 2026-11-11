@@ -309,6 +309,30 @@ they should be fixed before expecting a strong agent.
     (`random.Random(self.rng.random())`) is also ~1% but changing its seeding
     would alter RNG streams, so it is left alone.
 
+    A seventh pass, for machines with no GPU, moved the leaf call itself into
+    ONNX Runtime (`src/agot/nn/onnx_backend.py`, `--leaf-backend onnx-int8` on
+    train/gate/evaluate/gauntlet). The packed forward is exported with the
+    legacy TorchScript exporter — the `torch.export` path cannot infer shapes
+    through the `state_part[index]` gather — after rewriting the value-context
+    pooling as a one-hot matmul, because `index_add_` over a dynamically sized
+    row count does not export (the one-hot matrix is exact: the fp32 graph
+    matches torch to ~1e-8). ORT then quantizes the Linear weights dynamically,
+    per output channel, leaving the one-hot pooling in float. Measured at 24
+    leaves x 15 candidates with one thread, i.e. one self-play worker: torch
+    1316 µs, onnx-fp32 1099 µs (1.20×), onnx-int8 499 µs (2.64×). With 8
+    threads the same three calls take 683/688/472 µs, so the win belongs to the
+    per-process deployment (N single-threaded workers), not to a single fat
+    session, and ORT's own defaults (one thread per core, spinning allowed) are
+    ~3× *slower* than one thread for a batch this small. int8 perturbs a leaf's
+    policy by a KL of ~4e-4 nats on average and ~1.3e-3 at p95 for a net whose
+    logits have a trained spread, and ~7e-6 on real encoded leaves — far inside
+    the PIMC noise of the visit distribution it feeds, which is why the search
+    is unaffected. The graph is cached beside its checkpoint and keyed on the
+    checkpoint hash, a digest of the weights, the model config, the backend and
+    a graph revision, so a stale graph is never scored with; the chosen backend
+    travels in the self-play and gate specs, so a queued candidate is judged
+    with the engine its training run searched with.
+
     A fifth pass added copy-on-write for regions, which was the last large clone
     cost. A `GameState` now keeps its regions in a per-state dict that *shares*
     the `RegionState` objects with the state it was cloned from, and the engine

@@ -63,6 +63,17 @@ target's entropy and the gate trend, not the policy loss alone.
   share one game configuration, recording the path in `selfplay.LAST_BACKEND`. Scripted seats
   run on the Rust driver too (one Python policy call per scripted decision, search seats stay
   native). The reference driver remains only for hand-written evaluators and mixed configs.
+- Leaf inference: `--leaf-backend {torch,onnx-int8,onnx-fp32}` (train/gate/evaluate/gauntlet,
+  default `torch`) picks the engine that scores search leaves (`agot/nn/onnx_backend.py`).
+  `torch` is the default and the only one CI needs; the ONNX backends need
+  `pip install -e ".[onnx]"` (onnxruntime + onnx for quantization). They cache
+  `<checkpoint stem>.<backend>.onnx` plus a JSON key beside the checkpoint and refuse a graph
+  whose key (checkpoint hash, weight digest, model config, backend, `GRAPH_REVISION`) no
+  longer matches. Measured at 24 leaves x 15 candidates and one thread: torch 1316 us,
+  fp32 1099 (1.2x), int8 499 (2.6x) per leaf call, int8 policy KL p95 ~1.3e-3 nats on a
+  trained-like net. The choice travels in the self-play spec (`leaf_backend`) and in the
+  deferred `GateSpec`, so a queued gate is judged with the engine its training run used;
+  `agot gate --leaf-backend` overrides it. Repro: `python -m agot.nn.onnx_backend <ckpt>`.
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 
@@ -74,6 +85,13 @@ target's entropy and the gate trend, not the policy loss alone.
   PyO3 (the Python binding is a separate crate), and it must not reach for the network. The
   differential fixture and encoder golden vectors are frozen regression pins: a disagreement is
   a bug in the Rust side, never something to fix by editing a fixture or a golden file.
+- `agot/nn/onnx_backend.py` is an optional leaf scorer. It imports torch at module level (like
+  `nn/model.py`) but `onnxruntime`/`onnx` only inside functions, and nothing imports it at
+  import time, so `engine/`, `agents/` and the torch-free CLI stay torch-free. Its
+  `PackedGraph` is a *second* copy of `forward_packed`'s arithmetic (a one-hot matmul instead
+  of `index_add_`, which does not export); `tests/test_onnx_backend.py` pins the two against
+  each other. Changing `forward_packed` means changing `PackedGraph` too and bumping
+  `GRAPH_REVISION`, or a stale cached graph would quietly score the old arithmetic.
 - `Game.step` applies one player decision and auto-advances every phase that needs no input;
   legal actions are non-empty only when a player must decide. `RustGame` caches its snapshot
   view per step (`StateView._version`); any new mutation path must invalidate it.

@@ -217,7 +217,9 @@ def test_batched_selfplay_spec_carries_choice_flags(monkeypatch) -> None:
         model = object()
 
     monkeypatch.setattr(rust_engine, "core", lambda: FakeExtension())
-    monkeypatch.setattr(rust_engine, "leaf_evaluator", lambda model: None)
+    monkeypatch.setattr(
+        rust_engine, "leaf_evaluator", lambda model, backend="torch", **kwargs: None
+    )
     config = GameConfig(
         seed=1,
         max_rounds=2,
@@ -235,6 +237,9 @@ def test_batched_selfplay_spec_carries_choice_flags(monkeypatch) -> None:
     assert spec["choice_choices"] is True
     assert spec["deferred_battles"] is True
     assert spec["sequential_westeros"] is True
+    # The default engine is torch; the spec says so, so a recorded plan and its
+    # gate agree on how the leaves were scored.
+    assert spec["leaf_backend"] == "torch"
 
 
 def test_batched_selfplay_declines_mixed_choice_configs(monkeypatch) -> None:
@@ -259,7 +264,9 @@ def test_evaluate_native_spec_carries_choice_flags(monkeypatch) -> None:
             return (None, None, None, None, None, None, ["stark"], [1])
 
     monkeypatch.setattr(rust_engine, "core", lambda: FakeExtension())
-    monkeypatch.setattr(rust_engine, "leaf_evaluator", lambda model: None)
+    monkeypatch.setattr(
+        rust_engine, "leaf_evaluator", lambda model, backend="torch", **kwargs: None
+    )
     config = GameConfig(
         seed=1,
         max_rounds=2,

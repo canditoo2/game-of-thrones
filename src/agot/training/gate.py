@@ -93,6 +93,10 @@ class GateSpec:
     wildling_tie_choice: bool = True
     bid_tie_choice: bool = True
     choice_choices: bool = True
+    #: Which engine scored the leaves in the match. A gate must judge the search
+    #: the training run actually performed, so the choice travels with the spec
+    #: instead of being re-chosen when the candidate is played.
+    leaf_backend: str = "torch"
     #: True when no best checkpoint existed at enqueue time: this gate seeds it.
     seeded: bool = False
 
@@ -197,6 +201,7 @@ def enqueue_candidate(
     house_margin: float = 0.0,
     config: GameConfig | None = None,
     step_limit: int = DEFAULT_STEP_LIMIT,
+    leaf_backend: str = "torch",
 ) -> Path:
     """Copy a candidate and its gate opponent into the queue.
 
@@ -213,7 +218,12 @@ def enqueue_candidate(
         return directory
     directory.mkdir(parents=True, exist_ok=True)
 
+    # The queue copy is an artefact, not where this model lives: save() records
+    # the file it wrote, so put that back. The training loop keeps using its own
+    # checkpoint as the anchor for the ONNX graph cache.
+    previous_checkpoint = getattr(model, "checkpoint", None)
     model.save(str(directory / CANDIDATE_NAME))
+    model.checkpoint = previous_checkpoint
     best_path = Path(best_checkpoint)
     seeded = not best_path.exists()
     if seeded:
@@ -244,6 +254,7 @@ def enqueue_candidate(
         wildling_tie_choice=base.wildling_tie_choice,
         bid_tie_choice=base.bid_tie_choice,
         choice_choices=base.choice_choices,
+        leaf_backend=leaf_backend,
         seeded=seeded,
     )
     _write_json(directory / SPEC_NAME, spec.as_dict())
@@ -520,11 +531,14 @@ def run_candidate(
     deadline: float | None = None,
     shard: tuple[int, int] | None = None,
     progress: Progress | None = None,
+    leaf_backend: str | None = None,
 ) -> dict:
     """Play the missing chunks of one candidate, then finalize if complete.
 
     ``deadline`` is a ``time.monotonic()`` value; no new chunk starts after it.
     ``shard`` selects chunks by ``chunk % count == index`` for parallel runs.
+    ``leaf_backend`` overrides the engine recorded in the spec (``None`` keeps
+    the spec's choice, which is what a training run and its gate agreeing means).
     """
     directory = Path(directory)
     spec = load_spec(directory)
@@ -559,6 +573,7 @@ def run_candidate(
             config=spec.game_config(),
             step_limit=spec.step_limit,
             batch_games=spec.batch_games,
+            leaf_backend=leaf_backend or spec.leaf_backend,
         )
         write_shard(
             directory,
@@ -600,6 +615,7 @@ def run_pending(
     max_minutes: float = 0.0,
     shard: tuple[int, int] | None = None,
     progress: Progress | None = None,
+    leaf_backend: str | None = None,
 ) -> list[dict]:
     """Play queued candidates in order, respecting a wall-clock budget."""
     deadline = (
@@ -612,6 +628,12 @@ def run_pending(
         if deadline is not None and time.monotonic() >= deadline:
             break
         results.append(
-            run_candidate(directory, deadline=deadline, shard=shard, progress=progress)
+            run_candidate(
+                directory,
+                deadline=deadline,
+                shard=shard,
+                progress=progress,
+                leaf_backend=leaf_backend,
+            )
         )
     return results

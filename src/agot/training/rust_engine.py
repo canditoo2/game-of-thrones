@@ -80,6 +80,10 @@ def resolve_phase_budgets(name: str | None) -> dict[str, int] | None:
             f"choose from {', '.join(PHASE_BUDGET_CHOICES)}"
         ) from error
     return None if preset is None else dict(preset)
+#: Inference engines :func:`leaf_evaluator` accepts. ``"torch"`` is the default
+#: and the only one that needs nothing beyond PyTorch; the ONNX backends need the
+#: optional ``onnx`` extra and cache their graph beside the checkpoint.
+LEAF_BACKENDS = ("torch", "onnx-int8", "onnx-fp32")
 
 
 def core():
@@ -91,25 +95,55 @@ def core():
     return _core
 
 
-def leaf_evaluator(model):
+def leaf_evaluator(
+    model,
+    backend: str = "torch",
+    *,
+    checkpoint: str | None = None,
+    threads: int = 0,
+):
     """Adapt a :class:`PolicyValueNet` to the driver's callback protocol.
 
     The driver hands over preallocated float32 arrays and expects raw logits and
     values back; it applies the per-leaf softmax itself, so this stays a single
     torch expression — the cheapest possible thing to run per batch.
+
+    ``backend`` picks the inference engine:
+
+    * ``"torch"`` (default) — the torch expression above, byte for byte.
+    * ``"onnx-fp32"`` / ``"onnx-int8"`` — an ONNX Runtime session over an
+      exported graph, with dynamic per-channel int8 weights for the second.
+      The graph is cached beside ``checkpoint`` (or beside the file the model
+      was loaded from) and is rebuilt when the weights or the config no longer
+      match it.
+
+    ``threads`` is the ORT intra-op thread count for the ONNX backends
+    (``0`` = ORT's default). Self-play workers pass 1 to match the one thread
+    they give torch.
     """
-    import torch
+    if backend not in LEAF_BACKENDS:
+        raise ValueError(
+            f"unknown leaf backend {backend!r}; choose from {LEAF_BACKENDS}"
+        )
+    if backend == "torch":
+        import torch
 
-    def evaluate(state, actions, index, mask):
-        with torch.inference_mode():
-            logits, values = model.forward_packed(
-                torch.from_numpy(state),
-                torch.from_numpy(actions),
-                torch.from_numpy(index),
-            )
-            return logits.numpy(), values.numpy()
+        def evaluate(state, actions, index, mask):
+            with torch.inference_mode():
+                logits, values = model.forward_packed(
+                    torch.from_numpy(state),
+                    torch.from_numpy(actions),
+                    torch.from_numpy(index),
+                )
+                return logits.numpy(), values.numpy()
 
-    return evaluate
+        return evaluate
+
+    from agot.nn.onnx_backend import LeafBackend  # noqa: PLC0415 - optional dependency
+
+    return LeafBackend.from_model(
+        model, backend, checkpoint=checkpoint, threads=threads
+    )
 
 
 def game_seeds(configs, fallback: int) -> list[int]:
@@ -132,6 +166,7 @@ def spec_for(
     *,
     dedupe_leaves: bool = True,
     phase_budgets: dict[str, int] | None = None,
+    leaf_backend: str | None = None,
 ) -> dict:
     """Translate a :class:`SelfPlayPlan` into the driver's spec mapping.
 
@@ -141,6 +176,10 @@ def spec_for(
 
     ``phase_budgets`` is the per-phase cap table (see :data:`PHASE_BUDGETS`);
     ``None`` keeps the fixed simulation budget.
+    ``leaf_backend`` is which engine scores the leaves (see
+    :func:`leaf_evaluator`). The driver ignores it; it travels in the spec so a
+    recorded plan says how its games were searched, and so a gate reproduces the
+    run it is judging.
     """
     base = base_config or GameConfig()
     return {
@@ -150,6 +189,7 @@ def spec_for(
         "batch_games": max(1, plan.batch_games),
         "dedupe_leaves": dedupe_leaves,
         "phase_budgets": phase_budgets,
+        "leaf_backend": plan.leaf_backend if leaf_backend is None else leaf_backend,
         "seed": plan.seed,
         "seeds": [plan.seed + index for index in range(plan.games)],
         "temperature": plan.temperature,
@@ -230,12 +270,15 @@ def self_play_records(
     base_config: GameConfig | None = None,
     dedupe_leaves: bool = True,
     phase_budgets: dict[str, int] | None = None,
+    leaf_backend: str | None = None,
 ) -> list[GameRecord]:
     """Play ``plan.games`` games with the Rust driver and return the records.
 
     ``dedupe_leaves`` is forwarded to :func:`spec_for`; turn it off to compare
     a run against the same leaves scored individually. ``phase_budgets`` is the
     per-phase cap table; ``None`` keeps the fixed budget.
+    a run against the same leaves scored individually. ``leaf_backend``
+    overrides ``plan.leaf_backend`` for this call.
     """
     extension = core()
     if extension is None:  # pragma: no cover - depends on the environment
@@ -250,6 +293,12 @@ def self_play_records(
         phase_budgets=phase_budgets,
     )
     result = extension.selfplay(spec, leaf_evaluator(model))
+    backend = plan.leaf_backend if leaf_backend is None else leaf_backend
+    spec = spec_for(plan, base_config, dedupe_leaves=dedupe_leaves, leaf_backend=backend)
+    evaluate = leaf_evaluator(
+        model, backend, checkpoint=plan.leaf_checkpoint, threads=1
+    )
+    result = extension.selfplay(spec, evaluate)
     return _unpack(result, plan.games)
 
 
@@ -268,6 +317,9 @@ def try_batched_self_play(
     batch_games: int = 4,
     dedupe_leaves: bool = True,
     phase_budgets: dict[str, int] | None = None,
+    leaf_backend: str = "torch",
+    leaf_checkpoint: str | None = None,
+    leaf_threads: int = 1,
 ) -> list[GameRecord] | None:
     """Run a ``batched_self_play`` request on the Rust driver, or return ``None``.
 
@@ -282,6 +334,11 @@ def try_batched_self_play(
     ``phase_budgets`` caps the simulations a decision may spend by phase (see
     :data:`PHASE_BUDGETS`). ``None`` is the fixed budget; the driver divides a
     cap by ``determinizations`` exactly as it divides ``simulations``.
+    ``leaf_backend`` selects the inference engine for the search seats (see
+    :func:`leaf_evaluator`); the choice is also written into the spec, so the
+    record of a plan says how its leaves were scored. ``leaf_checkpoint`` is
+    where an ONNX graph is cached and ``leaf_threads`` is its intra-op thread
+    count (1 by default, because this driver is used one thread per process).
 
     Returns ``None`` — leaving the caller to use the Python driver — when the
     games do not share one configuration or when the evaluator is not a
@@ -292,7 +349,11 @@ def try_batched_self_play(
     if extension is None:
         return None
     model = getattr(evaluator, "model", None)
-    if model is None:  # a hand-written evaluator: the Python driver handles it
+    # An evaluator that already knows how to score a leaf batch (a
+    # ``LeafBackend``) says so through this hook; using it avoids quietly
+    # rebuilding a torch closure and throwing the caller's backend away.
+    hook = getattr(evaluator, "as_leaf_evaluator", None)
+    if model is None and hook is None:  # a hand-written evaluator
         return None
     if not configs:
         return []
@@ -340,6 +401,7 @@ def try_batched_self_play(
         "batch_games": max(1, batch_games),
         "dedupe_leaves": dedupe_leaves,
         "phase_budgets": phase_budgets,
+        "leaf_backend": leaf_backend,
         "seed": first.seed if first.seed is not None else seed,
         "seeds": game_seeds(configs, seed),
         "temperature": temperature,
@@ -359,7 +421,13 @@ def try_batched_self_play(
         "scripted": scripted,
         "record_opponents": record_opponents,
     }
-    result = extension.selfplay(spec, leaf_evaluator(model), decider)
+    if hook is not None:
+        evaluate = hook()
+    else:
+        evaluate = leaf_evaluator(
+            model, leaf_backend, checkpoint=leaf_checkpoint, threads=leaf_threads
+        )
+    result = extension.selfplay(spec, evaluate, decider)
     return _unpack(result, len(configs))
 
 

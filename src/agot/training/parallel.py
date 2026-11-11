@@ -58,6 +58,13 @@ class SelfPlayPlan:
     #: ``None`` is the fixed budget; any table is a per-decision cap that the
     #: driver divides by ``determinizations`` like ``simulations``.
     phase_budgets: dict[str, int] | None = None
+    #: Which engine scores the search's leaves: "torch" (default) or one of the
+    #: ONNX backends (see ``rust_engine.leaf_evaluator``). It travels to the
+    #: workers, and into the driver spec, so a plan and its games agree.
+    leaf_backend: str = "torch"
+    #: Checkpoint whose directory holds the ONNX graph cache. Workers only get a
+    #: state dict, so they need the path explicitly to share one graph.
+    leaf_checkpoint: str | None = None
 
     def temperature_schedule(self) -> tuple[tuple[int, float], ...]:
         """``(last_round, temperature)`` bands handed to the self-play loop."""
@@ -78,6 +85,8 @@ def _options(plan: SelfPlayPlan) -> dict:
         "opponent_rate": plan.opponent_rate,
         "greedy_noise": plan.greedy_noise,
         "phase_budgets": plan.phase_budgets,
+        "leaf_backend": plan.leaf_backend,
+        "leaf_checkpoint": plan.leaf_checkpoint,
     }
 
 
@@ -141,6 +150,10 @@ def _play_chunk(configs: list[GameConfig], options: dict) -> list[GameRecord]:
                 opponents=opponents,
                 batch_games=batch,
                 phase_budgets=options["phase_budgets"],
+                leaf_backend=options.get("leaf_backend", "torch"),
+                leaf_checkpoint=options.get("leaf_checkpoint"),
+                # One thread per worker process, matching `torch.set_num_threads(1)`.
+                leaf_threads=1,
             )
         )
     return records

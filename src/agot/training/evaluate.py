@@ -327,6 +327,7 @@ def _play_model_games(
     step_limit: int,
     batch_games: int,
     seeds: list[int] | None = None,
+    leaf_backend: str = "torch",
 ) -> tuple[list[str | None], list[int]]:
     """Play ``games`` with one model per search seat, plus optional scripted seats.
 
@@ -338,6 +339,10 @@ def _play_model_games(
     ``seeds`` gives every game an explicit RNG seed. Chunked callers (the
     deferred gate) pass the seeds from the whole-match plan so splitting the
     games across processes does not replay neighbouring games.
+
+    ``leaf_backend`` is the inference engine for every search seat (see
+    :func:`agot.training.rust_engine.leaf_evaluator`); each model caches its
+    graph beside the checkpoint it came from.
     """
     from agot.engine.rust import RustGame
     from agot.training import rust_engine
@@ -352,7 +357,9 @@ def _play_model_games(
         raise ValueError(f"expected {games} seeds, got {len(seeds)}")
 
     houses = config.houses
-    evaluators = [rust_engine.leaf_evaluator(model) for model in models]
+    evaluators = [
+        rust_engine.leaf_evaluator(model, leaf_backend) for model in models
+    ]
 
     def decide(game_index: int, house: str, game_view):
         policy = scripted[game_index][house]
@@ -412,6 +419,7 @@ def evaluate_model_vs_factory(
     seed: int = 0,
     step_limit: int = DEFAULT_STEP_LIMIT,
     batch_games: int = 4,
+    leaf_backend: str = "torch",
 ) -> MatchResult:
     """One network (three seats) against a scripted factory, on the Rust driver."""
     base = config or GameConfig()
@@ -443,6 +451,7 @@ def evaluate_model_vs_factory(
         seed=seed,
         step_limit=step_limit,
         batch_games=batch_games,
+        leaf_backend=leaf_backend,
     )
 
     result = MatchResult()
@@ -471,11 +480,13 @@ def play_plan(
     config: GameConfig | None = None,
     step_limit: int = DEFAULT_STEP_LIMIT,
     batch_games: int = 4,
+    leaf_backend: str = "torch",
 ) -> list[GameOutcome]:
     """Play every game in ``plan`` with one model per search seat.
 
     The plan carries explicit per-game seeds, so playing a chunk of a match in
     one process produces the same games as playing the whole match at once.
+    ``leaf_backend`` is the inference engine every search seat uses.
     """
     base = config or GameConfig()
     if tuple(plan.houses) != tuple(base.houses):
@@ -498,6 +509,7 @@ def play_plan(
         seeds=plan.per_game_seeds(),
         step_limit=step_limit,
         batch_games=batch_games,
+        leaf_backend=leaf_backend,
     )
     return [
         GameOutcome(index=game.index, winner=winners[position], steps=steps[position])
@@ -585,6 +597,7 @@ def evaluate_models_match(
     seed: int = 0,
     step_limit: int = DEFAULT_STEP_LIMIT,
     batch_games: int = 4,
+    leaf_backend: str = "torch",
 ) -> MatchResult:
     """Two networks, three seats each, swapped each game, all on the Rust driver."""
     base = config or GameConfig()
@@ -597,6 +610,7 @@ def evaluate_models_match(
         config=base,
         step_limit=step_limit,
         batch_games=batch_games,
+        leaf_backend=leaf_backend,
     )
     return summarize_plan(results, plan, base.houses)
 
@@ -613,6 +627,7 @@ def evaluate_models_vs_field(
     seed: int = 0,
     step_limit: int = DEFAULT_STEP_LIMIT,
     batch_games: int = 4,
+    leaf_backend: str = "torch",
 ) -> FieldResult:
     """Single-seat win rate against net checkpoints and scripted anchors."""
     base = config or GameConfig()
@@ -660,6 +675,7 @@ def evaluate_models_vs_field(
         seed=seed,
         step_limit=step_limit,
         batch_games=batch_games,
+        leaf_backend=leaf_backend,
     )
 
     field = FieldResult(opponents=field_names)
@@ -698,6 +714,7 @@ def evaluate_net_vs_field(
     seed: int = 0,
     step_limit: int = DEFAULT_STEP_LIMIT,
     batch_games: int = 4,
+    leaf_backend: str = "torch",
 ) -> FieldResult:
     """Single-seat win rate of a network against scripted opponents, in Rust.
 
@@ -776,7 +793,7 @@ def evaluate_net_vs_field(
         "record_opponents": False,
     }
     result = extension.selfplay(
-        spec, rust_engine.leaf_evaluator(model), decide
+        spec, rust_engine.leaf_evaluator(model, leaf_backend), decide
     )
     winners = list(result[6])
     steps = list(result[7])

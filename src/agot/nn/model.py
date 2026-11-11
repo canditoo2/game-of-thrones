@@ -66,6 +66,10 @@ class PolicyValueNet(nn.Module):
         #: are and returns nearly the same number for every child, which turns
         #: PUCT into a copy of the prior.
         self.value_context = value_context
+        #: The file this model was loaded from or last saved to, when it knows
+        #: one. The ONNX leaf backend caches its exported graph beside it, so a
+        #: model that came from a checkpoint needs no path threaded through.
+        self.checkpoint: str | None = None
 
         self.state_trunk = _mlp(state_dim, hidden, trunk_layers)
         self.action_trunk = _mlp(action_dim, hidden, trunk_layers)
@@ -269,6 +273,7 @@ class PolicyValueNet(nn.Module):
             temporary,
         )
         os.replace(temporary, path)
+        self.checkpoint = str(path)
 
     @classmethod
     def load(cls, path: str, map_location: str = "cpu") -> PolicyValueNet:
@@ -284,6 +289,7 @@ class PolicyValueNet(nn.Module):
         model = cls(**config)
         model.load_state_dict(payload["state_dict"])
         model.eval()
+        model.checkpoint = str(path)
         return model
 
 

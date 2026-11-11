@@ -209,6 +209,17 @@ Kept short; each entry is *what it is → pro → con → verdict*.
 * **Engine speed** (this was the binding constraint), **parallel/batched
   self-play**, **history/belief encoders**, **reward shaping and a fixed
   evaluation suite**, and finally a **playable table interface** for G3.
+* **Cheaper leaf inference without a GPU.** The leaf forward is the other half
+  of the self-play bill, and this machine has no CUDA. Exporting the packed
+  forward to ONNX Runtime and letting ORT quantize the Linear weights
+  dynamically to int8 (`--leaf-backend onnx-int8`, `agot/nn/onnx_backend.py`)
+  costs ~2.6x less per call at the production shape (24 leaves x 15 candidates,
+  one thread: 1316 µs torch, 1099 µs fp32, 499 µs int8) for a policy KL of
+  ~4e-4 nats at p95 in a trained-like regime — two orders of magnitude below
+  the PIMC noise of the visit distribution it feeds, so the search is
+  unchanged in any way that matters. `torch` stays the default: it is the
+  reference the int8 graph is measured against, and CI must not depend on
+  `onnxruntime`.
 
 ## Staged plan
 

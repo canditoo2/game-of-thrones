@@ -29,6 +29,11 @@ from pathlib import Path
 from agot.agents import MCTS, GreedyPolicy, RandomPolicy
 from agot.engine.game import DEFAULT_HOUSES, Game, GameConfig
 
+#: Leaf inference engines the CLI accepts. ``agot.training.rust_engine``
+#: validates the same names; ``tests/test_onnx_backend.py`` pins the two lists
+#: together so they cannot drift.
+LEAF_BACKENDS = ("torch", "onnx-int8", "onnx-fp32")
+
 #: Loaded networks, keyed by checkpoint path. A gauntlet builds a fresh policy
 #: per seat per game, so the checkpoint is loaded once and the model shared.
 _NET_CACHE: dict[str, object] = {}
@@ -161,6 +166,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             games=args.games,
             config=config,
             seed=args.seed,
+            leaf_backend=args.leaf_backend,
         )
         print(json.dumps({"a": args.a, "b": args.b, **result.as_dict()}, indent=2))
         return 0
@@ -180,6 +186,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             games=args.games,
             config=config,
             seed=args.seed,
+            leaf_backend=args.leaf_backend,
         )
         print(json.dumps({"a": args.a, "b": args.b, **result.as_dict()}, indent=2))
         return 0
@@ -226,6 +233,7 @@ def cmd_gauntlet(args: argparse.Namespace) -> int:
             games=args.games,
             config=config,
             seed=args.seed,
+            leaf_backend=args.leaf_backend,
         )
         print(json.dumps({"candidate": args.candidate, **result.as_dict()}, indent=2))
         return 0
@@ -347,6 +355,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
         max_minutes=args.max_minutes,
         shard=shard,
         progress=lambda message: print(message, flush=True),
+        leaf_backend=args.leaf_backend,
     )
     print(
         json.dumps(
@@ -506,6 +515,8 @@ def _run_training(args: argparse.Namespace) -> int:
         temperature_rounds=args.temperature_rounds,
         final_temperature=args.final_temperature,
         phase_budgets=rust_engine.resolve_phase_budgets(args.phase_budgets),
+        leaf_backend=args.leaf_backend,
+        leaf_checkpoint=str(checkpoint),
     )
     # The caps are per decision and divided by --determinizations like
     # --simulations, so a run that kept the switch off is byte-identical to the
@@ -573,6 +584,10 @@ def _run_training(args: argparse.Namespace) -> int:
                     break
             plan.seed = args.seed + iteration * 100_000
             model.to("cpu")
+            # The checkpoint on disk always holds these weights (save() runs at
+            # the end of every iteration), so the workers can share one graph.
+            if checkpoint.exists():
+                _prepare_leaf_graph(model, checkpoint, args.leaf_backend)
             selfplay_started = time.time()
             records = parallel_self_play(
                 model, plan, base_config=config, executor=executor
@@ -611,6 +626,7 @@ def _run_training(args: argparse.Namespace) -> int:
             model.to("cpu")
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             model.save(str(checkpoint))
+            _prepare_leaf_graph(model, checkpoint, args.leaf_backend)
             line = (
                 f"iter {iteration + 1}/{args.iterations} "
                 f"games={len(records)} buffer={len(buffer)} "
@@ -673,6 +689,7 @@ def _run_training(args: argparse.Namespace) -> int:
                             config=config,
                             seed=args.seed + 900_000,
                             batch_games=args.batch_games,
+                            leaf_backend=args.leaf_backend,
                         )
                         low, high = wilson_interval(match.wins_a, match.games)
                         house_ok = all(
@@ -766,6 +783,7 @@ def _run_training(args: argparse.Namespace) -> int:
                         house_tolerance=args.gate_house_tolerance,
                         house_margin=args.gate_house_margin,
                         config=config,
+                        leaf_backend=args.leaf_backend,
                     )
                 except Exception as error:  # noqa: BLE001 - never lose the iteration
                     # A full/unmounted gate directory, or an unexpected save
@@ -786,6 +804,21 @@ def _run_training(args: argparse.Namespace) -> int:
         if executor is not None:
             executor.shutdown()
     return 0
+
+
+def _prepare_leaf_graph(model, checkpoint: Path, backend: str) -> None:
+    """Export the ONNX graph once, in the parent, before the workers need it.
+
+    Without this every self-play worker would rebuild the same graph from the
+    same weights (the cache key follows the checkpoint, which changes every
+    iteration). Doing it here costs one export per iteration instead of one per
+    process, and leaves the workers with a plain cache hit.
+    """
+    if backend == "torch":
+        return
+    from agot.nn.onnx_backend import LeafBackend
+
+    LeafBackend.from_model(model, backend, checkpoint=str(checkpoint), threads=1)
 
 
 def _evaluate_model(model, config: GameConfig, args: argparse.Namespace):
@@ -809,6 +842,7 @@ def _evaluate_model(model, config: GameConfig, args: argparse.Namespace):
         games=args.eval_games,
         config=config,
         seed=args.seed + 999,
+        leaf_backend=args.leaf_backend,
     )
 
 
@@ -872,6 +906,25 @@ def build_parser() -> argparse.ArgumentParser:
             help="hidden states sampled per move (PIMC); >1 hides face-down info",
         )
 
+    def add_leaf_backend(
+        target: argparse.ArgumentParser,
+        *,
+        default: str | None = "torch",
+        help_text: str | None = None,
+    ) -> None:
+        target.add_argument(
+            "--leaf-backend",
+            choices=list(LEAF_BACKENDS),
+            default=default,
+            help=help_text
+            or (
+                "inference engine for the network's leaf batches: torch (default) "
+                "or an ONNX Runtime graph, fp32 or dynamically quantized int8, "
+                "cached beside the checkpoint. int8 is ~2x faster per leaf at "
+                "the cost of a ~5e-4 nat policy KL"
+            ),
+        )
+
     demo = sub.add_parser("demo", help="play a single game")
     add_common(demo)
     demo.add_argument("--policy", default="greedy", choices=["random", "greedy", "mcts"])
@@ -920,6 +973,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--a", default="random")
     evaluate.add_argument("--b", default="greedy")
     evaluate.add_argument("--games", type=int, default=10)
+    add_leaf_backend(evaluate)
     evaluate.set_defaults(func=cmd_evaluate)
 
     gauntlet = sub.add_parser(
@@ -934,6 +988,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated policy names filling the other five seats",
     )
     gauntlet.add_argument("--games", type=int, default=60)
+    add_leaf_backend(gauntlet)
     gauntlet.set_defaults(func=cmd_gauntlet)
 
     round_robin = sub.add_parser(
@@ -1035,6 +1090,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="i/N",
         help="only play chunk i of N (1-based), for parallel gate processes",
+    )
+    add_leaf_backend(
+        gate,
+        default=None,
+        help_text=(
+            "override the inference engine recorded in the queued candidate's "
+            "spec; by default the gate plays the engine its training run used"
+        ),
     )
     gate.set_defaults(func=cmd_gate)
 
@@ -1214,6 +1277,7 @@ def build_parser() -> argparse.ArgumentParser:
             "the gate-approved best is preserved either way)"
         ),
     )
+    add_leaf_backend(train)
     train.set_defaults(func=cmd_train)
 
     return parser

@@ -26,6 +26,10 @@ dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
 rl = ["torch>=2.2"]
+# The ONNX Runtime leaf backend (dynamic int8 self-play inference). It needs
+# torch as well, so install it on top of the `rl` extra. `onnx` is only used to
+# quantize; onnxruntime runs the graph.
+onnx = ["onnxruntime>=1.17", "onnx>=1.15"]
 # The desktop game can also run on the schematic fallback board, but Pillow is
 # needed to display the local Rulebook/board.jpg scan.
 gui = ["pillow>=10"]
