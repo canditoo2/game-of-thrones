@@ -1,0 +1,1833 @@
+From b6d08cadf76e52b17df9cb43a3a374b032cb73d5 Mon Sep 17 00:00:00 2001
+From: agent <agent@local>
+Date: Wed, 11 Nov 2026 12:25:45 +0100
+Subject: [PATCH] Add an optional Q head and a planning teacher
+
+---
+ rust/crates/agot-py/src/selfplay.rs |  29 ++-
+ src/agot/agents/greedy_agent.py     |  16 +-
+ src/agot/cli.py                     |  82 ++++++-
+ src/agot/nn/model.py                |  82 ++++++-
+ src/agot/nn/teacher.py              | 162 ++++++++++++++
+ src/agot/training/parallel.py       |   1 +
+ src/agot/training/replay.py         |  69 +++++-
+ src/agot/training/rust_engine.py    |  28 ++-
+ src/agot/training/selfplay.py       |  30 +++
+ src/agot/training/trainer.py        | 199 ++++++++++++++++-
+ tests/test_cli.py                   |   6 +
+ tests/test_nn.py                    |  15 ++
+ tests/test_qhead.py                 | 330 ++++++++++++++++++++++++++++
+ tests/test_rust_engine.py           |  11 +
+ tests/test_training.py              |  70 ++++++
+ 15 files changed, 1092 insertions(+), 38 deletions(-)
+ create mode 100644 src/agot/nn/teacher.py
+ create mode 100644 tests/test_qhead.py
+
+diff --git a/rust/crates/agot-py/src/selfplay.rs b/rust/crates/agot-py/src/selfplay.rs
+index 4d636ba..9f8995c 100644
+--- a/rust/crates/agot-py/src/selfplay.rs
++++ b/rust/crates/agot-py/src/selfplay.rs
+@@ -52,6 +52,11 @@ struct Record {
+     actions: Vec<f32>,
+     policy: Vec<f32>,
+     player: u8,
++    /// Index of the action that was actually played, within `policy`. Only
++    /// emitted when the request sets `record_chosen`; a Q-head model trains on
++    /// this candidate's outcome, and the played action is sampled at the move
++    /// temperature so it cannot be recovered from the recorded target.
++    chosen: u32,
+ }
+ 
+ struct FinishedGame {
+@@ -240,6 +245,9 @@ pub fn selfplay<'py>(
+         Some(value) => parse_phase_budgets(&value)?,
+         None => None,
+     };
++    // Ask for an extra `chosen` buffer, one index per recorded decision. It is
++    // off by default so the tuple keeps its historical ten items.
++    let record_chosen: bool = spec_or(spec, "record_chosen", false)?;
+     let houses: Option<Vec<String>> = spec_value(spec, "houses")?;
+     let data_dir: Option<String> = spec_value(spec, "data_dir")?;
+     let step_limit: u32 = spec_or(spec, "step_limit", 20_000)?;
+@@ -432,6 +440,7 @@ pub fn selfplay<'py>(
+                             actions: observation.action_features,
+                             policy: target,
+                             player: house.index() as u8,
++                            chosen: index as u32,
+                         });
+                     }
+                     states[slot]
+@@ -673,6 +682,16 @@ pub fn selfplay<'py>(
+                 let (action, target) = searchers[*slot]
+                     .pick(&result, Some(temperature))
+                     .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
++                // `pick` samples at the move temperature while the target is
++                // the visit distribution at 1.0, so the chosen candidate is not
++                // recoverable from the target: record it now, while we know it.
++                let chosen = result
++                    .actions
++                    .iter()
++                    .position(|candidate| *candidate == action)
++                    .ok_or_else(|| {
++                        PyRuntimeError::new_err("the played action is not a root candidate")
++                    })? as u32;
+ 
+                 let observation =
+                     observation::observe(&states[*slot].state, &data, &result.actions, observer);
+@@ -681,6 +700,7 @@ pub fn selfplay<'py>(
+                     actions: observation.action_features,
+                     policy: target,
+                     player: observer.map(|house| house.index() as u8).unwrap_or(0),
++                    chosen,
+                 });
+ 
+                 states[*slot]
+@@ -715,6 +735,7 @@ pub fn selfplay<'py>(
+     let mut offsets: Vec<u32> = Vec::with_capacity(total_examples + 1);
+     let mut players: Vec<u8> = Vec::with_capacity(total_examples);
+     let mut outcomes: Vec<f32> = Vec::with_capacity(total_examples * N_HOUSES);
++    let mut chosen: Vec<u32> = Vec::with_capacity(total_examples);
+     let mut winners: Vec<Option<String>> = Vec::with_capacity(finished.len());
+     let mut steps: Vec<u32> = Vec::with_capacity(finished.len());
+     let mut examples_per_game: Vec<u32> = Vec::with_capacity(finished.len());
+@@ -740,6 +761,7 @@ pub fn selfplay<'py>(
+             actions_flat.extend_from_slice(&record.actions);
+             policy_flat.extend_from_slice(&record.policy);
+             players.push(record.player);
++            chosen.push(record.chosen);
+             for entry in outcome {
+                 outcomes.push(entry as f32);
+             }
+@@ -755,7 +777,7 @@ pub fn selfplay<'py>(
+         rounds.push(game.rounds as u32);
+     }
+ 
+-    let items: Vec<Py<PyAny>> = vec![
++    let mut items: Vec<Py<PyAny>> = vec![
+         array2(py, total_examples, STATE_DIM, states_flat)?.into_any(),
+         array2(py, total_rows, ACTION_DIM, actions_flat)?.into_any(),
+         numpy::ndarray::Array1::from_vec(offsets)
+@@ -770,6 +792,11 @@ pub fn selfplay<'py>(
+         examples_per_game.into_pyobject(py)?.unbind().into_any(),
+         rounds.into_pyobject(py)?.unbind().into_any(),
+     ];
++    if record_chosen {
++        // Appended last so a caller that did not ask for it keeps the ten-item
++        // tuple it has always received.
++        items.push(PyArray1::from_vec(py, chosen).unbind().into_any());
++    }
+     PyTuple::new(py, items)
+ }
+ 
+diff --git a/src/agot/agents/greedy_agent.py b/src/agot/agents/greedy_agent.py
+index 934932c..cf9b7d0 100644
+--- a/src/agot/agents/greedy_agent.py
++++ b/src/agot/agents/greedy_agent.py
+@@ -104,9 +104,7 @@ class GreedyPolicy(Policy):
+         actions = game.legal_actions()
+         if not actions:  # pragma: no cover - defensive
+             raise RuntimeError("no legal actions to choose from")
+-        scores = np.array(
+-            [self._score(game, action) for action in actions], dtype=np.float64
+-        )
++        scores = self.scores(game, actions)
+         if self.noise:
+             scores += np.array(
+                 [self.rng.uniform(-self.noise, self.noise) for _ in actions]
+@@ -114,6 +112,18 @@ class GreedyPolicy(Policy):
+         best = int(np.argmax(scores))
+         return actions[best], one_hot_target(best, len(actions))
+ 
++    def scores(self, game: Game, actions=None) -> np.ndarray:
++        """Raw deterministic heuristic score for every candidate.
++
++        Exposed so the planning teacher can turn the same yardstick into a
++        target distribution. Noise is deliberately *not* added here: it exists
++        to break ties during play, not to blur the labels.
++        """
++        actions = game.legal_actions() if actions is None else list(actions)
++        return np.array(
++            [self._score(game, action) for action in actions], dtype=np.float64
++        )
++
+     # -- scoring ---------------------------------------------------------
+ 
+     def _score(self, game: Game, action: Action) -> float:
+diff --git a/src/agot/cli.py b/src/agot/cli.py
+index 3f39edf..d2ee6d3 100644
+--- a/src/agot/cli.py
++++ b/src/agot/cli.py
+@@ -24,6 +24,7 @@ import math
+ import os
+ import time
+ import webbrowser
++from dataclasses import replace
+ from pathlib import Path
+ 
+ from agot.agents import MCTS, GreedyPolicy, RandomPolicy
+@@ -427,18 +428,56 @@ def _run_training(args: argparse.Namespace) -> int:
+     model = (
+         PolicyValueNet.load(args.resume)
+         if args.resume
+-        else PolicyValueNet(hidden=args.hidden, value_context=True)
++        else PolicyValueNet(
++            hidden=args.hidden, value_context=True, q_head=args.q_head
++        )
+     )
++    if args.resume and args.q_head and not model.q_head:
++        raise SystemExit(
++            f"{args.resume} was trained without a Q head; resume it without "
++            "--q-head or start a fresh run"
++        )
+     trainer = Trainer(
+         model,
+         TrainConfig(
+             learning_rate=args.lr,
+             epochs=args.epochs,
+             device=device,
++            q_weight=args.q_weight,
+         ),
+     )
+     buffer = ReplayBuffer(capacity=args.buffer)
+ 
++    # A small separate dataset of greedy planning decisions. It is built once
++    # per session (deterministic from its seed) and mixed into every epoch; it
++    # never enters the replay buffer, so a q-head run's `chosen` indices stay
++    # consistent.
++    teacher_examples = None
++    teacher_rate = args.planning_teacher_rate
++    if teacher_rate > 0:
++        from agot.nn.teacher import planning_teacher_examples
++
++        teacher_games = args.planning_teacher_games or 32
++        print(
++            f"building planning teacher: {teacher_games} greedy games",
++            flush=True,
++        )
++        teacher_examples = planning_teacher_examples(
++            games=teacher_games,
++            config=replace(config, seed=args.seed + 700_000),
++        )
++        if not teacher_examples:
++            raise SystemExit(
++                "the planning teacher recorded no examples; check the game "
++                "configuration"
++            )
++        print(
++            f"planning teacher: {len(teacher_examples)} planning decisions "
++            f"(rate {teacher_rate:.3f}, weight "
++            f"{trainer.config.auxiliary_weight:.2f})",
++            flush=True,
++        )
++
+     checkpoint = Path(args.checkpoint)
+     best_checkpoint = (
+         Path(args.best_checkpoint)
+@@ -620,7 +659,11 @@ def _run_training(args: argparse.Namespace) -> int:
+             # pass moves to the GPU.
+             model.to(device)
+             train_started = time.time()
+-            history = trainer.train(buffer)
++            history = trainer.train(
++                buffer,
++                auxiliary=teacher_examples,
++                auxiliary_rate=teacher_rate,
++            )
+             seconds_train = time.time() - train_started
+             last = history[-1] if history else {}
+             model.to("cpu")
+@@ -633,6 +676,10 @@ def _run_training(args: argparse.Namespace) -> int:
+                 f"policy_loss={last.get('policy_loss', 0):.4f} "
+                 f"value_loss={last.get('value_loss', 0):.4f}"
+             )
++            if model.q_head:
++                line += f" q_loss={last.get('q_loss', 0):.4f}"
++            if teacher_examples is not None:
++                line += f" aux_loss={last.get('auxiliary_loss', 0):.4f}"
+             record = {
+                 "iteration": iteration + 1,
+                 "seconds_selfplay": round(seconds_selfplay, 3),
+@@ -645,6 +692,8 @@ def _run_training(args: argparse.Namespace) -> int:
+                 "buffer": len(buffer),
+                 "policy_loss": last.get("policy_loss"),
+                 "value_loss": last.get("value_loss"),
++                "q_loss": last.get("q_loss"),
++                "auxiliary_loss": last.get("auxiliary_loss"),
+             }
+             gate_due = (
+                 (iteration + 1) % max(1, args.eval_every) == 0
+@@ -1189,6 +1238,35 @@ def build_parser() -> argparse.ArgumentParser:
+             "Planning/Mustering/Action/Bidding at 32, Wildling attacks at 16 and "
+             "keeps 64 for Raven/Combat/Westeros; the cap is divided by "
+             "--determinizations exactly like --simulations"
++        "--q-head",
++        action="store_true",
++        help=(
++            "add a per-candidate Q head and train it on the played action's "
++            "outcome; off by default so existing checkpoints are unchanged"
++        ),
++    )
++    train.add_argument(
++        "--q-weight",
++        type=float,
++        default=0.5,
++        help="weight of the Q loss when --q-head is on",
++    )
++    train.add_argument(
++        "--planning-teacher-rate",
++        type=float,
++        default=0.0,
++        help=(
++            "fraction of each mini-batch drawn from the greedy planning teacher "
++            "for an auxiliary policy loss (0 disables it)"
++        ),
++    )
++    train.add_argument(
++        "--planning-teacher-games",
++        type=int,
++        default=0,
++        help=(
++            "greedy games used to build the planning teacher (0 = 32 when the "
++            "rate is positive)"
+         ),
+     )
+     train.add_argument(
+diff --git a/src/agot/nn/model.py b/src/agot/nn/model.py
+index 8fbe0ea..ec65543 100644
+--- a/src/agot/nn/model.py
++++ b/src/agot/nn/model.py
+@@ -15,6 +15,12 @@ were ground down to the float32 floor (~1e-37) and emitted a uniform
+ distribution forever -- so the head now reads ``h`` unconditionally and cannot
+ shut itself off. See the "Notable fixes" section of ``docs/roadmap.md``.
+ 
++The optional Q head (``q_head=True``) scores every candidate from the same
++``[h, a_i]`` pair and predicts that candidate's per-house outcome. It exists
++because the 97-dim state does not contain the board: the children of a planning
++node encode to identical state vectors, so only an action-conditioned value can
++rank the orders. It is off by default and stored in the checkpoint config.
++
+ Requires PyTorch, which is an optional extra::
+ 
+     pip install -e ".[rl]"
+@@ -54,6 +60,7 @@ class PolicyValueNet(nn.Module):
+         trunk_layers: int = 2,
+         n_houses: int = N_HOUSES,
+         value_context: bool = False,
++        q_head: bool = False,
+     ) -> None:
+         super().__init__()
+         self.state_dim = state_dim
+@@ -70,6 +77,11 @@ class PolicyValueNet(nn.Module):
+         #: one. The ONNX leaf backend caches its exported graph beside it, so a
+         #: model that came from a checkpoint needs no path threaded through.
+         self.checkpoint: str | None = None
++        #: Predict one value *per candidate* from ``[h, a_i]``. Off by default:
++        #: the extra head only earns its keep once the trainer is given the
++        #: played action index, and adding tensors to every forward pass would
++        #: change the existing checkpoints' inference cost.
++        self.q_head = q_head
+ 
+         self.state_trunk = _mlp(state_dim, hidden, trunk_layers)
+         self.action_trunk = _mlp(action_dim, hidden, trunk_layers)
+@@ -88,18 +100,32 @@ class PolicyValueNet(nn.Module):
+             nn.Linear(hidden, n_houses),
+             nn.Tanh(),
+         )
++        if q_head:
++            # Same shape as the value head but one row per candidate instead of
++            # one row per position. It reads ``[h, a_i]`` directly, which is the
++            # only place the board reaches this prediction: the state vector
++            # does not encode unit placement.
++            self.q_value_head = nn.Sequential(
++                nn.Linear(2 * hidden, hidden),
++                nn.ReLU(),
++                nn.Linear(hidden, n_houses),
++                nn.Tanh(),
++            )
+ 
+     def forward(
+         self,
+         state: torch.Tensor,
+         actions: torch.Tensor,
+         mask: torch.Tensor | None = None,
+-    ) -> tuple[torch.Tensor, torch.Tensor]:
+-        """Return ``(policy_logits, values)``.
++    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[
++        torch.Tensor, torch.Tensor, torch.Tensor
++    ]:
++        """Return ``(policy_logits, values)``, plus ``q_values`` when enabled.
+ 
+         ``state`` has shape ``(B, state_dim)``, ``actions`` ``(B, N, action_dim)``
+         and ``mask`` ``(B, N)`` with ones for legal actions. Logits for illegal
+-        actions are pushed to a large negative number.
++        actions are pushed to a large negative number. With ``q_head=True`` the
++        third element is ``(B, N, n_houses)``: one outcome vector per candidate.
+         """
+         h = self.state_trunk(state)  # (B, H)
+         a = self.action_trunk(actions)  # (B, N, H)
+@@ -117,10 +143,13 @@ class PolicyValueNet(nn.Module):
+         ).squeeze(-1)  # (B, N)
+         if mask is not None:
+             logits = logits.masked_fill(mask <= 0, -1e9)
++        q_values = self._q_values(h, a) if self.q_head else None
+         if self.value_context:
+             pooled = a.mean(dim=1)
+             h = self.value_merge(torch.cat([h, pooled], dim=-1))
+         values = self.value_head(h)  # (B, n_houses)
++        if q_values is not None:
++            return logits, values, q_values
+         return logits, values
+ 
+     def forward_packed(
+@@ -128,7 +157,9 @@ class PolicyValueNet(nn.Module):
+         state: torch.Tensor,
+         actions: torch.Tensor,
+         index: torch.Tensor,
+-    ) -> tuple[torch.Tensor, torch.Tensor]:
++    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[
++        torch.Tensor, torch.Tensor, torch.Tensor
++    ]:
+         """Forward over a *concatenated* action set, one segment per state row.
+ 
+         ``state`` is ``(B, state_dim)``, ``actions`` is ``(T, action_dim)`` for
+@@ -139,9 +170,10 @@ class PolicyValueNet(nn.Module):
+         action trunk and the scorer do 2.5x the rows they needed, and up to 12x on
+         the worst batch.
+ 
+-        Returns flat ``(T,)`` logits and ``(B, n_houses)`` values. The caller
+-        normalises each segment, because the policy is a distribution over one
+-        leaf's actions only (see :func:`segment_softmax`).
++        Returns flat ``(T,)`` logits and ``(B, n_houses)`` values. With
++        ``q_head=True`` a third flat ``(T, n_houses)`` tensor is returned too.
++        The caller normalises each segment, because the policy is a distribution
++        over one leaf's actions only (see :func:`segment_softmax`).
+         """
+         h = self.state_trunk(state)  # (B, H)
+         a = self.action_trunk(actions)  # (T, H)
+@@ -152,6 +184,7 @@ class PolicyValueNet(nn.Module):
+         logits = self.policy_head[2](
+             torch.relu(state_part[index] + action_part)
+         ).squeeze(-1)
++        q_values = self._q_values(h, a, index) if self.q_head else None
+         if self.value_context:
+             # Mean of each row's candidate embeddings: the only place the two
+             # region blocks reach the value head.
+@@ -162,8 +195,35 @@ class PolicyValueNet(nn.Module):
+             counts = counts.index_add_(0, index, torch.ones_like(index, dtype=a.dtype))
+             pooled = pooled / counts.clamp_min(1.0).unsqueeze(1)
+             h = self.value_merge(torch.cat([h, pooled], dim=-1))
++        if q_values is not None:
++            return logits, self.value_head(h), q_values
+         return logits, self.value_head(h)
+ 
++    def _q_values(
++        self,
++        h: torch.Tensor,
++        a: torch.Tensor,
++        index: torch.Tensor | None = None,
++    ) -> torch.Tensor:
++        """Score candidates from ``[h, a_i]``; packed when ``index`` is given.
++
++        ``h`` is ``(B, hidden)``. Without ``index``, ``a`` is ``(B, N, hidden)``
++        and the result is ``(B, N, n_houses)``; with it, ``a`` is ``(T, hidden)``
++        and the result is ``(T, n_houses)``. The first layer is split the same
++        way as the policy head, so the state half is computed once per row.
++        """
++        first = self.q_value_head[0]
++        weight = first.weight
++        state_part = nn.functional.linear(
++            h, weight[:, : self.hidden], first.bias
++        )
++        if index is None:
++            state_part = state_part.unsqueeze(1)
++        else:
++            state_part = state_part[index]
++        action_part = nn.functional.linear(a, weight[:, self.hidden :])
++        return self.q_value_head[2](torch.relu(state_part + action_part))
++
+     # -- inference helpers ----------------------------------------------
+ 
+     @torch.inference_mode()
+@@ -193,8 +253,9 @@ class PolicyValueNet(nn.Module):
+             encode_actions(game, actions, game.state.active_house)
+         ).unsqueeze(0)
+         # Every candidate is legal here, so no mask is needed; passing one would
+-        # only make `forward` allocate a masked copy.
+-        logits, values = self.forward(state, action_tensor)
++        # only make `forward` allocate a masked copy. The Q head is a training
++        # signal, not something search consumes, so it is dropped here.
++        logits, values = self.forward(state, action_tensor)[:2]
+         probs = torch.softmax(logits[0], dim=-1).cpu().numpy()
+         return actions, probs.astype(np.float32), values[0].cpu().numpy()
+ 
+@@ -235,7 +296,7 @@ class PolicyValueNet(nn.Module):
+             torch.from_numpy(state),
+             torch.from_numpy(action_tensor),
+             torch.from_numpy(index),
+-        )
++        )[:2]
+         flat_index = torch.from_numpy(index)
+         probabilities = (
+             segment_softmax(logits, flat_index, len(requests)).cpu().numpy()
+@@ -268,6 +329,7 @@ class PolicyValueNet(nn.Module):
+                     "trunk_layers": self.trunk_layers,
+                     "n_houses": self.n_houses,
+                     "value_context": self.value_context,
++                    "q_head": self.q_head,
+                 },
+             },
+             temporary,
+diff --git a/src/agot/nn/teacher.py b/src/agot/nn/teacher.py
+new file mode 100644
+index 0000000..d121cb7
+--- /dev/null
++++ b/src/agot/nn/teacher.py
+@@ -0,0 +1,162 @@
++"""Planning teacher: greedy scores as a soft target for order placement.
++
++The 97-dim state vector does not encode the board, so every child of a planning
++node looks identical to a state-only value head; the recorded visit target is
++therefore near-uniform (about 2.6 nats, 43% of decisions). The *action* encoder
++does see the board, so the scorer can rank the candidate orders -- it only needs
++a ranking to imitate. The hand-written greedy heuristic already produces one,
++and a network trained on 4k such planning decisions reached 40% held-out top-1
++against 10% for the self-play policy.
++
++This module turns the greedy score vector into a distribution and builds a small,
++separate dataset of planning examples for the trainer's auxiliary loss. The
++defaults match the experiment: softmax at temperature 1 (the scores are additive
++and roughly one unit apart) and label smoothing 0.05, so no candidate is ever
++exactly zero and the target stays a proper distribution.
++"""
++
++from __future__ import annotations
++
++from dataclasses import replace
++
++import numpy as np
++
++from agot.agents.base import outcome_vector
++from agot.agents.greedy_agent import GreedyPolicy
++from agot.engine.enums import Phase
++from agot.engine.game import Game, GameConfig
++from agot.engine.observation import HOUSE_ORDER, observe
++from agot.training.replay import Example
++
++#: Uniform mass mixed into every teacher target. 0.05 keeps the target honest
++#: about the heuristic's uncertainty without washing out the argmax.
++PLANNING_SMOOTHING = 0.05
++#: Softmax temperature over the greedy scores.
++PLANNING_TEMPERATURE = 1.0
++#: Safety cap for teacher games, like the self-play drivers.
++DEFAULT_STEP_LIMIT = 20_000
++
++
++def soft_teacher_target(
++    scores,
++    *,
++    smoothing: float = PLANNING_SMOOTHING,
++    temperature: float = PLANNING_TEMPERATURE,
++) -> np.ndarray:
++    """Normalise greedy scores into a smoothed distribution.
++
++    ``softmax(scores / temperature)`` is the soft one-hot; label smoothing then
++    mixes in ``smoothing`` uniform mass, so the result sums to one and every
++    candidate keeps at least ``smoothing / N``.
++    """
++    scores = np.asarray(scores, dtype=np.float64)
++    if scores.ndim != 1 or scores.size == 0:
++        raise ValueError("teacher scores must be a non-empty 1-D vector")
++    if not np.isfinite(scores).all():
++        raise ValueError("teacher scores must be finite")
++    if not 0.0 <= smoothing < 1.0:
++        raise ValueError("smoothing must be in [0, 1)")
++    if temperature <= 0.0:
++        raise ValueError("temperature must be positive")
++
++    shifted = (scores - scores.max()) / temperature
++    weights = np.exp(shifted)
++    total = weights.sum()
++    if not np.isfinite(total) or total <= 0.0:  # pragma: no cover - defensive
++        weights = np.full(scores.size, 1.0 / scores.size)
++    else:
++        weights /= total
++    target = (1.0 - smoothing) * weights + smoothing / scores.size
++    return target.astype(np.float32)
++
++
++def planning_target(
++    game: Game,
++    actions=None,
++    *,
++    policy: GreedyPolicy | None = None,
++    smoothing: float = PLANNING_SMOOTHING,
++    temperature: float = PLANNING_TEMPERATURE,
++) -> np.ndarray | None:
++    """Teacher target for a planning decision, or ``None`` outside planning.
++
++    The caller may pass the action list it already holds; otherwise the game's
++    legal actions are used. Returned in the same order as those actions.
++    """
++    if game.state.phase is not Phase.PLANNING:
++        return None
++    candidates = list(game.legal_actions() if actions is None else actions)
++    if not candidates:
++        return None
++    policy = policy or GreedyPolicy(noise=0.0)
++    return soft_teacher_target(
++        policy.scores(game, candidates),
++        smoothing=smoothing,
++        temperature=temperature,
++    )
++
++
++def planning_teacher_examples(
++    *,
++    games: int = 32,
++    seed: int = 0,
++    config: GameConfig | None = None,
++    smoothing: float = PLANNING_SMOOTHING,
++    temperature: float = PLANNING_TEMPERATURE,
++    step_limit: int = DEFAULT_STEP_LIMIT,
++) -> list[Example]:
++    """Play greedy games and keep every planning decision as a teacher example.
++
++    Only planning decisions are recorded: that is the phase whose children a
++    state-only value head cannot tell apart. The final outcome is filled in so
++    the examples are valid :class:`Example` objects, although the auxiliary
++    policy loss does not read it.
++    """
++    base = config or GameConfig(seed=seed, sequential_westeros=True, deferred_battles=True)
++    examples: list[Example] = []
++    for game_index in range(max(0, games)):
++        game_seed = (base.seed if base.seed is not None else seed) + game_index
++        game = Game.new(replace(base, seed=game_seed))
++        policies = {
++            house: GreedyPolicy(seed=game_seed * 31 + seat)
++            for seat, house in enumerate(base.houses)
++        }
++        local: list[Example] = []
++        steps = 0
++        while not game.is_terminal() and steps < step_limit:
++            if game.state.phase is Phase.WESTEROS and game.state.westeros_waiting:
++                game.continue_westeros()
++                continue
++            house = game.current_player()
++            if house is None:  # pragma: no cover - the engine advances to someone
++                break
++            actions = game.legal_actions()
++            if not actions:  # pragma: no cover - terminal handled above
++                break
++            action, _ = policies[house].decide(game)
++            if game.state.phase is Phase.PLANNING:
++                target = planning_target(
++                    game,
++                    actions,
++                    policy=policies[house],
++                    smoothing=smoothing,
++                    temperature=temperature,
++                )
++                if target is not None:
++                    observation = observe(game, actions)
++                    local.append(
++                        Example(
++                            state=observation.state_features,
++                            actions=observation.action_features,
++                            policy=target,
++                            player=HOUSE_ORDER.index(house),
++                            outcome=None,  # type: ignore[arg-type]  # filled below
++                        )
++                    )
++            game.step(action)
++            steps += 1
++        outcome = outcome_vector(game)
++        for example in local:
++            example.outcome = outcome
++        examples.extend(local)
++    return examples
+diff --git a/src/agot/training/parallel.py b/src/agot/training/parallel.py
+index 4d8fdf7..ea16090 100644
+--- a/src/agot/training/parallel.py
++++ b/src/agot/training/parallel.py
+@@ -237,6 +237,7 @@ def _model_config(model) -> dict:
+         "trunk_layers": model.trunk_layers,
+         "n_houses": model.n_houses,
+         "value_context": model.value_context,
++        "q_head": model.q_head,
+     }
+ 
+ 
+diff --git a/src/agot/training/replay.py b/src/agot/training/replay.py
+index 018a835..1d31204 100644
+--- a/src/agot/training/replay.py
++++ b/src/agot/training/replay.py
+@@ -2,7 +2,9 @@
+ 
+ One :class:`Example` is a single decision point: the encoded position, the
+ encoded candidate actions, the search's target distribution over them, which
+-house was acting, and the final game outcome (a per-house reward vector).
++house was acting, and the final game outcome (a per-house reward vector). It
++optionally carries the index of the action that was actually played, which the
++Q head trains on; a buffer refuses to mix examples with and without it.
+ 
+ The buffer is a *structure of arrays*, not a list of objects: positions,
+ players and outcomes are dense rows, while the variable-length candidates of
+@@ -31,6 +33,10 @@ class Example:
+     policy: np.ndarray  # (N,)
+     player: int  # index into HOUSE_ORDER
+     outcome: np.ndarray  # (N_HOUSES,)
++    #: Index into ``actions`` of the action that was actually played, or
++    #: ``None`` when the producer did not record it. The optional Q head needs
++    #: it to train on the played action's outcome rather than the whole set.
++    chosen: int | None = None
+ 
+     @property
+     def value(self) -> float:
+@@ -52,6 +58,11 @@ class ReplayBuffer:
+         self._players = np.zeros((0,), dtype=np.int64)
+         self._outcomes = np.zeros((0, N_HOUSES), dtype=np.float32)
+         self._offsets = np.zeros((1,), dtype=np.int64)
++        #: Played-action indices, valid only when :attr:`_has_chosen` is set.
++        #: A buffer never mixes the two modes: a missing index would silently
++        #: train the Q head on a different action than the one played.
++        self._chosen = np.zeros((0,), dtype=np.int64)
++        self._has_chosen = False
+ 
+     # -- sizing ----------------------------------------------------------
+ 
+@@ -61,7 +72,7 @@ class ReplayBuffer:
+         target = min(self.capacity, max(count, max(1024, len(self._states) * 2)))
+         if target <= len(self._states):
+             return
+-        for name in ("_states", "_players", "_outcomes"):
++        for name in ("_states", "_players", "_outcomes", "_chosen"):
+             array = getattr(self, name)
+             grown = np.zeros((target, *array.shape[1:]), dtype=array.dtype)
+             grown[: len(array)] = array
+@@ -91,11 +102,14 @@ class ReplayBuffer:
+         self._states[:keep] = self._states[drop : self._size]
+         self._players[:keep] = self._players[drop : self._size]
+         self._outcomes[:keep] = self._outcomes[drop : self._size]
++        self._chosen[:keep] = self._chosen[drop : self._size]
+         self._actions[: row_end - row_start] = self._actions[row_start:row_end]
+         self._policies[: row_end - row_start] = self._policies[row_start:row_end]
+         self._offsets[1 : keep + 1] = self._offsets[drop + 1 : self._size + 1] - row_start
+         self._size = keep
+         self._rows = row_end - row_start
++        if keep == 0:
++            self._has_chosen = False
+ 
+     # -- basic API -------------------------------------------------------
+ 
+@@ -111,10 +125,26 @@ class ReplayBuffer:
+         return self._example(index)
+ 
+     def add(self, example: Example) -> None:
++        count = len(example.actions)
++        chosen = example.chosen
++        if chosen is not None:
++            if not 0 <= chosen < count:
++                raise ValueError(
++                    f"chosen index {chosen} is outside an action set of {count}"
++                )
++            if self._size and not self._has_chosen:
++                raise ValueError(
++                    "cannot add an example with a chosen action to a buffer "
++                    "that already holds examples without one"
++                )
++        elif self._size and self._has_chosen:
++            raise ValueError(
++                "cannot add an example without a chosen action to a buffer "
++                "that already holds examples with one"
++            )
+         if self._size >= self.capacity:
+             self._drop_oldest()
+         self._ensure_examples(self._size + 1)
+-        count = len(example.actions)
+         self._ensure_rows(self._rows + count)
+ 
+         row = self._size
+@@ -124,6 +154,11 @@ class ReplayBuffer:
+         self._policies[start : start + count] = example.policy
+         self._players[row] = example.player
+         self._outcomes[row] = example.outcome
++        if chosen is not None:
++            self._has_chosen = True
++            self._chosen[row] = chosen
++        elif self._has_chosen:  # pragma: no cover - rejected above
++            self._chosen[row] = -1
+         self._offsets[row + 1] = start + count
+         self._size += 1
+         self._rows = start + count
+@@ -141,6 +176,7 @@ class ReplayBuffer:
+             policy=self._policies[start:stop],
+             player=int(self._players[index]),
+             outcome=self._outcomes[index],
++            chosen=int(self._chosen[index]) if self._has_chosen else None,
+         )
+ 
+     def sample(self, batch_size: int, rng: np.random.Generator) -> list[Example]:
+@@ -157,6 +193,7 @@ class ReplayBuffer:
+         self._size = 0
+         self._rows = 0
+         self._offsets[0] = 0
++        self._has_chosen = False
+ 
+     # -- persistence -----------------------------------------------------
+ 
+@@ -171,15 +208,19 @@ class ReplayBuffer:
+             if self._size
+             else np.zeros((0, N_HOUSES), dtype=np.float32)
+         )
+-        np.savez_compressed(
+-            path,
+-            states=states,
+-            actions=np.asarray(self._actions[: self._rows], dtype=np.float32),
+-            offsets=self._offsets[: self._size + 1].astype(np.int64),
+-            policies=np.asarray(self._policies[: self._rows], dtype=np.float32),
+-            players=self._players[: self._size].astype(np.int64),
+-            outcomes=outcomes.astype(np.float32),
+-        )
++        arrays = {
++            "states": states,
++            "actions": np.asarray(self._actions[: self._rows], dtype=np.float32),
++            "offsets": self._offsets[: self._size + 1].astype(np.int64),
++            "policies": np.asarray(self._policies[: self._rows], dtype=np.float32),
++            "players": self._players[: self._size].astype(np.int64),
++            "outcomes": outcomes.astype(np.float32),
++        }
++        if self._has_chosen:
++            # Omitted entirely when the run does not train a Q head, so its
++            # snapshot stays byte-compatible with earlier files.
++            arrays["chosen"] = self._chosen[: self._size].astype(np.int64)
++        np.savez_compressed(path, **arrays)
+ 
+     @classmethod
+     def load(cls, path: str, capacity: int | None = None) -> ReplayBuffer:
+@@ -190,6 +231,7 @@ class ReplayBuffer:
+             policies = data["policies"]
+             players = data["players"]
+             outcomes = data["outcomes"]
++            chosen = data["chosen"] if "chosen" in data.files else None
+             # Older files stored one object array per example in `policies`;
+             # current files store one flat float32 vector.
+             legacy = policies.dtype == object
+@@ -206,6 +248,9 @@ class ReplayBuffer:
+                         policy=np.asarray(policy, dtype=np.float32),
+                         player=int(players[index]),
+                         outcome=outcomes[index],
++                        chosen=(
++                            int(chosen[index]) if chosen is not None else None
++                        ),
+                     )
+                 )
+             return buffer
+diff --git a/src/agot/training/rust_engine.py b/src/agot/training/rust_engine.py
+index 418cd43..166c156 100644
+--- a/src/agot/training/rust_engine.py
++++ b/src/agot/training/rust_engine.py
+@@ -136,6 +136,15 @@ def leaf_evaluator(
+                     torch.from_numpy(index),
+                 )
+                 return logits.numpy(), values.numpy()
++    def evaluate(state, actions, index, mask):
++        with torch.inference_mode():
++            # A Q-head model returns a third tensor; search never consumes it.
++            logits, values = model.forward_packed(
++                torch.from_numpy(state),
++                torch.from_numpy(actions),
++                torch.from_numpy(index),
++            )[:2]
++            return logits.numpy(), values.numpy()
+ 
+         return evaluate
+ 
+@@ -167,6 +176,7 @@ def spec_for(
+     dedupe_leaves: bool = True,
+     phase_budgets: dict[str, int] | None = None,
+     leaf_backend: str | None = None,
++    record_chosen: bool = False,
+ ) -> dict:
+     """Translate a :class:`SelfPlayPlan` into the driver's spec mapping.
+ 
+@@ -180,6 +190,8 @@ def spec_for(
+     :func:`leaf_evaluator`). The driver ignores it; it travels in the spec so a
+     recorded plan says how its games were searched, and so a gate reproduces the
+     run it is judging.
++    ``record_chosen`` asks for an extra played-action-index buffer, which is
++    only needed when the model trains a Q head.
+     """
+     base = base_config or GameConfig()
+     return {
+@@ -190,6 +202,7 @@ def spec_for(
+         "dedupe_leaves": dedupe_leaves,
+         "phase_budgets": phase_budgets,
+         "leaf_backend": plan.leaf_backend if leaf_backend is None else leaf_backend,
++        "record_chosen": record_chosen,
+         "seed": plan.seed,
+         "seeds": [plan.seed + index for index in range(plan.games)],
+         "temperature": plan.temperature,
+@@ -221,7 +234,11 @@ def _unpack(result, games: int) -> list[GameRecord]:
+         steps,
+         examples_per_game,
+         rounds,
+-    ) = result
++    ) = result[:10]
++    # Only a request that set `record_chosen` gets the eleventh buffer. The
++    # tuple is extended rather than replaced so an older extension keeps
++    # loading and every pre-existing caller sees the same ten items.
++    chosen = result[10] if len(result) > 10 else None
+ 
+     # `steps` is the number of decisions; `examples_per_game` is how many of
+     # them were recorded. They differ when a scripted seat acts without
+@@ -249,6 +266,7 @@ def _unpack(result, games: int) -> list[GameRecord]:
+                     policy=np.asarray(policy[start:end], dtype=np.float32),
+                     player=int(players[offset]),
+                     outcome=np.asarray(outcomes[offset], dtype=np.float32),
++                    chosen=int(chosen[offset]) if chosen is not None else None,
+                 )
+             )
+         cursor += int(taken)
+@@ -271,6 +289,7 @@ def self_play_records(
+     dedupe_leaves: bool = True,
+     phase_budgets: dict[str, int] | None = None,
+     leaf_backend: str | None = None,
++    record_chosen: bool | None = None,
+ ) -> list[GameRecord]:
+     """Play ``plan.games`` games with the Rust driver and return the records.
+ 
+@@ -279,6 +298,8 @@ def self_play_records(
+     per-phase cap table; ``None`` keeps the fixed budget.
+     a run against the same leaves scored individually. ``leaf_backend``
+     overrides ``plan.leaf_backend`` for this call.
++    a run against the same leaves scored individually. ``record_chosen``
++    defaults to the model's own ``q_head`` setting.
+     """
+     extension = core()
+     if extension is None:  # pragma: no cover - depends on the environment
+@@ -286,11 +307,14 @@ def self_play_records(
+             f"{MODULE} is not installed; build it with maturin or use "
+             "agot.training.selfplay.batched_self_play"
+         )
++    if record_chosen is None:
++        record_chosen = bool(getattr(model, "q_head", False))
+     spec = spec_for(
+         plan,
+         base_config,
+         dedupe_leaves=dedupe_leaves,
+         phase_budgets=phase_budgets,
++        record_chosen=record_chosen,
+     )
+     result = extension.selfplay(spec, leaf_evaluator(model))
+     backend = plan.leaf_backend if leaf_backend is None else leaf_backend
+@@ -320,6 +344,7 @@ def try_batched_self_play(
+     leaf_backend: str = "torch",
+     leaf_checkpoint: str | None = None,
+     leaf_threads: int = 1,
++    record_chosen: bool = False,
+ ) -> list[GameRecord] | None:
+     """Run a ``batched_self_play`` request on the Rust driver, or return ``None``.
+ 
+@@ -402,6 +427,7 @@ def try_batched_self_play(
+         "dedupe_leaves": dedupe_leaves,
+         "phase_budgets": phase_budgets,
+         "leaf_backend": leaf_backend,
++        "record_chosen": record_chosen,
+         "seed": first.seed if first.seed is not None else seed,
+         "seeds": game_seeds(configs, seed),
+         "temperature": temperature,
+diff --git a/src/agot/training/selfplay.py b/src/agot/training/selfplay.py
+index 1b5e5c5..738243b 100644
+--- a/src/agot/training/selfplay.py
++++ b/src/agot/training/selfplay.py
+@@ -154,6 +154,26 @@ def _evaluate_leaves(
+     return batch(requests)
+ 
+ 
++def _records_chosen(evaluator) -> bool:
++    """Whether the evaluator's model trains a Q head.
++
++    Only then is the played action index worth recording: a run without the
++    head would otherwise change its replay snapshots for no benefit, and a
++    buffer forbids mixing records with and without the index.
++    """
++    return bool(getattr(getattr(evaluator, "model", None), "q_head", False))
++
++
++def _chosen_index(actions, action) -> int:
++    """Position of ``action`` in ``actions``, with a readable failure."""
++    try:
++        return list(actions).index(action)
++    except ValueError as error:  # pragma: no cover - defensive
++        raise RuntimeError(
++            f"policy played an action the observation did not offer: {action!r}"
++        ) from error
++
++
+ def batched_self_play(
+     evaluator,
+     configs: list[GameConfig],
+@@ -214,6 +234,9 @@ def batched_self_play(
+     :func:`agot.training.rust_engine.leaf_evaluator` through the Rust driver: an
+     ONNX graph is cached at ``leaf_checkpoint`` and scored with ``leaf_threads``
+     intra-op threads (1 by default — this function drives one process).
++    When the evaluator's model has ``q_head`` enabled, every recorded example
++    also carries the index of the action that was actually played. Runs without
++    the head record ``None`` and their data files are unchanged.
+     """
+     # Fast path: when the Rust extension is installed and the request needs
+     # nothing it does not implement, the whole game runs natively and only the
+@@ -222,6 +245,7 @@ def batched_self_play(
+     from agot.training import rust_engine
+ 
+     global LAST_BACKEND
++    record_chosen = _records_chosen(evaluator)
+     rust_records = rust_engine.try_batched_self_play(
+         evaluator,
+         configs,
+@@ -239,6 +263,7 @@ def batched_self_play(
+         leaf_backend=leaf_backend,
+         leaf_checkpoint=leaf_checkpoint,
+         leaf_threads=leaf_threads,
++        record_chosen=record_chosen,
+     )
+     if rust_records is not None:
+         LAST_BACKEND = "rust"
+@@ -368,6 +393,11 @@ def batched_self_play(
+                         policy=target.astype("float32"),
+                         player=HOUSE_ORDER.index(house),
+                         outcome=None,  # type: ignore[arg-type]  # filled below
++                        chosen=(
++                            _chosen_index(observation.actions, action)
++                            if record_chosen
++                            else None
++                        ),
+                     )
+                 )
+             game.step(action)
+diff --git a/src/agot/training/trainer.py b/src/agot/training/trainer.py
+index 823043f..bc04a62 100644
+--- a/src/agot/training/trainer.py
++++ b/src/agot/training/trainer.py
+@@ -6,6 +6,18 @@ The training objective is the AlphaZero one, generalised to six players:
+   actions and the search's target distribution;
+ * value: mean-squared error between the network's per-house prediction and the
+   final outcome vector, masked to the houses actually in the game.
++
++Two optional terms exist for the planning problem, where the state vector does
++not describe the board and the value head cannot rank the candidate orders:
++
++* Q: mean-squared error between the optional per-candidate Q head's prediction
++  for the *played* action and the final outcome vector (requires a model with
++  ``q_head`` and examples that carry ``chosen``);
++* teacher: cross-entropy on a separate set of greedy planning examples, mixed
++  into each mini-batch at ``auxiliary_rate`` with ``auxiliary_weight``.
++
++Both are off unless their inputs are present, so a default run computes the
++same two losses as before.
+ """
+ 
+ from __future__ import annotations
+@@ -35,6 +47,11 @@ class TrainConfig:
+     weight_decay: float = 1e-4
+     grad_clip: float = 1.0
+     device: str = "cpu"
++    #: Weight of the per-candidate Q loss. Only used when the model has a Q head
++    #: and the batch carries played-action indices.
++    q_weight: float = 0.5
++    #: Weight of the planning-teacher cross-entropy on the auxiliary examples.
++    auxiliary_weight: float = 0.3
+ 
+ 
+ @dataclass
+@@ -54,6 +71,9 @@ class PackedBatch:
+     outcome: torch.Tensor
+     outcome_mask: torch.Tensor
+     rows: int
++    #: Played-action index per example row, or ``None`` when the data was
++    #: recorded without one. Never partially filled; see :func:`collate_packed`.
++    chosen: torch.Tensor | None = None
+ 
+     def to(self, device: str) -> PackedBatch:
+         return PackedBatch(
+@@ -64,6 +84,7 @@ class PackedBatch:
+             outcome=self.outcome.to(device),
+             outcome_mask=self.outcome_mask.to(device),
+             rows=self.rows,
++            chosen=None if self.chosen is None else self.chosen.to(device),
+         )
+ 
+ 
+@@ -77,6 +98,7 @@ class Batch:
+     policy: torch.Tensor
+     outcome: torch.Tensor
+     outcome_mask: torch.Tensor
++    chosen: torch.Tensor | None = None
+ 
+     def to(self, device: str) -> Batch:
+         return Batch(
+@@ -86,6 +108,7 @@ class Batch:
+             policy=self.policy.to(device),
+             outcome=self.outcome.to(device),
+             outcome_mask=self.outcome_mask.to(device),
++            chosen=None if self.chosen is None else self.chosen.to(device),
+         )
+ 
+ 
+@@ -114,6 +137,30 @@ def _parameter_groups(model: nn.Module, weight_decay: float) -> list[dict]:
+     ]
+ 
+ 
++def _chosen_column(examples: list[Example]) -> torch.Tensor | None:
++    """The played-action indices as a column, or ``None`` for a legacy batch.
++
++    A batch is never allowed to mix the two: half the rows would train the Q
++    head on the played action and half would silently train it on nothing.
++    """
++    values = [example.chosen for example in examples]
++    present = sum(value is not None for value in values)
++    if present == 0:
++        return None
++    if present != len(values):
++        raise ValueError(
++            "cannot mix examples with and without a chosen action in one batch"
++        )
++    for index, example in enumerate(examples):
++        chosen = example.chosen
++        if not 0 <= int(chosen) < len(example.actions):  # type: ignore[arg-type]
++            raise ValueError(
++                f"example {index}: chosen index {chosen} is outside an action "
++                f"set of {len(example.actions)}"
++            )
++    return torch.tensor(values, dtype=torch.int64)
++
++
+ def collate(examples: list[Example]) -> Batch:
+     """Pad a list of variable-length examples into dense tensors."""
+     size = len(examples)
+@@ -144,7 +191,9 @@ def collate(examples: list[Example]) -> Batch:
+             (np.asarray(example.outcome) != 0).astype(np.float32)
+         )
+ 
+-    return Batch(state, actions, mask, policy, outcome, outcome_mask)
++    return Batch(
++        state, actions, mask, policy, outcome, outcome_mask, _chosen_column(examples)
++    )
+ 
+ 
+ def collate_packed(examples: list[Example]) -> PackedBatch:
+@@ -180,7 +229,16 @@ def collate_packed(examples: list[Example]) -> PackedBatch:
+         )
+         cursor += count
+ 
+-    return PackedBatch(state, actions, index, policy, outcome, outcome_mask, size)
++    return PackedBatch(
++        state,
++        actions,
++        index,
++        policy,
++        outcome,
++        outcome_mask,
++        size,
++        _chosen_column(examples),
++    )
+ 
+ 
+ @dataclass
+@@ -190,6 +248,8 @@ class TrainStats:
+     batches: int = 0
+     policy_loss: float = 0.0
+     value_loss: float = 0.0
++    q_loss: float = 0.0
++    auxiliary_loss: float = 0.0
+     total_loss: float = 0.0
+     extras: dict = field(default_factory=dict)
+ 
+@@ -199,6 +259,8 @@ class TrainStats:
+             "batches": self.batches,
+             "policy_loss": self.policy_loss / denom,
+             "value_loss": self.value_loss / denom,
++            "q_loss": self.q_loss / denom,
++            "auxiliary_loss": self.auxiliary_loss / denom,
+             "total_loss": self.total_loss / denom,
+         }
+ 
+@@ -241,7 +303,20 @@ class Trainer:
+         if "rng" in state:
+             self.rng.bit_generator.state = state["rng"]
+ 
+-    def train_epoch(self, examples: Sequence[Example]) -> TrainStats:
++    def train_epoch(
++        self,
++        examples: Sequence[Example],
++        *,
++        auxiliary: Sequence[Example] | None = None,
++        auxiliary_rate: float = 0.0,
++    ) -> TrainStats:
++        """One pass over ``examples``, optionally mixed with teacher examples.
++
++        ``auxiliary`` is a separate (small) dataset; ``auxiliary_rate`` is the
++        fraction of each mini-batch drawn from it and added to the auxiliary
++        cross-entropy. A rate of zero disables the term, so the default path is
++        the same computation as before.
++        """
+         if not examples:
+             return TrainStats()
+         self.model.train()
+@@ -254,22 +329,70 @@ class Trainer:
+                 for index in order[start : start + batch_size]
+             ]
+             batch = collate_packed(chunk).to(self.device)
+-            policy_loss, value_loss, total = self._step(batch)
++            teacher = self._auxiliary_batch(auxiliary, auxiliary_rate, len(chunk))
++            policy_loss, value_loss, q_loss, aux_loss, total = self._step(
++                batch, teacher
++            )
+             stats.batches += 1
+             stats.policy_loss += policy_loss
+             stats.value_loss += value_loss
++            stats.q_loss += 0.0 if q_loss is None else q_loss
++            stats.auxiliary_loss += 0.0 if aux_loss is None else aux_loss
+             stats.total_loss += total
+         return stats
+ 
+-    def _step(self, batch: Batch | PackedBatch) -> tuple[float, float, float]:
++    def _auxiliary_batch(
++        self,
++        auxiliary: Sequence[Example] | None,
++        rate: float,
++        width: int,
++    ) -> PackedBatch | None:
++        """Draw ``rate * width`` teacher examples, without replacement issues.
++
++        Drawing with replacement is fine: the teacher set is small and each
++        batch only needs a representative sample, not an epoch over it.
++        """
++        if (
++            auxiliary is None
++            or not auxiliary
++            or rate <= 0.0
++            or self.config.auxiliary_weight <= 0.0
++        ):
++            return None
++        count = int(round(rate * width))
++        if count <= 0:
++            return None
++        picks = self.rng.integers(0, len(auxiliary), size=count)
++        examples = [auxiliary[int(index)] for index in picks]
++        return collate_packed(examples).to(self.device)
++
++    def _losses(
++        self,
++        batch: Batch | PackedBatch,
++        auxiliary: PackedBatch | None = None,
++    ) -> tuple[
++        torch.Tensor,
++        torch.Tensor,
++        torch.Tensor | None,
++        torch.Tensor | None,
++        torch.Tensor,
++    ]:
++        """The policy/value/Q/teacher losses for one batch, without stepping."""
++        q_values = None
+         if isinstance(batch, PackedBatch):
+-            logits, values = self.model.forward_packed(
++            output = self.model.forward_packed(
+                 batch.state, batch.actions, batch.index
+             )
++            logits, values = output[:2]
++            if getattr(self.model, "q_head", False):
++                q_values = output[2]
+             log_probs = segment_log_softmax(logits, batch.index, batch.rows)
+             policy_loss = -(batch.policy * log_probs).sum() / batch.rows
+         else:
+-            logits, values = self.model(batch.state, batch.actions, batch.mask)
++            output = self.model(batch.state, batch.actions, batch.mask)
++            logits, values = output[:2]
++            if getattr(self.model, "q_head", False):
++                q_values = output[2]
+             log_probs = torch.log_softmax(logits, dim=-1)
+             policy_loss = -(batch.policy * log_probs).sum(dim=-1).mean()
+ 
+@@ -277,8 +400,39 @@ class Trainer:
+         squared = (values - batch.outcome) ** 2
+         value_loss = (squared * value_mask).sum() / value_mask.sum().clamp(min=1.0)
+ 
++        q_loss = None
++        if q_values is not None and batch.chosen is not None:
++            chosen_values = _gather_chosen(q_values, batch)
++            squared_q = (chosen_values - batch.outcome) ** 2
++            q_loss = (squared_q * value_mask).sum() / value_mask.sum().clamp(min=1.0)
++
+         total = policy_loss + self.config.value_weight * value_loss
++        if q_loss is not None:
++            total = total + self.config.q_weight * q_loss
++
++        auxiliary_loss = None
++        if auxiliary is not None:
++            aux_output = self.model.forward_packed(
++                auxiliary.state, auxiliary.actions, auxiliary.index
++            )
++            aux_log_probs = segment_log_softmax(
++                aux_output[0], auxiliary.index, auxiliary.rows
++            )
++            auxiliary_loss = -(auxiliary.policy * aux_log_probs).sum() / auxiliary.rows
++            total = total + self.config.auxiliary_weight * auxiliary_loss
++
++        return policy_loss, value_loss, q_loss, auxiliary_loss, total
+ 
++    def _step(
++        self,
++        batch: Batch | PackedBatch,
++        auxiliary: PackedBatch | None = None,
++    ) -> tuple[
++        float, float, float | None, float | None, float
++    ]:
++        policy_loss, value_loss, q_loss, aux_loss, total = self._losses(
++            batch, auxiliary
++        )
+         self.optimizer.zero_grad(set_to_none=True)
+         total.backward()
+         if self.config.grad_clip:
+@@ -287,6 +441,8 @@ class Trainer:
+         return (
+             float(policy_loss.detach()),
+             float(value_loss.detach()),
++            None if q_loss is None else float(q_loss.detach()),
++            None if aux_loss is None else float(aux_loss.detach()),
+             float(total.detach()),
+         )
+ 
+@@ -295,20 +451,45 @@ class Trainer:
+         buffer: ReplayBuffer,
+         epochs: int | None = None,
+         *,
++        auxiliary: Sequence[Example] | None = None,
++        auxiliary_rate: float = 0.0,
+         callback=None,
+     ) -> list[dict]:
+         """Train for ``epochs`` passes over the current buffer contents.
+ 
+         The buffer itself is indexed: it implements ``__len__``/``__getitem__``
+         over its arrays, so an epoch no longer materialises every example as an
+-        object before touching it.
++        object before touching it. ``auxiliary``/``auxiliary_rate`` are handed
++        to every epoch (see :meth:`train_epoch`).
+         """
+         examples = buffer
+         history: list[dict] = []
+         for epoch in range(epochs if epochs is not None else self.config.epochs):
+-            stats = self.train_epoch(examples)
++            stats = self.train_epoch(
++                examples, auxiliary=auxiliary, auxiliary_rate=auxiliary_rate
++            )
+             record = {"epoch": epoch, **stats.as_dict()}
+             history.append(record)
+             if callback is not None:
+                 callback(record)
+         return history
++
++
++def _gather_chosen(
++    q_values: torch.Tensor, batch: Batch | PackedBatch
++) -> torch.Tensor:
++    """``q_values`` at the played candidate of every example row.
++
++    Q is scored per candidate. The loss may only read the row that was actually
++    played; every other candidate's value is trained by its own decisions, not
++    by this example's outcome.
++    """
++    if batch.chosen is None:  # pragma: no cover - guarded by the caller
++        raise ValueError("batch has no chosen action indices")
++    if isinstance(batch, PackedBatch):
++        # ``index`` is sorted, so searchsorted gives each row's first slot.
++        rows = torch.arange(batch.rows, device=batch.index.device)
++        starts = torch.searchsorted(batch.index, rows)
++        return q_values[starts + batch.chosen]
++    gather_index = batch.chosen.view(-1, 1, 1).expand(-1, 1, q_values.size(-1))
++    return torch.gather(q_values, 1, gather_index).squeeze(1)
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 5e65351..03c0989 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -40,6 +40,12 @@ def test_train_phase_budgets_defaults_to_off() -> None:
+     assert args.phase_budgets == "default"
+     with pytest.raises(SystemExit):
+         build_parser().parse_args(["train", "--phase-budgets", "bogus"])
++def test_train_q_head_and_teacher_flags_are_off_by_default() -> None:
++    args = build_parser().parse_args(["train"])
++    assert args.q_head is False
++    assert args.q_weight == 0.5
++    assert args.planning_teacher_rate == 0.0
++    assert args.planning_teacher_games == 0
+ 
+ 
+ def test_gate_subcommand_parses_the_queue_options() -> None:
+diff --git a/tests/test_nn.py b/tests/test_nn.py
+index 9d177b2..c1da1f8 100644
+--- a/tests/test_nn.py
++++ b/tests/test_nn.py
+@@ -53,6 +53,21 @@ def test_save_and_load_round_trip(tmp_path) -> None:
+     np.testing.assert_allclose(probs_a, probs_b, atol=1e-6)
+ 
+ 
++def test_q_head_inference_still_returns_the_two_search_outputs() -> None:
++    """Search consumes logits and values only; the Q head is a training signal."""
++    model = PolicyValueNet(hidden=8, q_head=True)
++    game = Game.new(GameConfig(seed=3))
++    actions, probs, values = model.predict(game)
++    assert len(actions) == len(game.legal_actions())
++    np.testing.assert_allclose(probs.sum(), 1.0, atol=1e-5)
++    assert values.shape == (N_HOUSES,)
++
++    requests = [(game, game.legal_actions())]
++    batched_probs, batched_values = model.predict_many(requests)[0]
++    np.testing.assert_allclose(batched_probs, probs, atol=1e-6)
++    np.testing.assert_allclose(batched_values, values, atol=1e-6)
++
++
+ def test_trainer_reduces_loss_on_a_tiny_batch() -> None:
+     model = PolicyValueNet(hidden=32)
+     trainer = Trainer(model, TrainConfig(learning_rate=1e-3, batch_size=4, epochs=1))
+diff --git a/tests/test_qhead.py b/tests/test_qhead.py
+new file mode 100644
+index 0000000..8e8cf8d
+--- /dev/null
++++ b/tests/test_qhead.py
+@@ -0,0 +1,330 @@
++"""Tests for the optional per-candidate Q head and the planning teacher.
++
++Torch-only: the rest of the suite still runs on a machine without it.
++"""
++
++from __future__ import annotations
++
++from types import SimpleNamespace
++
++import numpy as np
++import pytest
++
++torch = pytest.importorskip("torch")
++
++from agot.engine.enums import Phase  # noqa: E402
++from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM  # noqa: E402
++from agot.nn.model import PolicyValueNet, segment_log_softmax  # noqa: E402
++from agot.nn.teacher import (  # noqa: E402
++    PLANNING_SMOOTHING,
++    planning_target,
++    soft_teacher_target,
++)
++from agot.training.replay import Example  # noqa: E402
++from agot.training.trainer import (  # noqa: E402
++    TrainConfig,
++    Trainer,
++    _gather_chosen,
++    collate,
++    collate_packed,
++)
++
++
++def _examples(
++    count: int = 6,
++    *,
++    actions: int = 4,
++    chosen: list[int] | None = None,
++    seed: int = 0,
++) -> list[Example]:
++    """Synthetic examples; no encoder or engine needed."""
++    rng = np.random.default_rng(seed)
++    outcome = np.zeros(N_HOUSES, dtype=np.float32)
++    outcome[0] = 1.0
++    outcome[1] = -1.0
++    examples = []
++    for row in range(count):
++        examples.append(
++            Example(
++                state=rng.standard_normal(STATE_DIM).astype(np.float32),
++                actions=rng.standard_normal((actions, ACTION_DIM)).astype(np.float32),
++                policy=np.full(actions, 1.0 / actions, dtype=np.float32),
++                player=0,
++                outcome=outcome.copy(),
++                chosen=None if chosen is None else chosen[row % len(chosen)],
++            )
++        )
++    return examples
++
++
++# ---------------------------------------------------------------------------
++# The Q head
++# ---------------------------------------------------------------------------
++
++
++def test_default_model_keeps_the_two_tuple_forward() -> None:
++    model = PolicyValueNet(hidden=16)
++    state = torch.zeros(2, STATE_DIM)
++    actions = torch.zeros(2, 3, ACTION_DIM)
++    assert len(model(state, actions)) == 2
++    index = torch.tensor([0, 0, 0, 1, 1, 1])
++    flat = torch.zeros(6, ACTION_DIM)
++    assert len(model.forward_packed(state, flat, index)) == 2
++
++
++def test_q_head_forward_shapes() -> None:
++    model = PolicyValueNet(hidden=32, q_head=True)
++    state = torch.randn(2, STATE_DIM)
++    actions = torch.randn(2, 5, ACTION_DIM)
++    logits, values, q_values = model(state, actions)
++    assert logits.shape == (2, 5)
++    assert values.shape == (2, N_HOUSES)
++    assert q_values.shape == (2, 5, N_HOUSES)
++    assert (q_values.abs() <= 1.0).all()
++
++    index = torch.tensor([0, 0, 0, 1, 1])
++    flat = torch.cat([actions[0, :3], actions[1, :2]], dim=0)
++    flat_logits, flat_values, flat_q = model.forward_packed(state, flat, index)
++    assert flat_logits.shape == (5,)
++    assert flat_values.shape == (2, N_HOUSES)
++    assert flat_q.shape == (5, N_HOUSES)
++    # The packed and padded forms must agree per candidate.
++    np.testing.assert_allclose(
++        flat_q[:3].detach().numpy(),
++        q_values[0, :3].detach().numpy(),
++        rtol=1e-5,
++        atol=1e-6,
++    )
++    np.testing.assert_allclose(
++        flat_q[3:].detach().numpy(),
++        q_values[1, :2].detach().numpy(),
++        rtol=1e-5,
++        atol=1e-6,
++    )
++
++
++def test_q_head_parameters_and_shared_trunk_receive_gradient() -> None:
++    model = PolicyValueNet(hidden=16, q_head=True)
++    batch = collate_packed(_examples(chosen=[0, 1, 2, 3, 0, 1]))
++    trainer = Trainer(model, TrainConfig(batch_size=4))
++
++    _, _, q_loss, _, _ = trainer._losses(batch)
++    assert q_loss is not None
++    q_loss.backward()
++
++    for name, parameter in model.q_value_head.named_parameters():
++        assert parameter.grad is not None, f"{name} received no gradient"
++        assert parameter.grad.norm() > 0, f"{name} received a zero gradient"
++    # The Q head reads [h, a], so both shared trunks must learn from it too.
++    assert model.state_trunk[0].weight.grad.norm() > 0
++    assert model.action_trunk[0].weight.grad.norm() > 0
++
++
++def test_gather_chosen_reads_one_candidate_per_row() -> None:
++    examples = _examples(chosen=[0, 3, 1, 2, 0, 3])
++    packed = collate_packed(examples)
++    model = PolicyValueNet(hidden=8, q_head=True)
++    with torch.no_grad():
++        q_values = model.forward_packed(packed.state, packed.actions, packed.index)[2]
++    gathered = _gather_chosen(q_values, packed)
++
++    for row, example in enumerate(examples):
++        start = int(packed.index.tolist().index(row))
++        np.testing.assert_allclose(
++            gathered[row].detach().numpy(),
++            q_values[start + example.chosen].detach().numpy(),
++            rtol=0,
++            atol=0,
++        )
++
++    padded = collate(examples)
++    with torch.no_grad():
++        padded_q = model(padded.state, padded.actions, padded.mask)[2]
++    padded_gathered = _gather_chosen(padded_q, padded)
++    np.testing.assert_allclose(
++        padded_gathered.detach().numpy(), gathered.detach().numpy(), atol=1e-6
++    )
++
++
++def test_q_loss_only_reads_the_sampled_action() -> None:
++    """The same position with a different played index gets a different loss."""
++    base = _examples(count=1, chosen=[0], seed=4)[0]
++
++    def with_chosen(index: int) -> Example:
++        return Example(
++            state=base.state,
++            actions=base.actions,
++            policy=base.policy,
++            player=base.player,
++            outcome=base.outcome,
++            chosen=index,
++        )
++
++    model = PolicyValueNet(hidden=16, q_head=True)
++    model.eval()
++    trainer = Trainer(model, TrainConfig(batch_size=1))
++
++    batch0 = collate_packed([with_chosen(0)])
++    batch3 = collate_packed([with_chosen(3)])
++    q0 = trainer._losses(batch0)[2]
++    q3 = trainer._losses(batch3)[2]
++    assert q0 is not None and q3 is not None
++    assert not torch.isclose(q0, q3)
++
++    with torch.no_grad():
++        q_values = model.forward_packed(batch0.state, batch0.actions, batch0.index)[2]
++        gathered = _gather_chosen(q_values, batch0)
++        mask = batch0.outcome_mask
++        expected = ((gathered - batch0.outcome) ** 2 * mask).sum() / mask.sum()
++    assert torch.allclose(q0, expected)
++
++
++def test_q_loss_requires_both_the_head_and_the_indices() -> None:
++    plain = PolicyValueNet(hidden=8)
++    plain_trainer = Trainer(plain, TrainConfig(batch_size=4))
++    with_chosen = collate_packed(_examples(chosen=[0, 1, 2, 3, 0, 1]))
++    assert plain_trainer._losses(with_chosen)[2] is None
++
++    headed = PolicyValueNet(hidden=8, q_head=True)
++    headed_trainer = Trainer(headed, TrainConfig(batch_size=4))
++    without_chosen = collate_packed(_examples())
++    assert headed_trainer._losses(without_chosen)[2] is None
++
++
++def test_default_off_loss_is_bit_identical_to_the_old_formula() -> None:
++    """No Q head and no chosen indices must reproduce today's arithmetic."""
++    torch.manual_seed(0)
++    model = PolicyValueNet(hidden=16)
++    model.eval()
++    batch = collate_packed(_examples())
++    assert batch.chosen is None
++
++    trainer = Trainer(model, TrainConfig(batch_size=4, value_weight=1.0))
++    policy_loss, value_loss, q_loss, aux_loss, total = trainer._losses(batch)
++    assert q_loss is None
++    assert aux_loss is None
++
++    with torch.no_grad():
++        logits, values = model.forward_packed(batch.state, batch.actions, batch.index)
++        log_probs = segment_log_softmax(logits, batch.index, batch.rows)
++        expected_policy = -(batch.policy * log_probs).sum() / batch.rows
++        mask = batch.outcome_mask
++        expected_value = ((values - batch.outcome) ** 2 * mask).sum() / mask.sum()
++        expected_total = expected_policy + 1.0 * expected_value
++
++    assert torch.equal(policy_loss, expected_policy)
++    assert torch.equal(value_loss, expected_value)
++    assert torch.equal(total, expected_total)
++
++
++def test_checkpoint_config_round_trips_the_q_head(tmp_path) -> None:
++    path = str(tmp_path / "q.pt")
++    PolicyValueNet(hidden=8, q_head=True).save(path)
++    restored = PolicyValueNet.load(path)
++    assert restored.q_head is True
++
++    # A checkpoint written before the option existed loads with the head off.
++    legacy = str(tmp_path / "legacy.pt")
++    model = PolicyValueNet(hidden=8)
++    config = {
++        "state_dim": model.state_dim,
++        "action_dim": model.action_dim,
++        "hidden": model.hidden,
++        "trunk_layers": model.trunk_layers,
++        "n_houses": model.n_houses,
++        "value_context": model.value_context,
++    }
++    torch.save({"state_dict": model.state_dict(), "config": config}, legacy)
++    assert PolicyValueNet.load(legacy).q_head is False
++
++
++# ---------------------------------------------------------------------------
++# The planning teacher
++# ---------------------------------------------------------------------------
++
++
++def test_teacher_target_is_a_smoothed_distribution() -> None:
++    scores = np.array([4.0, 2.0, 0.0, -1.0])
++    target = soft_teacher_target(scores)
++
++    assert target.shape == scores.shape
++    np.testing.assert_allclose(target.sum(), 1.0, atol=1e-6)
++    assert target.argmax() == 0
++    assert target.min() >= PLANNING_SMOOTHING / len(scores) - 1e-7
++    # The greedy best still dominates by a wide margin.
++    assert target[0] > 0.8
++
++    shifted = np.exp(scores - scores.max())
++    manual = (1.0 - PLANNING_SMOOTHING) * shifted / shifted.sum()
++    manual = manual + PLANNING_SMOOTHING / len(scores)
++    np.testing.assert_allclose(target, manual, atol=1e-6)
++
++
++def test_teacher_target_rejects_bad_input() -> None:
++    with pytest.raises(ValueError):
++        soft_teacher_target([])
++    with pytest.raises(ValueError):
++        soft_teacher_target([1.0, np.nan])
++    with pytest.raises(ValueError):
++        soft_teacher_target([1.0, 2.0], smoothing=1.0)
++    with pytest.raises(ValueError):
++        soft_teacher_target([1.0, 2.0], temperature=0.0)
++
++
++def test_planning_target_only_fires_in_the_planning_phase() -> None:
++    class _Policy:
++        def scores(self, game, actions):
++            return np.array([3.0, 1.0, 0.0])
++
++    game = SimpleNamespace(
++        state=SimpleNamespace(phase=Phase.PLANNING),
++        legal_actions=lambda: ["a", "b", "c"],
++    )
++    target = planning_target(game, policy=_Policy())
++    assert target is not None
++    np.testing.assert_allclose(target.sum(), 1.0, atol=1e-6)
++
++    game.state.phase = Phase.ACTION
++    assert planning_target(game, policy=_Policy()) is None
++
++
++def test_trained_q_head_spreads_candidates_on_random_data() -> None:
++    """Sanity, not strength: the head must rank candidates after training.
++
++    The situation this exists for is a planning node whose children encode to
++    identical state vectors. A trained Q head must still give them different
++    values, otherwise PUCT would rank them by the prior alone.
++    """
++    torch.manual_seed(0)
++    rng = np.random.default_rng(7)
++    examples = _examples(count=16, actions=5, chosen=[0, 1, 2, 3, 4], seed=3)
++    for example in examples:
++        outcome = np.zeros(N_HOUSES, dtype=np.float32)
++        winner = int(rng.integers(0, N_HOUSES))
++        outcome[:] = -1.0
++        outcome[winner] = 1.0
++        example.outcome = outcome
++
++    model = PolicyValueNet(hidden=32, q_head=True)
++    trainer = Trainer(model, TrainConfig(learning_rate=1e-2, batch_size=8))
++    batch = collate_packed(examples)
++    before = trainer._losses(batch)[2]
++    assert before is not None
++
++    for _ in range(40):
++        trainer.train_epoch(examples)
++
++    model.eval()
++    after = trainer._losses(batch)[2]
++    assert after is not None
++    assert float(after.detach()) < float(before.detach())
++
++    with torch.no_grad():
++        q_values = model.forward_packed(batch.state, batch.actions, batch.index)[2]
++    # Within each example the candidates must no longer be interchangeable.
++    spread = q_values.reshape(batch.rows, -1, N_HOUSES).std(dim=1).mean()
++    assert float(spread) > 1e-3
++
++    # And the two losses stay distinct terms in the stats.
++    stats = trainer.train_epoch(examples)
++    assert stats.q_loss > 0.0
+diff --git a/tests/test_rust_engine.py b/tests/test_rust_engine.py
+index 39fea71..031d23d 100644
+--- a/tests/test_rust_engine.py
++++ b/tests/test_rust_engine.py
+@@ -405,6 +405,17 @@ def test_selfplay_returns_packed_examples():
+         assert 1 <= outcomes.shape[1]
+ 
+ 
++def test_selfplay_can_record_the_played_action_index():
++    """`record_chosen` appends one index per example and keeps the old arity off."""
++    result = core.selfplay(dict(SPEC, record_chosen=True), uniform_evaluator([]))
++    assert len(result) == 11
++    offsets = result[2]
++    chosen = result[10]
++    assert chosen.shape == (result[0].shape[0],)
++    for index in range(len(offsets) - 1):
++        assert 0 <= chosen[index] < offsets[index + 1] - offsets[index]
++
++
+ def test_selfplay_batches_the_network_calls():
+     """The point of the batch tier: many leaves per call, not one per decision."""
+     calls: list = []
+diff --git a/tests/test_training.py b/tests/test_training.py
+index cd492ea..9ecd86a 100644
+--- a/tests/test_training.py
++++ b/tests/test_training.py
+@@ -109,6 +109,76 @@ def test_play_game_accepts_one_policy_per_house() -> None:
+     assert record.steps > 0
+ 
+ 
++def test_replay_buffer_round_trips_the_chosen_action_index(tmp_path) -> None:
++    from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM
++
++    buffer = ReplayBuffer(capacity=16)
++    for row, chosen in enumerate((0, 2, 1)):
++        count = 3
++        buffer.add(
++            Example(
++                state=np.full(STATE_DIM, row, dtype=np.float32),
++                actions=np.zeros((count, ACTION_DIM), dtype=np.float32),
++                policy=np.full(count, 1.0 / count, dtype=np.float32),
++                player=0,
++                outcome=np.zeros(N_HOUSES, dtype=np.float32),
++                chosen=chosen,
++            )
++        )
++    path = str(tmp_path / "chosen.npz")
++    buffer.save(path)
++    with np.load(path) as data:
++        assert "chosen" in data.files
++
++    restored = ReplayBuffer.load(path)
++    assert [example.chosen for example in restored.all()] == [0, 2, 1]
++
++
++def test_replay_buffer_omits_chosen_without_indices(tmp_path) -> None:
++    """A run without a Q head keeps the historical snapshot layout."""
++    from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM
++
++    buffer = ReplayBuffer(capacity=4)
++    buffer.add(
++        Example(
++            state=np.zeros(STATE_DIM, dtype=np.float32),
++            actions=np.zeros((2, ACTION_DIM), dtype=np.float32),
++            policy=np.full(2, 0.5, dtype=np.float32),
++            player=0,
++            outcome=np.zeros(N_HOUSES, dtype=np.float32),
++        )
++    )
++    path = str(tmp_path / "legacy.npz")
++    buffer.save(path)
++    with np.load(path) as data:
++        assert "chosen" not in data.files
++    assert ReplayBuffer.load(path).all()[0].chosen is None
++
++
++def test_replay_buffer_refuses_to_mix_chosen_and_plain_examples() -> None:
++    from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM
++
++    def example(chosen):
++        return Example(
++            state=np.zeros(STATE_DIM, dtype=np.float32),
++            actions=np.zeros((2, ACTION_DIM), dtype=np.float32),
++            policy=np.full(2, 0.5, dtype=np.float32),
++            player=0,
++            outcome=np.zeros(N_HOUSES, dtype=np.float32),
++            chosen=chosen,
++        )
++
++    buffer = ReplayBuffer(capacity=8)
++    buffer.add(example(1))
++    with np.testing.assert_raises_regex(ValueError, "without a chosen action"):
++        buffer.add(example(None))
++
++    other = ReplayBuffer(capacity=8)
++    other.add(example(None))
++    with np.testing.assert_raises_regex(ValueError, "with a chosen action"):
++        other.add(example(0))
++
++
+ def test_replay_buffer_round_trips(tmp_path) -> None:
+     record = self_play(_factory, GameConfig(seed=2))
+     buffer = ReplayBuffer(capacity=10_000)
+-- 
+2.55.0.windows.5
+
