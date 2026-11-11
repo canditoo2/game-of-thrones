@@ -24,6 +24,7 @@ import math
 import os
 import time
 import webbrowser
+from dataclasses import replace
 from pathlib import Path
 
 from agot.agents import MCTS, GreedyPolicy, RandomPolicy
@@ -427,17 +428,55 @@ def _run_training(args: argparse.Namespace) -> int:
     model = (
         PolicyValueNet.load(args.resume)
         if args.resume
-        else PolicyValueNet(hidden=args.hidden, value_context=True)
+        else PolicyValueNet(
+            hidden=args.hidden, value_context=True, q_head=args.q_head
+        )
     )
+    if args.resume and args.q_head and not model.q_head:
+        raise SystemExit(
+            f"{args.resume} was trained without a Q head; resume it without "
+            "--q-head or start a fresh run"
+        )
     trainer = Trainer(
         model,
         TrainConfig(
             learning_rate=args.lr,
             epochs=args.epochs,
             device=device,
+            q_weight=args.q_weight,
         ),
     )
     buffer = ReplayBuffer(capacity=args.buffer)
+
+    # A small separate dataset of greedy planning decisions. It is built once
+    # per session (deterministic from its seed) and mixed into every epoch; it
+    # never enters the replay buffer, so a q-head run's `chosen` indices stay
+    # consistent.
+    teacher_examples = None
+    teacher_rate = args.planning_teacher_rate
+    if teacher_rate > 0:
+        from agot.nn.teacher import planning_teacher_examples
+
+        teacher_games = args.planning_teacher_games or 32
+        print(
+            f"building planning teacher: {teacher_games} greedy games",
+            flush=True,
+        )
+        teacher_examples = planning_teacher_examples(
+            games=teacher_games,
+            config=replace(config, seed=args.seed + 700_000),
+        )
+        if not teacher_examples:
+            raise SystemExit(
+                "the planning teacher recorded no examples; check the game "
+                "configuration"
+            )
+        print(
+            f"planning teacher: {len(teacher_examples)} planning decisions "
+            f"(rate {teacher_rate:.3f}, weight "
+            f"{trainer.config.auxiliary_weight:.2f})",
+            flush=True,
+        )
 
     checkpoint = Path(args.checkpoint)
     best_checkpoint = (
@@ -620,7 +659,11 @@ def _run_training(args: argparse.Namespace) -> int:
             # pass moves to the GPU.
             model.to(device)
             train_started = time.time()
-            history = trainer.train(buffer)
+            history = trainer.train(
+                buffer,
+                auxiliary=teacher_examples,
+                auxiliary_rate=teacher_rate,
+            )
             seconds_train = time.time() - train_started
             last = history[-1] if history else {}
             model.to("cpu")
@@ -633,6 +676,10 @@ def _run_training(args: argparse.Namespace) -> int:
                 f"policy_loss={last.get('policy_loss', 0):.4f} "
                 f"value_loss={last.get('value_loss', 0):.4f}"
             )
+            if model.q_head:
+                line += f" q_loss={last.get('q_loss', 0):.4f}"
+            if teacher_examples is not None:
+                line += f" aux_loss={last.get('auxiliary_loss', 0):.4f}"
             record = {
                 "iteration": iteration + 1,
                 "seconds_selfplay": round(seconds_selfplay, 3),
@@ -645,6 +692,8 @@ def _run_training(args: argparse.Namespace) -> int:
                 "buffer": len(buffer),
                 "policy_loss": last.get("policy_loss"),
                 "value_loss": last.get("value_loss"),
+                "q_loss": last.get("q_loss"),
+                "auxiliary_loss": last.get("auxiliary_loss"),
             }
             gate_due = (
                 (iteration + 1) % max(1, args.eval_every) == 0
@@ -1189,6 +1238,35 @@ def build_parser() -> argparse.ArgumentParser:
             "Planning/Mustering/Action/Bidding at 32, Wildling attacks at 16 and "
             "keeps 64 for Raven/Combat/Westeros; the cap is divided by "
             "--determinizations exactly like --simulations"
+        "--q-head",
+        action="store_true",
+        help=(
+            "add a per-candidate Q head and train it on the played action's "
+            "outcome; off by default so existing checkpoints are unchanged"
+        ),
+    )
+    train.add_argument(
+        "--q-weight",
+        type=float,
+        default=0.5,
+        help="weight of the Q loss when --q-head is on",
+    )
+    train.add_argument(
+        "--planning-teacher-rate",
+        type=float,
+        default=0.0,
+        help=(
+            "fraction of each mini-batch drawn from the greedy planning teacher "
+            "for an auxiliary policy loss (0 disables it)"
+        ),
+    )
+    train.add_argument(
+        "--planning-teacher-games",
+        type=int,
+        default=0,
+        help=(
+            "greedy games used to build the planning teacher (0 = 32 when the "
+            "rate is positive)"
         ),
     )
     train.add_argument(

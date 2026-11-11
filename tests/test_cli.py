@@ -40,6 +40,12 @@ def test_train_phase_budgets_defaults_to_off() -> None:
     assert args.phase_budgets == "default"
     with pytest.raises(SystemExit):
         build_parser().parse_args(["train", "--phase-budgets", "bogus"])
+def test_train_q_head_and_teacher_flags_are_off_by_default() -> None:
+    args = build_parser().parse_args(["train"])
+    assert args.q_head is False
+    assert args.q_weight == 0.5
+    assert args.planning_teacher_rate == 0.0
+    assert args.planning_teacher_games == 0
 
 
 def test_gate_subcommand_parses_the_queue_options() -> None:

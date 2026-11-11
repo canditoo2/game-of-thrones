@@ -53,6 +53,21 @@ def test_save_and_load_round_trip(tmp_path) -> None:
     np.testing.assert_allclose(probs_a, probs_b, atol=1e-6)
 
 
+def test_q_head_inference_still_returns_the_two_search_outputs() -> None:
+    """Search consumes logits and values only; the Q head is a training signal."""
+    model = PolicyValueNet(hidden=8, q_head=True)
+    game = Game.new(GameConfig(seed=3))
+    actions, probs, values = model.predict(game)
+    assert len(actions) == len(game.legal_actions())
+    np.testing.assert_allclose(probs.sum(), 1.0, atol=1e-5)
+    assert values.shape == (N_HOUSES,)
+
+    requests = [(game, game.legal_actions())]
+    batched_probs, batched_values = model.predict_many(requests)[0]
+    np.testing.assert_allclose(batched_probs, probs, atol=1e-6)
+    np.testing.assert_allclose(batched_values, values, atol=1e-6)
+
+
 def test_trainer_reduces_loss_on_a_tiny_batch() -> None:
     model = PolicyValueNet(hidden=32)
     trainer = Trainer(model, TrainConfig(learning_rate=1e-3, batch_size=4, epochs=1))

@@ -15,6 +15,12 @@ were ground down to the float32 floor (~1e-37) and emitted a uniform
 distribution forever -- so the head now reads ``h`` unconditionally and cannot
 shut itself off. See the "Notable fixes" section of ``docs/roadmap.md``.
 
+The optional Q head (``q_head=True``) scores every candidate from the same
+``[h, a_i]`` pair and predicts that candidate's per-house outcome. It exists
+because the 97-dim state does not contain the board: the children of a planning
+node encode to identical state vectors, so only an action-conditioned value can
+rank the orders. It is off by default and stored in the checkpoint config.
+
 Requires PyTorch, which is an optional extra::
 
     pip install -e ".[rl]"
@@ -54,6 +60,7 @@ class PolicyValueNet(nn.Module):
         trunk_layers: int = 2,
         n_houses: int = N_HOUSES,
         value_context: bool = False,
+        q_head: bool = False,
     ) -> None:
         super().__init__()
         self.state_dim = state_dim
@@ -70,6 +77,11 @@ class PolicyValueNet(nn.Module):
         #: one. The ONNX leaf backend caches its exported graph beside it, so a
         #: model that came from a checkpoint needs no path threaded through.
         self.checkpoint: str | None = None
+        #: Predict one value *per candidate* from ``[h, a_i]``. Off by default:
+        #: the extra head only earns its keep once the trainer is given the
+        #: played action index, and adding tensors to every forward pass would
+        #: change the existing checkpoints' inference cost.
+        self.q_head = q_head
 
         self.state_trunk = _mlp(state_dim, hidden, trunk_layers)
         self.action_trunk = _mlp(action_dim, hidden, trunk_layers)
@@ -88,18 +100,32 @@ class PolicyValueNet(nn.Module):
             nn.Linear(hidden, n_houses),
             nn.Tanh(),
         )
+        if q_head:
+            # Same shape as the value head but one row per candidate instead of
+            # one row per position. It reads ``[h, a_i]`` directly, which is the
+            # only place the board reaches this prediction: the state vector
+            # does not encode unit placement.
+            self.q_value_head = nn.Sequential(
+                nn.Linear(2 * hidden, hidden),
+                nn.ReLU(),
+                nn.Linear(hidden, n_houses),
+                nn.Tanh(),
+            )
 
     def forward(
         self,
         state: torch.Tensor,
         actions: torch.Tensor,
         mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return ``(policy_logits, values)``.
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor
+    ]:
+        """Return ``(policy_logits, values)``, plus ``q_values`` when enabled.
 
         ``state`` has shape ``(B, state_dim)``, ``actions`` ``(B, N, action_dim)``
         and ``mask`` ``(B, N)`` with ones for legal actions. Logits for illegal
-        actions are pushed to a large negative number.
+        actions are pushed to a large negative number. With ``q_head=True`` the
+        third element is ``(B, N, n_houses)``: one outcome vector per candidate.
         """
         h = self.state_trunk(state)  # (B, H)
         a = self.action_trunk(actions)  # (B, N, H)
@@ -117,10 +143,13 @@ class PolicyValueNet(nn.Module):
         ).squeeze(-1)  # (B, N)
         if mask is not None:
             logits = logits.masked_fill(mask <= 0, -1e9)
+        q_values = self._q_values(h, a) if self.q_head else None
         if self.value_context:
             pooled = a.mean(dim=1)
             h = self.value_merge(torch.cat([h, pooled], dim=-1))
         values = self.value_head(h)  # (B, n_houses)
+        if q_values is not None:
+            return logits, values, q_values
         return logits, values
 
     def forward_packed(
@@ -128,7 +157,9 @@ class PolicyValueNet(nn.Module):
         state: torch.Tensor,
         actions: torch.Tensor,
         index: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor
+    ]:
         """Forward over a *concatenated* action set, one segment per state row.
 
         ``state`` is ``(B, state_dim)``, ``actions`` is ``(T, action_dim)`` for
@@ -139,9 +170,10 @@ class PolicyValueNet(nn.Module):
         action trunk and the scorer do 2.5x the rows they needed, and up to 12x on
         the worst batch.
 
-        Returns flat ``(T,)`` logits and ``(B, n_houses)`` values. The caller
-        normalises each segment, because the policy is a distribution over one
-        leaf's actions only (see :func:`segment_softmax`).
+        Returns flat ``(T,)`` logits and ``(B, n_houses)`` values. With
+        ``q_head=True`` a third flat ``(T, n_houses)`` tensor is returned too.
+        The caller normalises each segment, because the policy is a distribution
+        over one leaf's actions only (see :func:`segment_softmax`).
         """
         h = self.state_trunk(state)  # (B, H)
         a = self.action_trunk(actions)  # (T, H)
@@ -152,6 +184,7 @@ class PolicyValueNet(nn.Module):
         logits = self.policy_head[2](
             torch.relu(state_part[index] + action_part)
         ).squeeze(-1)
+        q_values = self._q_values(h, a, index) if self.q_head else None
         if self.value_context:
             # Mean of each row's candidate embeddings: the only place the two
             # region blocks reach the value head.
@@ -162,7 +195,34 @@ class PolicyValueNet(nn.Module):
             counts = counts.index_add_(0, index, torch.ones_like(index, dtype=a.dtype))
             pooled = pooled / counts.clamp_min(1.0).unsqueeze(1)
             h = self.value_merge(torch.cat([h, pooled], dim=-1))
+        if q_values is not None:
+            return logits, self.value_head(h), q_values
         return logits, self.value_head(h)
+
+    def _q_values(
+        self,
+        h: torch.Tensor,
+        a: torch.Tensor,
+        index: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Score candidates from ``[h, a_i]``; packed when ``index`` is given.
+
+        ``h`` is ``(B, hidden)``. Without ``index``, ``a`` is ``(B, N, hidden)``
+        and the result is ``(B, N, n_houses)``; with it, ``a`` is ``(T, hidden)``
+        and the result is ``(T, n_houses)``. The first layer is split the same
+        way as the policy head, so the state half is computed once per row.
+        """
+        first = self.q_value_head[0]
+        weight = first.weight
+        state_part = nn.functional.linear(
+            h, weight[:, : self.hidden], first.bias
+        )
+        if index is None:
+            state_part = state_part.unsqueeze(1)
+        else:
+            state_part = state_part[index]
+        action_part = nn.functional.linear(a, weight[:, self.hidden :])
+        return self.q_value_head[2](torch.relu(state_part + action_part))
 
     # -- inference helpers ----------------------------------------------
 
@@ -193,8 +253,9 @@ class PolicyValueNet(nn.Module):
             encode_actions(game, actions, game.state.active_house)
         ).unsqueeze(0)
         # Every candidate is legal here, so no mask is needed; passing one would
-        # only make `forward` allocate a masked copy.
-        logits, values = self.forward(state, action_tensor)
+        # only make `forward` allocate a masked copy. The Q head is a training
+        # signal, not something search consumes, so it is dropped here.
+        logits, values = self.forward(state, action_tensor)[:2]
         probs = torch.softmax(logits[0], dim=-1).cpu().numpy()
         return actions, probs.astype(np.float32), values[0].cpu().numpy()
 
@@ -235,7 +296,7 @@ class PolicyValueNet(nn.Module):
             torch.from_numpy(state),
             torch.from_numpy(action_tensor),
             torch.from_numpy(index),
-        )
+        )[:2]
         flat_index = torch.from_numpy(index)
         probabilities = (
             segment_softmax(logits, flat_index, len(requests)).cpu().numpy()
@@ -268,6 +329,7 @@ class PolicyValueNet(nn.Module):
                     "trunk_layers": self.trunk_layers,
                     "n_houses": self.n_houses,
                     "value_context": self.value_context,
+                    "q_head": self.q_head,
                 },
             },
             temporary,

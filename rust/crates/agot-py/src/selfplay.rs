@@ -52,6 +52,11 @@ struct Record {
     actions: Vec<f32>,
     policy: Vec<f32>,
     player: u8,
+    /// Index of the action that was actually played, within `policy`. Only
+    /// emitted when the request sets `record_chosen`; a Q-head model trains on
+    /// this candidate's outcome, and the played action is sampled at the move
+    /// temperature so it cannot be recovered from the recorded target.
+    chosen: u32,
 }
 
 struct FinishedGame {
@@ -240,6 +245,9 @@ pub fn selfplay<'py>(
         Some(value) => parse_phase_budgets(&value)?,
         None => None,
     };
+    // Ask for an extra `chosen` buffer, one index per recorded decision. It is
+    // off by default so the tuple keeps its historical ten items.
+    let record_chosen: bool = spec_or(spec, "record_chosen", false)?;
     let houses: Option<Vec<String>> = spec_value(spec, "houses")?;
     let data_dir: Option<String> = spec_value(spec, "data_dir")?;
     let step_limit: u32 = spec_or(spec, "step_limit", 20_000)?;
@@ -432,6 +440,7 @@ pub fn selfplay<'py>(
                             actions: observation.action_features,
                             policy: target,
                             player: house.index() as u8,
+                            chosen: index as u32,
                         });
                     }
                     states[slot]
@@ -673,6 +682,16 @@ pub fn selfplay<'py>(
                 let (action, target) = searchers[*slot]
                     .pick(&result, Some(temperature))
                     .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                // `pick` samples at the move temperature while the target is
+                // the visit distribution at 1.0, so the chosen candidate is not
+                // recoverable from the target: record it now, while we know it.
+                let chosen = result
+                    .actions
+                    .iter()
+                    .position(|candidate| *candidate == action)
+                    .ok_or_else(|| {
+                        PyRuntimeError::new_err("the played action is not a root candidate")
+                    })? as u32;
 
                 let observation =
                     observation::observe(&states[*slot].state, &data, &result.actions, observer);
@@ -681,6 +700,7 @@ pub fn selfplay<'py>(
                     actions: observation.action_features,
                     policy: target,
                     player: observer.map(|house| house.index() as u8).unwrap_or(0),
+                    chosen,
                 });
 
                 states[*slot]
@@ -715,6 +735,7 @@ pub fn selfplay<'py>(
     let mut offsets: Vec<u32> = Vec::with_capacity(total_examples + 1);
     let mut players: Vec<u8> = Vec::with_capacity(total_examples);
     let mut outcomes: Vec<f32> = Vec::with_capacity(total_examples * N_HOUSES);
+    let mut chosen: Vec<u32> = Vec::with_capacity(total_examples);
     let mut winners: Vec<Option<String>> = Vec::with_capacity(finished.len());
     let mut steps: Vec<u32> = Vec::with_capacity(finished.len());
     let mut examples_per_game: Vec<u32> = Vec::with_capacity(finished.len());
@@ -740,6 +761,7 @@ pub fn selfplay<'py>(
             actions_flat.extend_from_slice(&record.actions);
             policy_flat.extend_from_slice(&record.policy);
             players.push(record.player);
+            chosen.push(record.chosen);
             for entry in outcome {
                 outcomes.push(entry as f32);
             }
@@ -755,7 +777,7 @@ pub fn selfplay<'py>(
         rounds.push(game.rounds as u32);
     }
 
-    let items: Vec<Py<PyAny>> = vec![
+    let mut items: Vec<Py<PyAny>> = vec![
         array2(py, total_examples, STATE_DIM, states_flat)?.into_any(),
         array2(py, total_rows, ACTION_DIM, actions_flat)?.into_any(),
         numpy::ndarray::Array1::from_vec(offsets)
@@ -770,6 +792,11 @@ pub fn selfplay<'py>(
         examples_per_game.into_pyobject(py)?.unbind().into_any(),
         rounds.into_pyobject(py)?.unbind().into_any(),
     ];
+    if record_chosen {
+        // Appended last so a caller that did not ask for it keeps the ten-item
+        // tuple it has always received.
+        items.push(PyArray1::from_vec(py, chosen).unbind().into_any());
+    }
     PyTuple::new(py, items)
 }
 

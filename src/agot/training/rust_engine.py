@@ -136,6 +136,15 @@ def leaf_evaluator(
                     torch.from_numpy(index),
                 )
                 return logits.numpy(), values.numpy()
+    def evaluate(state, actions, index, mask):
+        with torch.inference_mode():
+            # A Q-head model returns a third tensor; search never consumes it.
+            logits, values = model.forward_packed(
+                torch.from_numpy(state),
+                torch.from_numpy(actions),
+                torch.from_numpy(index),
+            )[:2]
+            return logits.numpy(), values.numpy()
 
         return evaluate
 
@@ -167,6 +176,7 @@ def spec_for(
     dedupe_leaves: bool = True,
     phase_budgets: dict[str, int] | None = None,
     leaf_backend: str | None = None,
+    record_chosen: bool = False,
 ) -> dict:
     """Translate a :class:`SelfPlayPlan` into the driver's spec mapping.
 
@@ -180,6 +190,8 @@ def spec_for(
     :func:`leaf_evaluator`). The driver ignores it; it travels in the spec so a
     recorded plan says how its games were searched, and so a gate reproduces the
     run it is judging.
+    ``record_chosen`` asks for an extra played-action-index buffer, which is
+    only needed when the model trains a Q head.
     """
     base = base_config or GameConfig()
     return {
@@ -190,6 +202,7 @@ def spec_for(
         "dedupe_leaves": dedupe_leaves,
         "phase_budgets": phase_budgets,
         "leaf_backend": plan.leaf_backend if leaf_backend is None else leaf_backend,
+        "record_chosen": record_chosen,
         "seed": plan.seed,
         "seeds": [plan.seed + index for index in range(plan.games)],
         "temperature": plan.temperature,
@@ -221,7 +234,11 @@ def _unpack(result, games: int) -> list[GameRecord]:
         steps,
         examples_per_game,
         rounds,
-    ) = result
+    ) = result[:10]
+    # Only a request that set `record_chosen` gets the eleventh buffer. The
+    # tuple is extended rather than replaced so an older extension keeps
+    # loading and every pre-existing caller sees the same ten items.
+    chosen = result[10] if len(result) > 10 else None
 
     # `steps` is the number of decisions; `examples_per_game` is how many of
     # them were recorded. They differ when a scripted seat acts without
@@ -249,6 +266,7 @@ def _unpack(result, games: int) -> list[GameRecord]:
                     policy=np.asarray(policy[start:end], dtype=np.float32),
                     player=int(players[offset]),
                     outcome=np.asarray(outcomes[offset], dtype=np.float32),
+                    chosen=int(chosen[offset]) if chosen is not None else None,
                 )
             )
         cursor += int(taken)
@@ -271,6 +289,7 @@ def self_play_records(
     dedupe_leaves: bool = True,
     phase_budgets: dict[str, int] | None = None,
     leaf_backend: str | None = None,
+    record_chosen: bool | None = None,
 ) -> list[GameRecord]:
     """Play ``plan.games`` games with the Rust driver and return the records.
 
@@ -279,6 +298,8 @@ def self_play_records(
     per-phase cap table; ``None`` keeps the fixed budget.
     a run against the same leaves scored individually. ``leaf_backend``
     overrides ``plan.leaf_backend`` for this call.
+    a run against the same leaves scored individually. ``record_chosen``
+    defaults to the model's own ``q_head`` setting.
     """
     extension = core()
     if extension is None:  # pragma: no cover - depends on the environment
@@ -286,11 +307,14 @@ def self_play_records(
             f"{MODULE} is not installed; build it with maturin or use "
             "agot.training.selfplay.batched_self_play"
         )
+    if record_chosen is None:
+        record_chosen = bool(getattr(model, "q_head", False))
     spec = spec_for(
         plan,
         base_config,
         dedupe_leaves=dedupe_leaves,
         phase_budgets=phase_budgets,
+        record_chosen=record_chosen,
     )
     result = extension.selfplay(spec, leaf_evaluator(model))
     backend = plan.leaf_backend if leaf_backend is None else leaf_backend
@@ -320,6 +344,7 @@ def try_batched_self_play(
     leaf_backend: str = "torch",
     leaf_checkpoint: str | None = None,
     leaf_threads: int = 1,
+    record_chosen: bool = False,
 ) -> list[GameRecord] | None:
     """Run a ``batched_self_play`` request on the Rust driver, or return ``None``.
 
@@ -402,6 +427,7 @@ def try_batched_self_play(
         "dedupe_leaves": dedupe_leaves,
         "phase_budgets": phase_budgets,
         "leaf_backend": leaf_backend,
+        "record_chosen": record_chosen,
         "seed": first.seed if first.seed is not None else seed,
         "seeds": game_seeds(configs, seed),
         "temperature": temperature,

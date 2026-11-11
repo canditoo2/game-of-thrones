@@ -109,6 +109,76 @@ def test_play_game_accepts_one_policy_per_house() -> None:
     assert record.steps > 0
 
 
+def test_replay_buffer_round_trips_the_chosen_action_index(tmp_path) -> None:
+    from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM
+
+    buffer = ReplayBuffer(capacity=16)
+    for row, chosen in enumerate((0, 2, 1)):
+        count = 3
+        buffer.add(
+            Example(
+                state=np.full(STATE_DIM, row, dtype=np.float32),
+                actions=np.zeros((count, ACTION_DIM), dtype=np.float32),
+                policy=np.full(count, 1.0 / count, dtype=np.float32),
+                player=0,
+                outcome=np.zeros(N_HOUSES, dtype=np.float32),
+                chosen=chosen,
+            )
+        )
+    path = str(tmp_path / "chosen.npz")
+    buffer.save(path)
+    with np.load(path) as data:
+        assert "chosen" in data.files
+
+    restored = ReplayBuffer.load(path)
+    assert [example.chosen for example in restored.all()] == [0, 2, 1]
+
+
+def test_replay_buffer_omits_chosen_without_indices(tmp_path) -> None:
+    """A run without a Q head keeps the historical snapshot layout."""
+    from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM
+
+    buffer = ReplayBuffer(capacity=4)
+    buffer.add(
+        Example(
+            state=np.zeros(STATE_DIM, dtype=np.float32),
+            actions=np.zeros((2, ACTION_DIM), dtype=np.float32),
+            policy=np.full(2, 0.5, dtype=np.float32),
+            player=0,
+            outcome=np.zeros(N_HOUSES, dtype=np.float32),
+        )
+    )
+    path = str(tmp_path / "legacy.npz")
+    buffer.save(path)
+    with np.load(path) as data:
+        assert "chosen" not in data.files
+    assert ReplayBuffer.load(path).all()[0].chosen is None
+
+
+def test_replay_buffer_refuses_to_mix_chosen_and_plain_examples() -> None:
+    from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM
+
+    def example(chosen):
+        return Example(
+            state=np.zeros(STATE_DIM, dtype=np.float32),
+            actions=np.zeros((2, ACTION_DIM), dtype=np.float32),
+            policy=np.full(2, 0.5, dtype=np.float32),
+            player=0,
+            outcome=np.zeros(N_HOUSES, dtype=np.float32),
+            chosen=chosen,
+        )
+
+    buffer = ReplayBuffer(capacity=8)
+    buffer.add(example(1))
+    with np.testing.assert_raises_regex(ValueError, "without a chosen action"):
+        buffer.add(example(None))
+
+    other = ReplayBuffer(capacity=8)
+    other.add(example(None))
+    with np.testing.assert_raises_regex(ValueError, "with a chosen action"):
+        other.add(example(0))
+
+
 def test_replay_buffer_round_trips(tmp_path) -> None:
     record = self_play(_factory, GameConfig(seed=2))
     buffer = ReplayBuffer(capacity=10_000)
