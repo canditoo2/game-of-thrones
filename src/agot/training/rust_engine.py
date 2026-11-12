@@ -85,11 +85,16 @@ def resolve_phase_budgets(name: str | None) -> dict[str, int] | None:
 #: optional ``onnx`` extra and cache their graph beside the checkpoint.
 LEAF_BACKENDS = ("torch", "onnx-int8", "onnx-fp32")
 
-#: What ``--leaf-backend auto`` means when the optional extra is installed. The
-#: float32 graph is the numerically faithful one (same logits as the torch
-#: closure up to round-off), so making it the default costs nothing in the
-#: learning signal while still being 1.5-2x faster on the small leaf batches
-#: that gate, evaluate and the tiny training runs use.
+#: What ``--leaf-backend auto`` means when the optional extra is installed.
+#: Training gets the int8 graph, which is what the run at the top of AGENTS.md
+#: (`run6`) already selects and the only engine that halves self-play: 2.35x the
+#: torch path end to end at batch 8, at a measured 4e-4 nats mean policy KL on a
+#: trained net, inside the budget `tests/test_onnx_backend.py` enforces.
+#: Evaluation, gauntlet and play get the float32 graph instead: it is a
+#: round-off away from torch (7e-8 nats), so numbers stay comparable with past
+#: results, and it is still 1.5-2.2x the torch path on the 1-2 leaf batches
+#: those commands use.
+AUTO_TRAIN_LEAF_BACKEND = "onnx-int8"
 AUTO_LEAF_BACKEND = "onnx-fp32"
 
 
@@ -103,15 +108,20 @@ def onnx_runtime_available() -> bool:
     return True
 
 
-def resolve_leaf_backend(backend: str | None) -> str | None:
+def resolve_leaf_backend(backend: str | None, *, training: bool = False) -> str | None:
     """Turn ``auto`` into a concrete engine, leaving every other value alone.
 
-    ``None`` stays ``None``: for ``agot gate`` it means "use whatever the run
-    being judged used", which is not a decision this helper can make.
+    ``training`` picks the int8 graph: a training run is the one place where the
+    leaf batch is big and long-lived enough to pay for quantization, and the
+    learning signal already tolerates that noise (run6 trains on it). ``None``
+    stays ``None``: for ``agot gate`` it means "use whatever the run being
+    judged used", which is not a decision this helper can make.
     """
     if backend != "auto":
         return backend
-    return AUTO_LEAF_BACKEND if onnx_runtime_available() else "torch"
+    if not onnx_runtime_available():
+        return "torch"
+    return AUTO_TRAIN_LEAF_BACKEND if training else AUTO_LEAF_BACKEND
 
 
 def core():

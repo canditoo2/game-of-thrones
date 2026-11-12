@@ -8,7 +8,13 @@ Durable facts only, each with the command that proves it. Measured 2026-11-11 on
 - **The fused runtime is the leaf engine.** `onnx-fp32` is 2.15–2.24x the torch path at 1–2
   leaves, 1.5x at 4–8, 1.17x at 16. `checkpoints/perf-ab/ab_leaf.py`.
 - **`onnx-int8` is another 1.4x on top of fp32** (2.5–3.4x versus torch at every batch size).
+  It is the default for `agot train` since iteration 005 (2.35x end-to-end self-play at batch 8,
+  2.44x at batch 4), and stays opt-in elsewhere: its ~4e-4 nat policy KL changes recorded games,
+  while `onnx-fp32` is a round-off away from torch and is the evaluate/gauntlet default.
   Same command, `--leaf-backend onnx-int8`.
+- **Quantizing the graph costs 0.40 s per iteration** (export 0.09 s + quantize 0.40 s +
+  session 0.06 s, measured). Negligible at production scale, and roughly cancelled by the
+  self-play win at meso scale — which is why the meso benchmark cannot show int8's 2x.
 - **A full random game runs at 722 k decisions/s** with the trace off, up from 532 k before
   the `note_args` change (`cargo bench --bench clone_step`).
 - **`State::clone` is ~380 ns for a 4872-byte state** — that is ~12.8 GB/s, i.e. memcpy-bound,

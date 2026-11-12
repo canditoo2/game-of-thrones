@@ -19,6 +19,9 @@ Branch: `optimization/speed-leaf-engine`, based on `b01c99a`.
 | — | 2026-11-11 | combined | 001+002+003+004 | `seconds_selfplay`, same rounds | 5.64–6.48 s | 3.25–4.39 s | **1.48–1.84x (median 1.60x)** | — | `a9203cc` |
 | — | 2026-11-11 | combined | 001+002+003+004 | leaf forward, 1–2 leaves (the batch sizes gate/evaluate/play use) | 525/397 µs | 243/177 µs | **2.15x / 2.24x** | — | `a9203cc` |
 | — | 2026-11-11 | combined | 001+002+003+004 | `agot evaluate`, 2 games / 8 sims (startup-dominated) | 3.87 s | 3.59 s | 1.08x | — | `a9203cc` |
+| 005 | 2026-11-12 | SPEED | `auto` = **onnx-int8** for `agot train` (fp32 stays for evaluate/gauntlet, gate inherits) | meso wall clock, 5 interleaved rounds against `b01c99a` | 23.75–36.13 s | 17.72–23.32 s | **1.53x (median; mean 1.49x)** | kept | branch head |
+| 005 | 2026-11-12 | SPEED | same | `seconds_selfplay`, same rounds | 16.74–23.30 s | 10.87–13.68 s | **1.67x (median; mean 1.70x)** | kept | branch head |
+| 005 | 2026-11-12 | SPEED | same | self-play, 8 games/16 sims/**batch 8** | 31.35 s torch | 13.33 s | **2.35x** | kept | branch head |
 
 The combined rows were measured against `b01c99a` itself (`git checkout b01c99a -- src/agot`, run,
 `git checkout HEAD -- src/agot`, run, five rounds) because this box's clock drifts by more than the
@@ -29,7 +32,7 @@ in `iterations/000-baseline.md` were taken in an earlier session and are only co
 
 | date | track | idea | measurement | verdict |
 |---|---|---|---|---|
-| 2026-11-11 | SPEED | int8 as the default leaf engine | 2.5–3.4x on leaves, 2.4x self-play, but KL mean 4.1e-4 / p95 8.4e-4 on a trained net and different game records | rejected as a default; kept as `--leaf-backend onnx-int8`, which run6 already uses |
+| 2026-11-11 | SPEED | int8 as the default leaf engine | 2.5–3.4x on leaves, 2.4x self-play, but KL mean 4.1e-4 / p95 8.4e-4 on a trained net and different game records | rejected as a *universal* default (evaluate/gauntlet stay on fp32 for comparability); adopted as the **training** default in 005, which is what run6 already selects |
 | 2026-11-11 | SPEED | `do_constant_folding=False` on the ONNX export | export 0.31 s → 0.05 s, but inference 179 µs → 192 µs at 2 leaves | rejected |
 | 2026-11-11 | SPEED | per-thread tuning of the in-process leaf forward | 1 vs 2 vs 4 torch threads swings ±15 % and changes sign with the CPU clock | rejected (not reproducible) |
 | 2026-11-11 | SPEED | planning-phase micro-optimisations | planning line did not move with 001 (1.98–2.30 M/s across both builds) | nothing to win there |

@@ -391,7 +391,7 @@ def cmd_train(args: argparse.Namespace) -> int:
         return 1
     from agot.training import rust_engine
 
-    args.leaf_backend = rust_engine.resolve_leaf_backend(args.leaf_backend)
+    args.leaf_backend = rust_engine.resolve_leaf_backend(args.leaf_backend, training=True)
     return _run_training(args)
 
 

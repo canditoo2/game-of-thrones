@@ -318,11 +318,15 @@ def test_auto_resolves_to_a_concrete_engine(monkeypatch) -> None:
     """``auto`` is a CLI alias: it must never reach a spec as-is."""
     monkeypatch.setattr(rust_engine, "onnx_runtime_available", lambda: True)
     assert rust_engine.resolve_leaf_backend("auto") == "onnx-fp32"
+    # A training run pays for quantization and gets the fast engine back.
+    assert rust_engine.resolve_leaf_backend("auto", training=True) == "onnx-int8"
     monkeypatch.setattr(rust_engine, "onnx_runtime_available", lambda: False)
     assert rust_engine.resolve_leaf_backend("auto") == "torch"
+    assert rust_engine.resolve_leaf_backend("auto", training=True) == "torch"
     # Everything else passes through, and None keeps meaning "inherit".
     assert rust_engine.resolve_leaf_backend("torch") == "torch"
     assert rust_engine.resolve_leaf_backend("onnx-int8") == "onnx-int8"
+    assert rust_engine.resolve_leaf_backend("onnx-fp32", training=True) == "onnx-fp32"
     assert rust_engine.resolve_leaf_backend(None) is None
 
 
