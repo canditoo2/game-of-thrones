@@ -32,7 +32,9 @@ the difference between a 1.5x and a 2.4x self-play loop.
 
 The graph is still built **once per iteration**, in the parent, before the games
 (`_prepare_leaf_graph`), so quantization is paid once and every worker gets a cache hit. That
-was already true for fp32 in 003; int8 rides the same path.
+was already true for fp32 in 003; int8 rides the same path. Verified by wrapping
+`onnx_backend.ensure_graph` around a 2-iteration run: six calls, **two rebuilds** (one per
+iteration) and four cache hits.
 
 ## Gates
 
