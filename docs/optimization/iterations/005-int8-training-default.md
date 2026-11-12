@@ -57,6 +57,14 @@ are readable — which is exactly why the harness is interleaved.
 
 Median wall **1.55x** (mean 1.58x), median `seconds_selfplay` **2.46x** (mean 2.42x).
 
+A 4-iteration meso (same command, `--iterations 4`, 3 rounds) confirms the split: wall
+28.44–35.58 s → 19.05–19.67 s (**1.53x**), `seconds_selfplay` 18.70–23.13 s → 7.11–7.58 s
+(**2.69x**). The after-wall decomposes as 5.2 s of process startup (measured at that clock:
+`import torch` 3.69 s, `import torch._dynamo` another 2.84 s, overlapped), ~2 s of
+`quantize_dynamic` over 4 iterations, ~2 s of training, and 7.5 s of self-play. Startup and
+quantization are the two terms no leaf-engine change can move, which is why the wall ratio sits
+below the self-play ratio on a micro-run and converges to it on a real one.
+
 The wall ratio is smaller than the self-play ratio for a measured reason: the meso is 2
 iterations, so ~30 % of its before-wall is process startup (imports alone are 1.94 s, and
 `torch._dynamo`'s 1.48 s can only be overlapped, see 004) and int8 adds ~0.55 s per iteration

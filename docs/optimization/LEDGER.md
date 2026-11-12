@@ -23,6 +23,8 @@ Branch: `optimization/speed-leaf-engine`, based on `b01c99a`.
 | 005 | 2026-11-12 | SPEED | same | `seconds_selfplay`, same rounds | 10.71–23.68 s | 4.61–10.32 s | **2.46x (median; mean 2.42x)** | kept | `b419cd7` |
 | 005 | 2026-11-12 | SPEED | same | self-play, 8 games/16 sims/**batch 8** | 31.35 s torch | 13.33 s | **2.35x** | kept | `b419cd7` |
 | 005 | 2026-11-12 | SPEED | same | steady-state iteration (`sp` + `train`, startup amortised) | — | — | **~2.3x** | — | `b419cd7` |
+| 005 | 2026-11-12 | SPEED | same | meso with 4 iterations (startup amortised 2x better), 3 rounds | 28.44–35.58 s | 19.05–19.67 s | 1.53x | — | `8eb7292` |
+| 005 | 2026-11-12 | SPEED | same | `seconds_selfplay`, 4-iteration meso | 18.70–23.13 s | 7.11–7.58 s | **2.69x** | — | `8eb7292` |
 
 The combined rows were measured against `b01c99a` itself (`git checkout b01c99a -- src/agot`, run,
 `git checkout HEAD -- src/agot`, run, five rounds) because this box's clock drifts by more than the
