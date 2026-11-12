@@ -59,3 +59,11 @@ median, after 4.01 s — the run that does no work pays ~4 % for the thread.
 Kept: −0.5…−1.0 s (6–13 %) on every run that plays games, which is every run that matters.
 The regression on `--games 0` is recorded here on purpose; it is the honest cost of the
 thread and the reason the warm-up is a thread rather than a synchronous import.
+
+## Follow-ups
+
+The import cannot be removed: `torch/optim/optimizer.py:_use_grad` does `import torch._dynamo`
+unconditionally inside the first `optimizer.step()`, and `Optimizer.add_param_group` is wrapped
+by `torch._compile._disable_dynamo`. Pre-seeding that wrapper's `__dynamo_disable` cache (the
+intended fast path of the wrapper) removes the constructor's share and was measured: it moves
+the import to the first step and buys nothing end to end. Overlapping is the only lever.

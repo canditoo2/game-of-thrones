@@ -14,7 +14,12 @@ Durable facts only, each with the command that proves it. Measured 2026-11-11 on
 - **`State::clone` is ~380 ns for a 4872-byte state** — that is ~12.8 GB/s, i.e. memcpy-bound,
   not allocation-bound. There is no cheap 2x there.
 - **`torch._dynamo` costs 1.48 s** and is imported by the first `torch.optim` optimizer, not
-  by `import torch` (`python -c "import torch; import torch._dynamo"`).
+  by `import torch` (`python -c "import torch; import torch._dynamo"`). It cannot be avoided:
+  `torch/optim/optimizer.py:_use_grad` imports it unconditionally inside the first
+  `optimizer.step()`, and `Optimizer.add_param_group` is wrapped by
+  `torch._compile._disable_dynamo` on the way in. Pre-seeding that wrapper's
+  `__dynamo_disable` cache skips the constructor import but not the step's, so the only lever
+  is to overlap the import with self-play (iteration 004).
 
 ## Slow
 
