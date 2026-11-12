@@ -691,6 +691,11 @@ def _run_training(args: argparse.Namespace) -> int:
                 "target_entropy": target_entropy,
                 "buffer_restored": buffer_restored,
                 "phase_budgets": args.phase_budgets,
+                # Which engine scored the leaves. It is in the self-play spec
+                # too, but the log is what a Colab session reads back after a
+                # disconnect, and a silent fallback to torch would otherwise
+                # look like a slow run rather than a missing extra.
+                "leaf_backend": args.leaf_backend,
                 "examples_new": sum(len(record.examples) for record in records),
                 "games": len(records),
                 "buffer": len(buffer),

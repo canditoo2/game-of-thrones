@@ -253,24 +253,34 @@ Kept short; each entry is *what it is → pro → con → verdict*.
 5. **Table play (G3).** Meta/kingmaking rules and, for live negotiation, an LLM
    diplomacy layer over a strong engine, plus an interface to play one seat.
 
-## Runbook: the next credible run (run4)
+## Runbook: the next credible run (run6)
 
 Heavy runs happen on the training machine; the build machine only prepares and
 verifies. The commands below are the whole procedure. On Google Colab,
 `colab/agot-colab.ipynb` automates them (private-repo token in Colab secrets,
-checkpoints on Drive, resume across disconnects).
+checkpoints on Drive, resume across disconnects) and adds an int8 preflight so a
+stale wheel cannot silently train on the slow engine.
 
-0. **Smoke first.** Five iterations on a small budget:
+`run6` is the current target: `run5` reached 105 iterations and is the
+warm-start candidate (`--resume` from its `agot.pt`); a fresh start is equally
+valid. `run3` and earlier predate the sequential Westeros resolution and the
+PIMC deck resampling and must not be resumed.
+
+0. **Smoke first.** Three iterations on a small budget, on the engine the run
+   will actually use:
 
    ```bash
-   agot train --iterations 5 --games 12 --workers 4 --batch-games 3 \
-     --eval-games 12 --eval-every 2 --checkpoint checkpoints/smoke/agot.pt
+   agot train --iterations 3 --games 6 --workers 2 --batch-games 3 \
+     --train-threads 2 --buffer 20000 --eval-games 6 --eval-every 3 \
+     --leaf-backend onnx-int8 --device auto \
+     --checkpoint checkpoints/smoke/agot.pt
    ```
 
-   Gate: policy loss must **move and trend down**; the absolute value depends on
-   the number of legal candidates, and the generic choice actions raised it
-   above the old ~2.0 signature. Kill the run once and restart it with
-   `--resume` to prove recovery, and render
+   Gate: policy loss must **move and trend down** (the absolute value depends on
+   the number of legal candidates; the generic choice actions raised it above the
+   old ~2.0 signature, so read `target_entropy` and the trend), and every log
+   line must say `"leaf_backend": "onnx-int8"`. Kill the run once and restart it
+   with `--resume` to prove recovery, and render
    `agot report --checkpoint checkpoints/smoke/agot.pt`.
 
 1. **Calibrate the field.** The periodic gauntlet fills five seats round-robin
@@ -281,39 +291,50 @@ checkpoints on Drive, resume across disconnects).
    agot gauntlet --candidate random --opponents random,greedy --games 60
    ```
 
-2. **Launch run4.**
+2. **Launch run6.**
 
    ```bash
-   agot train --iterations 120 --games 48 --workers 12 --batch-games 4 \
-     --opponent-rate 0.2 --train-threads 4 \
+   agot train --iterations 300 --games 64 --workers 2 --batch-games 16 \
+     --simulations 128 --determinizations 1 --phase-budgets default \
+     --leaf-backend onnx-int8 --buffer 80000 --buffer-save-every 1 \
+     --opponent-rate 0.2 --train-threads 2 --device auto \
      --temperature-rounds 3 --final-temperature 0.25 \
-     --eval-games 12 --eval-every 10 \
-     --gate-games 60 --gate-threshold 0.5 --gate-house-margin 0.0 --gate-patience 3 \
-     --checkpoint checkpoints/run4/agot.pt
+     --eval-games 40 --eval-every 25 \
+     --gate-games 120 --gate-mode deferred --gate-threshold 0.55 \
+     --gate-house-tolerance 0.25 --gate-patience 4 \
+     --checkpoint checkpoints/run6/agot.pt
    ```
+
+   The leaf engine is the load-bearing choice: `onnx-int8` measured **2.35x**
+   the PyTorch path end to end (8 games x 16 simulations, batch 8) and **2.46x**
+   on the training loop's self-play, at a mean policy KL of ~4e-4 nats on a
+   trained net — the budget `tests/test_onnx_backend.py` enforces. `auto` now
+   resolves to it for `agot train`, and to the faithful `onnx-fp32` for
+   evaluate/gauntlet; `--leaf-backend torch` restores the old numerics.
 
    `agot-best.pt` is replaced only by a checkpoint that wins the 3v3 gate and
    stays within per-house tolerance of the previous best in every house. It is
    the checkpoint to use even when the last iteration is weaker.
 
-   On a flaky Colab runtime add `--gate-mode deferred`: the iteration then only
-   queues the candidate, and the gate is played outside training, resumably:
+   With `--gate-mode deferred` the iteration only queues the candidate, and the
+   gate is played outside training, resumably:
 
    ```bash
-   agot gate --checkpoint checkpoints/run4/agot.pt --max-minutes 90
+   agot gate --checkpoint checkpoints/run6/agot.pt --max-minutes 90
    ```
 
    Re-run it after a disconnect (or run `--shard 1/2` and `--shard 2/2` in two
-   processes); verdicts appear in `agot.gate/gate.log.jsonl`.
+   processes); verdicts appear in `agot.gate/gate.log.jsonl`. A run resumed with
+   a different `--gate-mode` than its state file records is refused by design.
 
    Watch it in another terminal:
 
    ```bash
-   agot report --checkpoint checkpoints/run4/agot.pt --iterations 120 --watch 15 --open
+   agot report --checkpoint checkpoints/run6/agot.pt --iterations 300 --watch 15 --open
    ```
 
    Interrupt it at any time; continue with the same command plus
-   `--resume checkpoints/run4/agot.pt`.
+   `--resume checkpoints/run6/agot.pt`.
 
 3. **Decision gates.** By iteration ~20 the policy loss must be trending down,
    not flat. By iteration ~50-70 the gauntlet win rate must sit above the greedy
@@ -323,12 +344,12 @@ checkpoints on Drive, resume across disconnects).
 4. **Verify the result.** Measure the best checkpoint directly:
 
    ```bash
-   agot gauntlet --candidate net:checkpoints/run4/agot-best.pt --opponents random --games 200
+   agot gauntlet --candidate net:checkpoints/run6/agot-best.pt --opponents random --games 200
    ```
 
    G1 is met when this clears the greedy baseline (38.3% against five random
    opponents) with a CI that excludes it. For the league view:
 
    ```bash
-   agot round-robin --checkpoints checkpoints/run4/agot.pt checkpoints/run4/agot-best.pt --games 30
+   agot round-robin --checkpoints checkpoints/run6/agot.pt checkpoints/run6/agot-best.pt --games 30
    ```
