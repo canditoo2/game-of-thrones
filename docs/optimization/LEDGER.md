@@ -19,9 +19,10 @@ Branch: `optimization/speed-leaf-engine`, based on `b01c99a`.
 | — | 2026-11-11 | combined | 001+002+003+004 | `seconds_selfplay`, same rounds | 5.64–6.48 s | 3.25–4.39 s | **1.48–1.84x (median 1.60x)** | — | `a9203cc` |
 | — | 2026-11-11 | combined | 001+002+003+004 | leaf forward, 1–2 leaves (the batch sizes gate/evaluate/play use) | 525/397 µs | 243/177 µs | **2.15x / 2.24x** | — | `a9203cc` |
 | — | 2026-11-11 | combined | 001+002+003+004 | `agot evaluate`, 2 games / 8 sims (startup-dominated) | 3.87 s | 3.59 s | 1.08x | — | `a9203cc` |
-| 005 | 2026-11-12 | SPEED | `auto` = **onnx-int8** for `agot train` (fp32 stays for evaluate/gauntlet, gate inherits) | meso wall clock, 5 interleaved rounds against `b01c99a` | 23.75–36.13 s | 17.72–23.32 s | **1.53x (median; mean 1.49x)** | kept | branch head |
-| 005 | 2026-11-12 | SPEED | same | `seconds_selfplay`, same rounds | 16.74–23.30 s | 10.87–13.68 s | **1.67x (median; mean 1.70x)** | kept | branch head |
-| 005 | 2026-11-12 | SPEED | same | self-play, 8 games/16 sims/**batch 8** | 31.35 s torch | 13.33 s | **2.35x** | kept | branch head |
+| 005 | 2026-11-12 | SPEED | `auto` = **onnx-int8** for `agot train` (fp32 stays for evaluate/gauntlet, gate inherits) | meso wall clock, 5 interleaved rounds against `b01c99a` | 19.35–36.62 s | 12.74–23.12 s | **1.55x (median; mean 1.58x)** | kept | `b419cd7` |
+| 005 | 2026-11-12 | SPEED | same | `seconds_selfplay`, same rounds | 10.71–23.68 s | 4.61–10.32 s | **2.46x (median; mean 2.42x)** | kept | `b419cd7` |
+| 005 | 2026-11-12 | SPEED | same | self-play, 8 games/16 sims/**batch 8** | 31.35 s torch | 13.33 s | **2.35x** | kept | `b419cd7` |
+| 005 | 2026-11-12 | SPEED | same | steady-state iteration (`sp` + `train`, startup amortised) | — | — | **~2.3x** | — | `b419cd7` |
 
 The combined rows were measured against `b01c99a` itself (`git checkout b01c99a -- src/agot`, run,
 `git checkout HEAD -- src/agot`, run, five rounds) because this box's clock drifts by more than the

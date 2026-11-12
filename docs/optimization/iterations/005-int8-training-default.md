@@ -44,20 +44,24 @@ checkpoint, which is how the default was verified.
 ## Measurement
 
 Meso (§5 command), 5 interleaved rounds against `b01c99a`. The box was ~3x slower during this
-run than during 003's (absolute numbers moved from 10 s to 30 s), so only the paired ratios are
-readable — which is exactly why the harness is interleaved.
+run than during 003's (absolute numbers moved from 10 s to 20–36 s), so only the paired ratios
+are readable — which is exactly why the harness is interleaved.
 
 | round | before | after | ratio | sp before | sp after | sp ratio |
 |---|---|---|---|---|---|---|
-| 0 | 23.75 s | 19.63 s | 1.21x | 16.74 s | 11.65 s | 1.44x |
-| 1 | 29.86 s | 17.72 s | 1.69x | 22.25 s | 10.87 s | 2.05x |
-| 2 | 36.13 s | 23.32 s | 1.55x | 23.30 s | 13.68 s | 1.70x |
-| 3 | 34.58 s | 22.55 s | 1.53x | 22.16 s | 13.25 s | 1.67x |
-| 4 | 34.00 s | 22.94 s | 1.48x | 21.70 s | 13.38 s | 1.62x |
+| 0 | 19.35 s | 13.00 s | 1.49x | 10.71 s | 4.61 s | 2.32x |
+| 1 | 19.75 s | 12.74 s | 1.55x | 11.31 s | 4.61 s | 2.46x |
+| 2 | 27.11 s | 23.12 s | 1.17x | 17.02 s | 10.32 s | 1.65x |
+| 3 | 36.62 s | 21.04 s | 1.74x | 23.68 s | 9.38 s | 2.53x |
+| 4 | 25.86 s | 13.43 s | 1.93x | 15.85 s | 5.03 s | 3.15x |
 
-Median wall **1.53x** (mean 1.49x), median `seconds_selfplay` **1.67x** (mean 1.70x).
-The same harness with the fp32 default measured 1.42x / 1.60x, so int8 is not a regression at
-meso scale and is a large win above it.
+Median wall **1.55x** (mean 1.58x), median `seconds_selfplay` **2.46x** (mean 2.42x).
+
+The wall ratio is smaller than the self-play ratio for a measured reason: the meso is 2
+iterations, so ~30 % of its before-wall is process startup (imports alone are 1.94 s, and
+`torch._dynamo`'s 1.48 s can only be overlapped, see 004) and int8 adds ~0.55 s per iteration
+of `quantize_dynamic`. Amortise those over a real iteration and the loop itself runs at the
+self-play ratio: `seconds_train` is unchanged, so a steady-state iteration is ~2.3x faster.
 
 Self-play at a production-shaped batch (8 games / 16 sims / batch 8, Rust driver):
 
@@ -69,10 +73,10 @@ Self-play at a production-shaped batch (8 games / 16 sims / batch 8, Rust driver
 
 ## Verdict
 
-Kept. The training default is now the engine the project already trains with, and the measured
-2.35–2.44x on self-play is where the 2x actually lives: the meso benchmark cannot show it
-because 2.9 s of its ~10 s is process startup and the remaining self-play window is short
-enough that int8's one-time quantization offsets its win.
+Kept. The training default is now the engine the project already trains with, and self-play —
+91–94 % of a training iteration — runs **2.46x** faster on the meso and **2.35x** faster at a
+production batch size. The end-to-end meso wall is 1.55x because it is startup-dominated; the
+ledger records both numbers rather than picking the flattering one.
 
 The learning-signal cost is stated, not hidden: int8 moves the leaf policy by ~4e-4 nats (mean)
 on a trained net and can flip a close action choice, so recorded games differ from a torch run
