@@ -467,9 +467,15 @@ def _run_training(args: argparse.Namespace) -> int:
             "select a GPU runtime or use --device cpu"
         )
     print(f"training device: {device}", flush=True)
+    if args.resume and args.init_from:
+        raise SystemExit("--resume and --init-from cannot be used together")
+    if args.init_from:
+        print(f"starting from weights: {args.init_from}", flush=True)
     model = (
         PolicyValueNet.load(args.resume)
         if args.resume
+        else PolicyValueNet.load(args.init_from)
+        if args.init_from
         else PolicyValueNet(hidden=args.hidden, value_context=True)
     )
     trainer = Trainer(
@@ -707,6 +713,7 @@ def _run_training(args: argparse.Namespace) -> int:
                 "target_entropy": target_entropy,
                 "buffer_restored": buffer_restored,
                 "buffer_seeded": buffer_seeded,
+                "init_from": args.init_from,
                 "phase_budgets": args.phase_budgets,
                 # Which engine scored the leaves. It is in the self-play spec
                 # too, but the log is what a Colab session reads back after a
@@ -1236,6 +1243,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     train.add_argument("--resume", default=None)
+    train.add_argument(
+        "--init-from",
+        default=None,
+        help=(
+            "start a fresh run (iteration 0, new optimizer, new log) from the "
+            "weights in this .pt; unlike --resume it restores no run state and "
+            "no replay buffer"
+        ),
+    )
     train.add_argument(
         "--seed-replay",
         default=None,

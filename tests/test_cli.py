@@ -68,6 +68,20 @@ def test_seed_replay_is_opt_in_and_seeds_an_empty_buffer(tmp_path) -> None:
     assert len(buffer) == 1
 
 
+def test_train_parses_init_from() -> None:
+    """A warm start is weights-only and must be selectable from the CLI."""
+    default = build_parser().parse_args(["train"])
+    assert default.init_from is None
+
+    args = build_parser().parse_args(["train", "--init-from", "run6/agot.pt"])
+    assert args.init_from == "run6/agot.pt"
+
+
+def test_train_rejects_resume_with_init_from() -> None:
+    with pytest.raises(SystemExit):
+        main(["train", "--resume", "a.pt", "--init-from", "b.pt"])
+
+
 def test_gate_subcommand_parses_the_queue_options() -> None:
     args = build_parser().parse_args(
         [
