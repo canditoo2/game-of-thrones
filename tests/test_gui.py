@@ -447,6 +447,66 @@ def test_doran_dialog_choice_is_written_to_the_decision_log(tmp_path) -> None:
         root.destroy()
 
 
+def test_tie_break_choice_is_written_to_the_decision_log(tmp_path) -> None:
+    """Dialog tie-breaks must be replayable: log the engine action they apply."""
+    import json
+
+    from agot.match_log import MatchLog
+
+    class _ActionStep:
+        value = "wildling"
+
+    class _TieState:
+        phase = Phase.WILDLING_ATTACK
+        round = 4
+        action_step = _ActionStep()
+
+    class _TieGame:
+        state = _TieState()
+
+        @staticmethod
+        def observe():
+            return None
+
+    root = _root_or_skip()
+    try:
+        app = AgotApp(root, match_log_dir=tmp_path)
+        app.game = _TieGame()  # type: ignore[assignment]
+        app.human_house = "baratheon"
+        app.match_log = MatchLog(
+            tmp_path,
+            human_house="baratheon",
+            opponents="greedy",
+            checkpoint=None,
+            simulations=1,
+            determinizations=1,
+            seed=0,
+            max_rounds=10,
+        )
+        log_path = app.match_log.jsonl_path
+        legal = [
+            Action(kind=ActionKind.WESTEROS_CHOICE, house="baratheon", amount=index)
+            for index in range(3)
+        ]
+
+        app._log_human_choice(legal[2], legal)
+        app.match_log.finish(
+            winner="baratheon", rounds=4, steps=9, aborted=False, note=None
+        )
+
+        records = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+        ]
+        decisions = [record for record in records if record["type"] == "decision"]
+        assert len(decisions) == 1
+        assert decisions[0]["actor"] == "human"
+        assert decisions[0]["action"]["amount"] == 2
+        assert decisions[0]["chosen_index"] == 2
+    finally:
+        root.destroy()
+
+
 def test_place_order_list_hides_a_defend_in_an_empty_port(tmp_path) -> None:
     """A guaranteed no-op order must not clutter the list the player reads."""
     root = _root_or_skip()

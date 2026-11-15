@@ -2888,6 +2888,28 @@ class AgotApp:
                 return candidate
         return action
 
+    def _log_human_choice(
+        self, action: Action, legal_actions: list[Action]
+    ) -> None:
+        """Log a dialog choice the GUI applies without passing the action list."""
+        if self.match_log is None or self.game is None:
+            return
+        try:
+            position = legal_actions.index(action)
+        except ValueError:
+            return
+        target = np.zeros(len(legal_actions), dtype=np.float64)
+        target[position] = 1.0
+        self._log_decision(
+            house=self.human_house,
+            actor="human",
+            source="human",
+            action=action,
+            legal_actions=legal_actions,
+            chosen_index=position,
+            target=target,
+        )
+
     def _log_doran_choice(self, actions: list[Action], track: str) -> None:
         """Record the human's Doran pick as the action the engine offered.
 
@@ -3502,10 +3524,11 @@ class AgotApp:
             index = self._ask_bid_tie(bid_tie, track_name)
             if index is None:
                 return
+            legal = self.game.legal_actions()
             action = next(
                 (
                     candidate
-                    for candidate in self.game.legal_actions()
+                    for candidate in legal
                     if candidate.amount == index
                 ),
                 None,
@@ -3513,6 +3536,7 @@ class AgotApp:
             if action is None:
                 self._fail("There was no legal tie order.")
                 return
+            self._log_human_choice(action, legal)
             try:
                 self.game.step(action)
             except Exception as error:  # keep the window alive
@@ -3540,10 +3564,11 @@ class AgotApp:
             index = self._ask_wildling_tie(tie)
             if index is None:
                 return
+            legal = self.game.legal_actions()
             action = next(
                 (
                     candidate
-                    for candidate in self.game.legal_actions()
+                    for candidate in legal
                     if candidate.amount == index
                 ),
                 None,
@@ -3551,6 +3576,7 @@ class AgotApp:
             if action is None:
                 self._fail("There was no legal Wildling tie choice.")
                 return
+            self._log_human_choice(action, legal)
             try:
                 self.game.step(action)
             except Exception as error:  # keep the window alive
