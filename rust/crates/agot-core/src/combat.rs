@@ -1497,10 +1497,7 @@ fn can_retreat_to(
     } else if !spec.is_land() {
         return false;
     }
-    if enemy_presence(state, destination, house) {
-        return false;
-    }
-    true
+    !enemy_presence(state, destination, house)
 }
 
 /// Land areas reachable from `origin` through a friendly Ship chain.

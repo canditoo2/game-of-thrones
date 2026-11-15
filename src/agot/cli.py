@@ -383,6 +383,10 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
 
 def cmd_train(args: argparse.Namespace) -> int:
+    # Validate before importing torch: the CI test environment has no torch,
+    # and a mutually exclusive-flag error must not depend on it.
+    if args.resume and args.init_from:
+        raise SystemExit("--resume and --init-from cannot be used together")
     try:
         import torch  # noqa: F401
     except ImportError:
@@ -467,8 +471,6 @@ def _run_training(args: argparse.Namespace) -> int:
             "select a GPU runtime or use --device cpu"
         )
     print(f"training device: {device}", flush=True)
-    if args.resume and args.init_from:
-        raise SystemExit("--resume and --init-from cannot be used together")
     if args.init_from:
         print(f"starting from weights: {args.init_from}", flush=True)
     model = (

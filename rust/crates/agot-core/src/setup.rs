@@ -99,9 +99,9 @@ pub fn initial_state(data: &DataSet, config: &GameConfig, rng: &mut Rng) -> Stat
 
     // Every region prints an owner (its home house); control comes next.
     let region_count = state.region_count as usize;
-    for index in 0..region_count {
+    for (index, region) in state.regions[..region_count].iter_mut().enumerate() {
         let id = RegionId(index as u16);
-        state.regions[index].owner = map.region(id).home;
+        region.owner = map.region(id).home;
     }
 
     // Starting units also establish control of the areas they occupy.
@@ -122,10 +122,9 @@ pub fn initial_state(data: &DataSet, config: &GameConfig, rng: &mut Rng) -> Stat
     }
 
     // Home areas start under their owner's control and hold a Garrison.
-    for index in 0..region_count {
+    for (index, region) in state.regions[..region_count].iter_mut().enumerate() {
         let id = RegionId(index as u16);
         if let Some(home) = map.region(id).home {
-            let region = &mut state.regions[index];
             region.owner = Some(home);
             region.controller = Some(home);
             region.garrison = GARRISON_STRENGTH;
