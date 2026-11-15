@@ -24,7 +24,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from agot.agents import MCTS, GreedyPolicy, Policy, RandomPolicy
+from agot.agents.mcts import SearchResult
 from agot.choice_context import (
     card_choice_mode,
     choice_track,
@@ -34,7 +37,8 @@ from agot.choice_context import (
 from agot.engine.actions import Action, ActionKind
 from agot.engine.enums import ORDERS_BY_KEY, OrderType, Phase, Track, UnitType
 from agot.engine.game import Game, GameConfig
-from agot.engine.observation import UNIT_ORDER
+from agot.engine.observation import HOUSE_ORDER, UNIT_ORDER
+from agot.tactics import is_wasted_order
 
 InputFn = Callable[[str], str]
 OutputFn = Callable[[str], None]
@@ -408,6 +412,61 @@ def render_board(game: Game, human_house: str | None = None) -> str:
     return "\n".join(lines)
 
 
+class PlayMCTS(MCTS):
+    """MCTS that refuses to spend the turn on a guaranteed no-op order.
+
+    The search still explores every legal action, so its statistics stay
+    honest; only the chosen action is constrained when the search's pick is a
+    waste (an empty or shielded port's Defend order).
+    """
+
+    def search(self, game: Game) -> SearchResult:
+        result = super().search(game)
+        if not result.actions:
+            return result
+        keep = [
+            position
+            for position, action in enumerate(result.actions)
+            if not is_wasted_order(game, action)
+        ]
+        if not keep or len(keep) == len(result.actions):
+            return result
+        chosen = int(np.argmax(result.visits)) if len(result.visits) else 0
+        if chosen in keep:
+            return result
+        best = max(keep, key=lambda position: float(result.q_values[position]))
+        visits = np.zeros_like(result.visits)
+        visits[best] = 1.0
+        return SearchResult(result.actions, visits, result.q_values)
+
+
+def parse_checkpoint_map(text: str | None) -> dict[str, str] | None:
+    """Parse ``house=path,house=path`` into a per-house checkpoint map.
+
+    ``None`` or an empty string means "one checkpoint for every seat". Unknown
+    houses and malformed entries raise ``ValueError`` so a typo cannot silently
+    fall back to the wrong network.
+    """
+    if not text or not text.strip():
+        return None
+    mapping: dict[str, str] = {}
+    for item in text.split(","):
+        entry = item.strip()
+        if not entry:
+            continue
+        house, separator, path = entry.partition("=")
+        house = house.strip().lower()
+        path = path.strip()
+        if not separator or not path:
+            raise ValueError(f"checkpoint map entry {entry!r} is not house=path")
+        if house not in HOUSE_ORDER:
+            raise ValueError(
+                f"unknown house {house!r}; choose one of {', '.join(HOUSE_ORDER)}"
+            )
+        mapping[house] = path
+    return mapping or None
+
+
 def make_policies(
     config: GameConfig,
     human_house: str,
@@ -416,32 +475,41 @@ def make_policies(
     determinizations: int,
     checkpoint: str | Path | None,
     seed: int,
+    checkpoint_map: dict[str, str] | None = None,
 ) -> dict[str, Policy]:
     houses = [house for house in config.houses if house != human_house]
     if opponents == "net":
-        if not checkpoint:
+        if not checkpoint and not checkpoint_map:
             raise ValueError(
                 "net opponents need a checkpoint; pass --checkpoint "
                 "<run dir or .pt>"
             )
-        path = resolve_checkpoint(checkpoint)
+        path = resolve_checkpoint(checkpoint) if checkpoint else None
         try:
             from agot.nn.model import NeuralEvaluator, PolicyValueNet
         except ImportError as error:  # pragma: no cover - depends on the environment
             raise RuntimeError(
                 "net opponents need PyTorch: pip install -e \".[rl]\""
             ) from error
-        evaluator = NeuralEvaluator(PolicyValueNet.load(path))
-        return {
-            house: MCTS(
+        evaluators: dict[str, NeuralEvaluator] = {}
+        policies: dict[str, Policy] = {}
+        for index, house in enumerate(houses):
+            chosen = (checkpoint_map or {}).get(house) or path
+            if chosen is None:
+                raise ValueError(f"no checkpoint was given for {house}")
+            resolved = resolve_checkpoint(chosen)
+            evaluator = evaluators.get(resolved)
+            if evaluator is None:
+                evaluator = NeuralEvaluator(PolicyValueNet.load(resolved))
+                evaluators[resolved] = evaluator
+            policies[house] = PlayMCTS(
                 evaluator,
                 simulations=simulations,
                 determinizations=determinizations,
                 temperature=0.0,
                 seed=seed + index * 1009,
             )
-            for index, house in enumerate(houses)
-        }
+        return policies
     if opponents == "greedy":
         return {
             house: GreedyPolicy(seed + index)

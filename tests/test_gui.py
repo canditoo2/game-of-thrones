@@ -6,7 +6,7 @@ import pytest
 
 tk = pytest.importorskip("tkinter")
 
-from agot.engine.actions import Action  # noqa: E402
+from agot.engine.actions import Action, ActionKind  # noqa: E402
 from agot.engine.enums import OrderType, Phase, UnitType  # noqa: E402
 from agot.engine.map import load_map  # noqa: E402
 from agot.gui import (  # noqa: E402
@@ -312,3 +312,181 @@ def test_game_screen_starts_with_a_human_turn(tmp_path) -> None:
         assert app.undo_stack == []
     finally:
         root.destroy()
+
+
+def test_clicking_a_region_selects_the_matching_display_row(tmp_path) -> None:
+    """The tree lists display_actions, so a region click must index that list."""
+    root = _root_or_skip()
+    try:
+        app = AgotApp(root, match_log_dir=tmp_path)
+        assert app.start_game(
+            GameSettings(
+                house="baratheon",
+                opponents="greedy",
+                simulations=1,
+                determinizations=1,
+                seed=0,
+                max_rounds=1,
+            )
+        )
+        first = Action(kind=ActionKind.PASS, house="baratheon", region="winterfell")
+        second = Action(kind=ActionKind.PASS, house="baratheon", region="pyke")
+        hidden = Action(kind=ActionKind.PASS, house="baratheon")
+        app.actions = [first, hidden, second]
+        app.display_actions = [first, second]
+        app._action_tree.delete(*app._action_tree.get_children())
+        for position in range(len(app.display_actions)):
+            app._action_tree.insert(
+                "", "end", iid=str(position), values=(position + 1, "test")
+            )
+
+        app._select_region("pyke")
+
+        assert app._action_tree.selection() == ("1",)
+    finally:
+        root.destroy()
+
+
+def test_raven_wildling_dialog_is_parented_to_the_tk_root(monkeypatch) -> None:
+    """The dialog must not use the app object as its parent (it is not a widget)."""
+    from agot import gui as gui_module
+
+    class _RavenState:
+        phase = Phase.RAVEN
+
+        @staticmethod
+        def raven_holder() -> str:
+            return "stark"
+
+    class _RavenGame:
+        state = _RavenState()
+
+        @staticmethod
+        def peek_wildling_card() -> dict:
+            return {"name": "A Dance with Dragons", "wildling": "x", "nights_watch": "y"}
+
+    root = _root_or_skip()
+    try:
+        app = AgotApp(root)
+        app.game = _RavenGame()  # type: ignore[assignment]
+        app.human_house = "stark"
+        top = Action(kind=ActionKind.RAVEN_DECK_TOP, house="stark")
+        bottom = Action(kind=ActionKind.RAVEN_DECK_BOTTOM, house="stark")
+        app.actions = [top, bottom]
+        seen: dict[str, object] = {}
+
+        def fake_dialog(*_args, **kwargs):
+            seen["parent"] = kwargs.get("parent")
+            return True
+
+        monkeypatch.setattr(gui_module.messagebox, "askyesnocancel", fake_dialog)
+        chosen = app._raven_wildling_choice(bottom)
+
+        assert chosen is top
+        assert isinstance(seen["parent"], tk.Misc)
+    finally:
+        root.destroy()
+
+
+def test_doran_dialog_choice_is_written_to_the_decision_log(tmp_path) -> None:
+    """The human's Doran pick must appear as the engine's westeros_choice action."""
+    import json
+
+    from agot.match_log import MatchLog
+
+    class _ActionStep:
+        value = "march"
+
+    class _DoranState:
+        phase = Phase.COMBAT
+        round = 3
+        action_step = _ActionStep()
+
+    class _DoranGame:
+        state = _DoranState()
+
+        @staticmethod
+        def observe():
+            return None
+
+    root = _root_or_skip()
+    try:
+        app = AgotApp(root, match_log_dir=tmp_path)
+        app.game = _DoranGame()  # type: ignore[assignment]
+        app.human_house = "martell"
+        app.match_log = MatchLog(
+            tmp_path,
+            human_house="martell",
+            opponents="net",
+            checkpoint=None,
+            simulations=1,
+            determinizations=1,
+            seed=0,
+            max_rounds=10,
+        )
+        log_path = app.match_log.jsonl_path
+        actions = [
+            Action(kind=ActionKind.WESTEROS_CHOICE, house="martell", amount=index)
+            for index in range(3)
+        ]
+
+        app._log_doran_choice(actions, "fiefdoms")
+        app.match_log.finish(
+            winner="martell", rounds=3, steps=10, aborted=False, note=None
+        )
+
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        records = [json.loads(line) for line in lines]
+        decisions = [record for record in records if record["type"] == "decision"]
+        assert len(decisions) == 1
+        assert decisions[0]["actor"] == "human"
+        assert decisions[0]["action"]["kind"] == "westeros_choice"
+        assert decisions[0]["action"]["amount"] == 1
+        assert decisions[0]["chosen_index"] == 1
+    finally:
+        root.destroy()
+
+
+def test_place_order_list_hides_a_defend_in_an_empty_port(tmp_path) -> None:
+    """A guaranteed no-op order must not clutter the list the player reads."""
+    root = _root_or_skip()
+    try:
+        app = AgotApp(root, match_log_dir=tmp_path)
+        assert app.start_game(
+            GameSettings(
+                house="baratheon",
+                opponents="greedy",
+                simulations=1,
+                determinizations=1,
+                seed=0,
+                max_rounds=1,
+            )
+        )
+        port = Action(
+            kind=ActionKind.PLACE_ORDER,
+            house="baratheon",
+            region="dragonstone_port",
+            order="defend_1b",
+        )
+        land = Action(
+            kind=ActionKind.PLACE_ORDER,
+            house="baratheon",
+            region="dragonstone",
+            order="defend_1b",
+        )
+
+        app._fill_actions([port, land])
+
+        assert port not in app.actions
+        assert land in app.actions
+    finally:
+        root.destroy()
+
+
+def test_fresh_seed_changes_between_launches() -> None:
+    from agot.gui import fresh_seed
+
+    seeds = {fresh_seed() for _ in range(5)}
+
+    assert len(seeds) > 1
+    assert all(1 <= seed < 1_000_000_000 for seed in seeds)

@@ -13,6 +13,7 @@ or House card, and the AI search uses at least two determinizations by default.
 from __future__ import annotations
 
 import math
+import random
 import tkinter as tk
 from dataclasses import dataclass
 from functools import lru_cache
@@ -48,6 +49,7 @@ from agot.play import (
     order_label,
     resolve_checkpoint,
 )
+from agot.tactics import is_wasted_order
 
 # -- palette ---------------------------------------------------------------
 
@@ -330,6 +332,9 @@ class GameSettings:
     house: str = "stark"
     opponents: str = "net"
     checkpoint: str | None = None
+    #: Per-house checkpoints (``{"baratheon": "run6/agot.pt"}``); houses not in
+    #: the map fall back to ``checkpoint``.
+    checkpoint_map: dict[str, str] | None = None
     simulations: int = 64
     determinizations: int = 2
     seed: int = 0
@@ -705,6 +710,7 @@ class SetupPanel(tk.Frame):
         self.selected_house = defaults.house
         self._starting = False
         self._cards: dict[str, HouseCard] = {}
+        self._checkpoint_map = defaults.checkpoint_map
 
         self._house_var = tk.StringVar(value=defaults.house)
         self._opponent_var = tk.StringVar(value=defaults.opponents)
@@ -1052,22 +1058,24 @@ class SetupPanel(tk.Frame):
         opponents = self._opponent_var.get()
         checkpoint = self._checkpoint_var.get().strip() or None
         if opponents == "net":
-            if checkpoint is None:
+            if checkpoint is None and not self._checkpoint_map:
                 self.set_status(
                     "Choose agot-best.pt (or a run folder) for the net opponent.",
                     error=True,
                 )
                 return
-            try:
-                checkpoint = resolve_checkpoint(checkpoint)
-            except OSError as error:
-                self.set_status(str(error), error=True)
-                return
+            if checkpoint is not None:
+                try:
+                    checkpoint = resolve_checkpoint(checkpoint)
+                except OSError as error:
+                    self.set_status(str(error), error=True)
+                    return
 
         settings = GameSettings(
             house=self.selected_house,
             opponents=opponents,
             checkpoint=checkpoint,
+            checkpoint_map=self._checkpoint_map,
             simulations=simulations,
             determinizations=determinizations,
             seed=seed,
@@ -1304,6 +1312,7 @@ class AgotApp:
                 settings.determinizations,
                 settings.checkpoint,
                 settings.seed,
+                settings.checkpoint_map,
             )
             game = Game.new(config)
         except (OSError, RuntimeError, ValueError, ImportError) as error:
@@ -1380,6 +1389,7 @@ class AgotApp:
                 determinizations=settings.determinizations,
                 seed=settings.seed,
                 max_rounds=settings.max_rounds,
+                checkpoint_map=settings.checkpoint_map,
             )
         except OSError as error:
             self.match_log = None
@@ -2861,7 +2871,7 @@ class AgotApp:
             "Yes: leave it on top of the deck.\n"
             "No: put it on the bottom of the deck.\n"
             "Cancel: decide later.",
-            parent=self,
+            parent=self.root,
         )
         if keep is None:
             return None
@@ -2878,12 +2888,48 @@ class AgotApp:
                 return candidate
         return action
 
+    def _log_doran_choice(self, actions: list[Action], track: str) -> None:
+        """Record the human's Doran pick as the action the engine offered.
+
+        The dialog calls ``choose_doran_track`` directly, which bypasses the
+        action list and therefore the normal decision log. The engine exposes
+        the same choice as a ``westeros_choice`` whose ``amount`` is the track
+        index, so logging that action keeps the saved game complete and a
+        replay no longer has to infer the track.
+        """
+        if self.match_log is None or self.game is None:
+            return
+        try:
+            index = TRACK_ORDER.index(Track(track))
+        except ValueError:
+            return
+        for position, candidate in enumerate(actions):
+            if (
+                candidate.kind is ActionKind.WESTEROS_CHOICE
+                and candidate.amount == index
+            ):
+                target = np.zeros(len(actions), dtype=np.float64)
+                target[position] = 1.0
+                self._log_decision(
+                    house=self.human_house,
+                    actor="human",
+                    source="human",
+                    action=candidate,
+                    legal_actions=actions,
+                    chosen_index=position,
+                    target=target,
+                )
+                return
+
     def _select_region(self, region_id: str) -> None:
         self.selected_region = region_id
         self._refresh_detail()
         self._refresh_board()
-        if self.actions and not self.busy and not self.finished:
-            for index, action in enumerate(self.actions):
+        # The tree lists display_actions, which collapses identical march
+        # variants, so the row index must come from that list and not from the
+        # full legal-action list.
+        if self.display_actions and not self.busy and not self.finished:
+            for index, action in enumerate(self.display_actions):
                 if action.region == region_id or action.target == region_id:
                     self._action_tree.selection_set(str(index))
                     self._action_tree.see(str(index))
@@ -3102,6 +3148,11 @@ class AgotApp:
         self._selected_action.configure(text="")
 
     def _fill_actions(self, actions: list[Action]) -> None:
+        # A Defend order in a shielded or empty port is a guaranteed no-op:
+        # keep it out of the list instead of making the player scan past it.
+        useful = [action for action in actions if not is_wasted_order(self.game, action)]
+        if useful:
+            actions = useful
         self.actions = actions
         self.display_actions = []
         self.march_variants = {}
@@ -3394,11 +3445,13 @@ class AgotApp:
                 track = self._ask_doran_track()
                 if track is None:
                     return
+                doran_actions = self.game.legal_actions()
                 try:
                     self.game.choose_doran_track(track)
                 except Exception as error:  # keep the window alive
                     self._fail(f"There was no legal Doran track choice: {error}")
                     return
+                self._log_doran_choice(doran_actions, track)
                 self.steps += 1
                 self._append_log(
                     f"Doran Martell: {house_name(owner)} moves "
@@ -3991,17 +4044,25 @@ class AgotApp:
         self.root.destroy()
 
 
+def fresh_seed() -> int:
+    """A new match seed for every desktop session, so openings differ."""
+    return random.SystemRandom().randrange(1, 1_000_000_000)
+
+
 def launch(
     *,
     checkpoint: str | None = None,
+    checkpoint_map: dict[str, str] | None = None,
     house: str = "stark",
     opponents: str = "net",
     simulations: int = 64,
     determinizations: int = 2,
-    seed: int = 0,
+    seed: int | None = None,
     max_rounds: int = 10,
 ) -> None:
     """Open the desktop application. The setup screen is always shown first."""
+    if seed is None:
+        seed = fresh_seed()
     try:
         root = tk.Tk()
     except tk.TclError as error:
@@ -4012,6 +4073,7 @@ def launch(
         house=house,
         opponents=opponents,
         checkpoint=checkpoint,
+        checkpoint_map=checkpoint_map,
         simulations=simulations,
         determinizations=determinizations,
         seed=seed,

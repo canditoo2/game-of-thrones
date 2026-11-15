@@ -141,10 +141,12 @@ def cmd_demo(args: argparse.Namespace) -> int:
 def cmd_play(args: argparse.Namespace) -> int:
     """Open the desktop game window."""
     from agot.gui import launch
+    from agot.play import parse_checkpoint_map
 
     try:
         launch(
             checkpoint=args.checkpoint,
+            checkpoint_map=parse_checkpoint_map(args.checkpoint_map),
             house=args.house,
             opponents=args.opponents,
             simulations=args.simulations,
@@ -504,6 +506,20 @@ def _run_training(args: argparse.Namespace) -> int:
                 f"replay buffer not restored ({error}); starting empty",
                 flush=True,
             )
+    buffer_seeded = 0
+    if args.seed_replay:
+        if buffer_restored:
+            print(
+                "seed replay ignored: the run's own buffer was restored",
+                flush=True,
+            )
+        else:
+            buffer_seeded = seed_replay_buffer(buffer, args.seed_replay)
+            print(
+                f"seeded replay buffer: {buffer_seeded} examples from "
+                f"{Path(args.seed_replay).name}",
+                flush=True,
+            )
 
     run = RunState()
     pending_trainer_state = None
@@ -690,6 +706,7 @@ def _run_training(args: argparse.Namespace) -> int:
                 "seconds_train": round(seconds_train, 3),
                 "target_entropy": target_entropy,
                 "buffer_restored": buffer_restored,
+                "buffer_seeded": buffer_seeded,
                 "phase_budgets": args.phase_budgets,
                 # Which engine scored the leaves. It is in the self-play spec
                 # too, but the log is what a Colab session reads back after a
@@ -946,6 +963,15 @@ def cmd_legal(args: argparse.Namespace) -> int:
     return 0
 
 
+def seed_replay_buffer(buffer, path: str | Path) -> int:
+    """Load an external examples file into a buffer that has no snapshot yet."""
+    from agot.training.replay import ReplayBuffer
+
+    seeded = ReplayBuffer.load(str(path), capacity=buffer.capacity)
+    buffer.extend(seeded.all())
+    return len(buffer)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agot", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1005,6 +1031,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     play.add_argument(
+        "--checkpoint-map",
+        default=None,
+        help=(
+            "per-house networks, e.g. "
+            "'baratheon=checkpoints/run6/agot.pt,tyrell=checkpoints/run5/agot.pt'; "
+            "houses not listed fall back to --checkpoint"
+        ),
+    )
+    play.add_argument(
         "--house",
         default="stark",
         choices=list(DEFAULT_HOUSES),
@@ -1026,7 +1061,15 @@ def build_parser() -> argparse.ArgumentParser:
             "hidden, while 1 is faster but lets the search see them"
         ),
     )
-    play.add_argument("--seed", type=int, default=0)
+    play.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "match seed; omit for a fresh random seed at every launch "
+            "(the setup screen shows it so a game can be reproduced)"
+        ),
+    )
     play.add_argument("--max-rounds", type=int, default=10)
     play.set_defaults(func=cmd_play)
 
@@ -1193,6 +1236,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     train.add_argument("--resume", default=None)
+    train.add_argument(
+        "--seed-replay",
+        default=None,
+        help=(
+            "NPZ of extra ReplayBuffer examples to load into a fresh buffer at "
+            "start (e.g. tools/reanalyze_human_game.py output); ignored when a "
+            "resume already restores the run's own buffer"
+        ),
+    )
     train.add_argument("--checkpoint", default="checkpoints/agot.pt")
     train.add_argument(
         "--best-checkpoint",

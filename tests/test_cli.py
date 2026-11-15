@@ -42,6 +42,32 @@ def test_train_phase_budgets_defaults_to_off() -> None:
         build_parser().parse_args(["train", "--phase-budgets", "bogus"])
 
 
+def test_seed_replay_is_opt_in_and_seeds_an_empty_buffer(tmp_path) -> None:
+    """`--seed-replay` is off by default and loads examples into a fresh buffer."""
+    import numpy as np
+
+    from agot.cli import seed_replay_buffer
+    from agot.training.replay import STATE_DIM, Example, ReplayBuffer
+
+    assert build_parser().parse_args(["train"]).seed_replay is None
+
+    example = Example(
+        state=np.zeros(STATE_DIM, dtype=np.float32),
+        actions=np.zeros((2, 141), dtype=np.float32),
+        policy=np.array([0.5, 0.5], dtype=np.float32),
+        player=0,
+        outcome=np.ones(6, dtype=np.float32),
+    )
+    source = ReplayBuffer(capacity=8)
+    source.add(example)
+    path = tmp_path / "seed.npz"
+    source.save(str(path))
+
+    buffer = ReplayBuffer(capacity=8)
+    assert seed_replay_buffer(buffer, path) == 1
+    assert len(buffer) == 1
+
+
 def test_gate_subcommand_parses_the_queue_options() -> None:
     args = build_parser().parse_args(
         [
@@ -109,11 +135,12 @@ def test_play_command_opens_the_gui(monkeypatch) -> None:
     assert calls == [
         {
             "checkpoint": None,
+            "checkpoint_map": None,
             "house": "baratheon",
             "opponents": "greedy",
             "simulations": 8,
             "determinizations": 1,
-            "seed": 0,
+            "seed": None,
             "max_rounds": 2,
         }
     ]

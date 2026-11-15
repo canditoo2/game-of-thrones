@@ -56,6 +56,7 @@ class MatchLog:
         determinizations: int,
         seed: int,
         max_rounds: int,
+        checkpoint_map: dict[str, str] | None = None,
     ) -> None:
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -74,6 +75,7 @@ class MatchLog:
                 "human_house": human_house,
                 "opponents": opponents,
                 "checkpoint": checkpoint,
+                "checkpoint_map": checkpoint_map,
                 "simulations": simulations,
                 "determinizations": determinizations,
                 "seed": seed,

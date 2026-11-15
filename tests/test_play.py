@@ -8,10 +8,76 @@ from agot.engine.actions import Action
 from agot.engine.game import Game, GameConfig
 from agot.play import (
     format_action,
+    parse_checkpoint_map,
     play_interactive,
     render_board,
     resolve_checkpoint,
 )
+
+
+def test_checkpoint_map_parses_per_house_paths() -> None:
+    mapping = parse_checkpoint_map(
+        "baratheon=checkpoints/run6/agot.pt, tyrell=checkpoints/run5"
+    )
+
+    assert mapping == {
+        "baratheon": "checkpoints/run6/agot.pt",
+        "tyrell": "checkpoints/run5",
+    }
+    assert parse_checkpoint_map(None) is None
+    assert parse_checkpoint_map("   ") is None
+
+
+def test_checkpoint_map_rejects_typos_instead_of_misrouting() -> None:
+    with pytest.raises(ValueError):
+        parse_checkpoint_map("barath eon=checkpoints/run6/agot.pt")
+    with pytest.raises(ValueError):
+        parse_checkpoint_map("checkpoints/run6/agot.pt")
+
+
+def test_checkpoint_map_covers_a_missing_single_checkpoint(monkeypatch) -> None:
+    """A map that fills every opponent seat needs no --checkpoint fallback."""
+    from agot import play as play_module
+
+    class _Evaluator:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    class _MCTS:
+        def __init__(self, _evaluator, **_kwargs) -> None:
+            pass
+
+    class _Model:
+        @staticmethod
+        def load(_path: str):
+            return object()
+
+    monkeypatch.setattr(play_module, "MCTS", _MCTS)
+    monkeypatch.setattr(play_module, "resolve_checkpoint", lambda path: str(path))
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "agot.nn.model",
+        type(
+            "stub",
+            (),
+            {"NeuralEvaluator": _Evaluator, "PolicyValueNet": _Model},
+        ),
+    )
+
+    config = GameConfig(seed=0)
+    mapping = {house: f"{house}.pt" for house in config.houses if house != "stark"}
+    policies = play_module.make_policies(
+        config,
+        "stark",
+        "net",
+        1,
+        1,
+        None,
+        0,
+        mapping,
+    )
+
+    assert set(policies) == set(mapping)
 
 
 def test_format_action_describes_a_planning_move() -> None:
