@@ -16,6 +16,7 @@ position goes through the extension's named builder (``set_region`` /
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from agot.engine.actions import Action, ActionKind
@@ -397,7 +398,11 @@ class RustGame:
         self._state_view = StateView(self)
 
     @classmethod
-    def new(cls, config: GameConfig | None = None) -> RustGame:
+    def new(
+        cls,
+        config: GameConfig | None = None,
+        data_dir: str | Path | None = None,
+    ) -> RustGame:
         from agot.engine.game import GameConfig  # noqa: PLC0415 - avoids a cycle
 
         config = config or GameConfig()
@@ -416,6 +421,7 @@ class RustGame:
             wildling_tie_choice=config.wildling_tie_choice,
             bid_tie_choice=config.bid_tie_choice,
             choice_choices=config.choice_choices,
+            data_dir=None if data_dir is None else str(data_dir),
         )
         return cls(inner, config)
 
