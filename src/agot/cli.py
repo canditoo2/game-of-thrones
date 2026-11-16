@@ -728,13 +728,18 @@ def _run_training(args: argparse.Namespace) -> int:
                 "policy_loss": last.get("policy_loss"),
                 "value_loss": last.get("value_loss"),
             }
-            gate_due = (
-                (iteration + 1) % max(1, args.eval_every) == 0
-                and (args.eval_games > 0 or args.gate_games > 0)
+            gate_every = args.gate_every or args.eval_every
+            eval_due = (
+                args.eval_games > 0
+                and (iteration + 1) % max(1, args.eval_every) == 0
             )
-            if gate_due:
+            gate_due = (
+                args.gate_games > 0
+                and (iteration + 1) % max(1, gate_every) == 0
+            )
+            if eval_due or gate_due:
                 result = None
-                if args.eval_games > 0:
+                if eval_due:
                     result = _evaluate_model(model, config, args)
                     line += (
                         f" eval={result.win_rate:.3f} "
@@ -743,6 +748,7 @@ def _run_training(args: argparse.Namespace) -> int:
                     record["eval"] = result.win_rate
                     record["eval_low"] = result.ci_low
                     record["eval_high"] = result.ci_high
+                    record["eval_checkpoint"] = args.eval_checkpoint
                     # The random/greedy anchor is a sanity check, not the
                     # relative gate: do not let it replace a gate-approved best.
                     if (
@@ -754,7 +760,11 @@ def _run_training(args: argparse.Namespace) -> int:
                         model.save(str(best_checkpoint))
                         line += f" -> best {best_checkpoint}"
 
-                if args.gate_mode == "inline" and args.gate_games > 0:
+                if (
+                    gate_due
+                    and args.gate_mode == "inline"
+                    and args.gate_games > 0
+                ):
                     from agot.training.evaluate import (
                         evaluate_models_match,
                         wilson_interval,
@@ -908,14 +918,30 @@ def _prepare_leaf_graph(model, checkpoint: Path, backend: str) -> None:
 
 
 def _evaluate_model(model, config: GameConfig, args: argparse.Namespace):
-    """Single-seat win rate of ``model`` against random and greedy opponents."""
-    from agot.agents import GreedyPolicy, RandomPolicy
-    from agot.training.evaluate import evaluate_net_vs_field
-
+    """Win rate of ``model``: against a fixed net, or the random/greedy field."""
     # The gauntlet must measure the agent that self-play actually searched as,
     # so it defaults to the training search budget rather than a cheaper one.
     # A mismatch silently reports a weaker policy than the one being trained.
     simulations = getattr(args, "eval_simulations", None) or args.simulations
+    if getattr(args, "eval_checkpoint", None):
+        from agot.nn.model import PolicyValueNet
+        from agot.training.evaluate import evaluate_models_match
+
+        reference = PolicyValueNet.load(args.eval_checkpoint)
+        return evaluate_models_match(
+            model,
+            reference,
+            simulations=simulations,
+            determinizations=args.determinizations,
+            games=args.eval_games,
+            config=config,
+            seed=args.seed + 999,
+            batch_games=args.batch_games,
+            leaf_backend=args.leaf_backend,
+        )
+    from agot.agents import GreedyPolicy, RandomPolicy
+    from agot.training.evaluate import evaluate_net_vs_field
+
     opponents = {
         "random": lambda house, seed: RandomPolicy(seed),
         "greedy": lambda house, seed: GreedyPolicy(seed),
@@ -1337,9 +1363,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--eval-games",
         type=int,
         default=0,
-        help="gauntlet games per evaluation (0 disables periodic evaluation)",
+        help=(
+            "games per evaluation (0 disables periodic evaluation); with "
+            "--eval-checkpoint they are a head-to-head against that net"
+        ),
     )
     train.add_argument("--eval-every", type=int, default=5)
+    train.add_argument(
+        "--eval-checkpoint",
+        default=None,
+        help=(
+            "net used by the periodic evaluation. When set, the eval is a "
+            "head-to-head against this checkpoint and the random/greedy "
+            "gauntlet is not used"
+        ),
+    )
+    train.add_argument(
+        "--gate-every",
+        type=int,
+        default=None,
+        help=(
+            "iterations between gate candidates (default: the value of "
+            "--eval-every); lets the eval run more often than the gate"
+        ),
+    )
     train.add_argument(
         "--eval-simulations",
         type=int,

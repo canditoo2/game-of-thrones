@@ -82,6 +82,31 @@ def test_train_rejects_resume_with_init_from() -> None:
         main(["train", "--resume", "a.pt", "--init-from", "b.pt"])
 
 
+def test_train_parses_the_relative_eval_options() -> None:
+    """The eval can point at a fixed net and run on its own cadence."""
+    default = build_parser().parse_args(["train"])
+    assert default.eval_checkpoint is None
+    assert default.gate_every is None
+
+    args = build_parser().parse_args(
+        [
+            "train",
+            "--eval-checkpoint",
+            "run7/agot.pt",
+            "--eval-every",
+            "10",
+            "--eval-games",
+            "60",
+            "--gate-every",
+            "25",
+        ]
+    )
+    assert args.eval_checkpoint == "run7/agot.pt"
+    assert args.eval_every == 10
+    assert args.eval_games == 60
+    assert args.gate_every == 25
+
+
 def test_gate_subcommand_parses_the_queue_options() -> None:
     args = build_parser().parse_args(
         [
