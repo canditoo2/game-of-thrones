@@ -51,6 +51,31 @@ impl Game {
         Ok(())
     }
 
+    /// Whether a queued area choice still means something on the current board.
+    ///
+    /// The queue can hold a follow-up task behind other choices, and the
+    /// post-battle card effects are queued before the remaining ones settle. An
+    /// optional effect must therefore be re-checked when its actions are
+    /// generated: offering an area that no longer qualifies would let a caller
+    /// pick an action the engine then has to reject.
+    fn region_choice_is_valid(
+        &self,
+        purpose: &RegionChoice,
+        house: HouseId,
+        region: RegionId,
+    ) -> bool {
+        let area = self.state.region(region);
+        match purpose {
+            RegionChoice::RenlyFootman => {
+                area.controller == Some(house) && area.unit_count(UnitType::Footman) > 0
+            }
+            RegionChoice::QueenOrder { opponent } | RegionChoice::CerseiOrder { opponent } => {
+                area.order_house == Some(*opponent)
+            }
+            RegionChoice::HordeFort { .. } | RegionChoice::HordeMusterFort => true,
+        }
+    }
+
     /// The actions offered for the first pending generic choice.
     pub(crate) fn choice_actions(&self, task: &ChoiceTask) -> Vec<Action> {
         let house = task.house;
@@ -162,6 +187,7 @@ impl Game {
                 let context = region_choice_context(purpose);
                 let mut actions: Vec<Action> = regions
                     .iter()
+                    .filter(|region| self.region_choice_is_valid(purpose, house, **region))
                     .map(|region| Action::choice_region(house, *region).with_context(context))
                     .collect();
                 if *allow_none || actions.is_empty() {
@@ -636,29 +662,38 @@ impl Game {
     ) -> Result<(), EngineError> {
         match purpose {
             RegionChoice::QueenOrder { opponent } => {
+                if self.state.region(region).order_house != Some(*opponent) {
+                    // The Order was removed by an earlier queued choice: the
+                    // card is optional, so there is nothing left to do.
+                    self.state
+                        .note("Queen of Thorns finds no Order to remove".into());
+                    return Ok(());
+                }
                 self.remove_order_at(region, *opponent)?;
                 self.state.note_args(format_args!(
                     "Queen of Thorns removes {opponent}'s Order in {region:?}"
                 ));
             }
             RegionChoice::CerseiOrder { opponent } => {
+                if self.state.region(region).order_house != Some(*opponent) {
+                    self.state
+                        .note("Cersei Lannister finds no Order to remove".into());
+                    return Ok(());
+                }
                 self.remove_order_at(region, *opponent)?;
                 self.state.note_args(format_args!(
                     "Cersei Lannister removes {opponent}'s Order in {region:?}"
                 ));
             }
             RegionChoice::RenlyFootman => {
+                if !self.region_choice_is_valid(&RegionChoice::RenlyFootman, house, region) {
+                    // The area lost its Footman (or its controller) after the
+                    // choice was queued; the upgrade is optional.
+                    self.state
+                        .note("Renly Baratheon finds no Footman to upgrade".into());
+                    return Ok(());
+                }
                 let state = self.state.region_mut(region);
-                if state.controller != Some(house) {
-                    return Err(EngineError::IllegalAction(
-                        "Renly's area is no longer controlled".into(),
-                    ));
-                }
-                if state.unit_count(UnitType::Footman) == 0 {
-                    return Err(EngineError::IllegalAction(
-                        "Renly's area no longer has a Footman".into(),
-                    ));
-                }
                 state.units[UnitType::Footman.index()] -= 1;
                 state.units[UnitType::Knight.index()] += 1;
                 self.state
@@ -1966,5 +2001,31 @@ mod tests {
                 .map(|result| result.loser),
             Some(baratheon)
         );
+    }
+
+    #[test]
+    fn a_queued_renly_choice_drops_areas_that_lost_their_footman() {
+        // Run6's self-play crashed on exactly this: the choice was queued while
+        // the area had a Footman, and a later queued effect took it away.
+        let mut game = game(1);
+        let baratheon = house_of("baratheon");
+        let dragonstone = region_of(&game.data, "dragonstone");
+        game.state.choice_queue.push(ChoiceTask {
+            house: baratheon,
+            kind: ChoiceKind::Region {
+                purpose: RegionChoice::RenlyFootman,
+                regions: SmallVec::from_slice(&[dragonstone]),
+                allow_none: true,
+            },
+        });
+        game.state.region_mut(dragonstone).units[UnitType::Footman.index()] = 0;
+
+        let actions = game.legal_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, ActionKind::Pass);
+
+        game.step(Action::pass(baratheon))
+            .expect("the optional choice must resolve without an error");
+        assert!(game.state.choice_queue.is_empty());
     }
 }
