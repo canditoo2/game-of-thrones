@@ -168,6 +168,11 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
 - The GUI writes human-vs-bot matches under `checkpoints/play-logs/`: a JSONL decision/result
   log and, for MCTS bot seats, a ReplayBuffer-compatible NPZ of those decisions. Undo truncates
   the NPZ but leaves an undo event in the JSONL.
+- Human games: the Swords and Ravens archive and its round snapshots live under
+  `checkpoints/human-games/` (gitignored); `docs/human-games.md` has the protocol and the
+  coverage caveats. `tools/export_human_value.py` builds `values.npz`, and
+  `agot train --human-value` adds an opt-in value-only pass (off by default: the game-level
+  A/B improves calibration but not winner ranking at the current sample size).
 - Smoke gate before any long run: policy loss must fall **below ~2.0** and keep falling. Flat
   ~2.0 is the old failure signature, not convergence.
 - Launch/monitor/resume commands: README "Quickstart". `agot report --checkpoint <ckpt>
