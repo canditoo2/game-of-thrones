@@ -332,20 +332,31 @@ class Trainer:
         epochs: int = 1,
         batch_size: int | None = None,
         seed: int = 0,
+        head_only: bool = False,
     ) -> dict:
         """One pass of the human-snapshot value loss, without a policy target.
 
         The learning rate is scaled down for these steps (and restored), because
         AdamW normalises the gradient: a small loss weight would not make the
         step gentle, only a smaller learning rate does.
+
+        ``head_only`` freezes the state trunk and trains only the value head, so
+        the shared policy features cannot be pulled toward human positions.
         """
         if not len(dataset):
             return {"batches": 0, "value_loss": 0.0}
         self.model.train()
         size = batch_size or self.config.batch_size
-        saved = [group["lr"] for group in self.optimizer.param_groups]
+        saved_lr = [group["lr"] for group in self.optimizer.param_groups]
+        saved_grad: dict[str, bool] = {}
         for group in self.optimizer.param_groups:
             group["lr"] *= lr_scale
+        if head_only:
+            for name, parameter in self.model.named_parameters():
+                saved_grad[name] = parameter.requires_grad
+                parameter.requires_grad = name.startswith("value_head") or name.startswith(
+                    "value_merge"
+                )
         total = 0.0
         batches = 0
         try:
@@ -367,6 +378,9 @@ class Trainer:
                     total += float(loss.detach())
                     batches += 1
         finally:
-            for group, learning_rate in zip(self.optimizer.param_groups, saved, strict=True):
+            for group, learning_rate in zip(self.optimizer.param_groups, saved_lr, strict=True):
                 group["lr"] = learning_rate
+            for name, parameter in self.model.named_parameters():
+                if name in saved_grad:
+                    parameter.requires_grad = saved_grad[name]
         return {"batches": batches, "value_loss": total / max(1, batches)}

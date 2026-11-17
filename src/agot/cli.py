@@ -709,7 +709,9 @@ def _run_training(args: argparse.Namespace) -> int:
             human_stats = {}
             if human_value is not None:
                 human_stats = trainer.train_value_only(
-                    human_value, lr_scale=args.human_value_lr_scale
+                    human_value,
+                    lr_scale=args.human_value_lr_scale,
+                    head_only=args.human_value_head_only,
                 )
             seconds_train = time.time() - train_started
             last = history[-1] if history else {}
@@ -1322,6 +1324,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.1,
         help="learning-rate multiplier for the human value-only pass",
+    )
+    train.add_argument(
+        "--human-value-head-only",
+        action="store_true",
+        help="freeze the shared trunk during the human value pass (head only)",
     )
     train.add_argument("--checkpoint", default="checkpoints/agot.pt")
     train.add_argument(

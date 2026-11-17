@@ -161,6 +161,14 @@ normalises away a small weight but not a small learning rate.
 The pass is off by default. Run 8 stays a pure self-play run; the human value
 target is an opt-in experiment until a game-level A/B shows it helps.
 
+The first A/B (`tools/ab_human_value.py`, 79 games split 63/16 by game) is
+sobering: both the full fine-tune and the head-only variant lower the MSE on
+the held-out snapshots (0.678 → 0.569 and 0.547) but do not improve the
+eventual-winner ranking (37.4% → 35.1% on 131 snapshots from 16 games, well
+inside noise). The head calibrates its absolute level; the ordering signal is
+not there at this sample size. Re-run the A/B on the complete 2023+ subset
+before deciding whether the pass belongs in a training run.
+
 ## Planned use
 
 1. **Value benchmark**: encode the reveal positions and measure how well the

@@ -42,6 +42,16 @@ def test_batch_regroups_the_concatenated_actions():
     assert outcome[0, 0] == 1.0 and outcome[0, 1] == -1.0
 
 
+def test_select_rebuilds_offsets():
+    dataset = make_set()
+    part = dataset.select(np.array([1, 4]))
+    assert len(part) == 2
+    assert part.states.shape == (2, STATE_DIM)
+    assert part.actions.shape == (4, ACTION_DIM)
+    assert part.offsets.tolist() == [0, 2, 4]
+    assert np.array_equal(part.games, dataset.games[[1, 4]])
+
+
 def test_round_trip(tmp_path):
     dataset = make_set()
     path = tmp_path / "values.npz"
@@ -69,4 +79,15 @@ def test_value_only_step_restores_the_learning_rate():
     assert stats["batches"] == 4
     assert np.isfinite(stats["value_loss"])
     after = [group["lr"] for group in trainer.optimizer.param_groups]
+    assert after == before
+
+
+def test_head_only_restores_the_frozen_flags():
+    dataset = make_set()
+    model = PolicyValueNet()
+    trainer = Trainer(model, TrainConfig(batch_size=3, device="cpu"))
+    before = {name: parameter.requires_grad for name, parameter in model.named_parameters()}
+    stats = trainer.train_value_only(dataset, head_only=True, epochs=1)
+    assert stats["batches"] == 2
+    after = {name: parameter.requires_grad for name, parameter in model.named_parameters()}
     assert after == before
