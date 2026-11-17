@@ -105,23 +105,24 @@ The import is in `rust/crates/agot-core/src/snapshot.rs`, exposed as
 state encoder, real legal actions at the first decision, `value_context`
 pooling exactly as in training.
 
-On the first 119 games (640 full snapshots), run 7:
+On the 164 games with full snapshots downloaded so far (1,315 positions),
+run 7:
 
 | metric | value |
 |---|---|
-| winner argmax | **30.3%** (chance 16.7%) |
-| castle-count baseline | 28.7% |
-| MSE (targets ±1) | 0.767 |
-| Brier | 0.192 |
-| mean value, eventual winner | −0.445 |
-| mean value, eventual loser | −0.728 |
+| winner argmax | **28.3%** (chance 16.7%) |
+| castle-count baseline | 29.9% |
+| MSE (targets ±1) | 0.792 |
+| Brier | 0.198 |
+| mean value, eventual winner | −0.478 |
+| mean value, eventual loser | −0.719 |
 
 The values are absolute per-House values with five losers per winner, so a
 negative mean is expected; the winner–loser gap is the signal. The ranking is
-the finding: the network beats chance but barely beats counting castles, and it
-is strongly House-biased (Greyjoy winners are recognised 71% of the time,
-Lannister 50%, Stark/Tyrell/Martell 0%). By round the accuracy is flat at about
-26% in rounds 1–4 and rises to 34–37% from round 5.
+the finding: the network beats chance but does **not** beat counting castles,
+and it is strongly House-biased (Greyjoy winners are recognised 69.8% of the
+time, Lannister 48.3%, Baratheon 28.8%, Stark/Tyrell/Martell 0%). By round the
+accuracy is 21–27% in rounds 1–4 and rises to 29–37% from round 5.
 
 That is the case for using the human positions as an auxiliary value target:
 the archive is large, the labels are clean, and the current value head does not
@@ -137,13 +138,13 @@ The log format changed over the site's life, and the difference matters:
 - **2023 and later**: every reveal carries the board plus the round snapshot
   (tracks, power, Supply, House cards), which is the dataset used here.
 
-So the complete-snapshot set is the 2023+ subset, not all 965 games. In the
-first 347 downloaded games that is 50 games with eight or more full reveals
-(640 full snapshots overall, 77 of them at round 1). The rest of the archive is
-still useful for outcomes, House win rates and the action-event stream, but not
-for board-state training.
+So the complete-snapshot set is the 2023+ subset, not all 965 games. In the 740
+games downloaded so far that is 164 games with at least one full reveal
+(1,315 full snapshots, 162 of them at round 1). The rest of the archive is still
+useful for outcomes, House win rates and the action-event stream, but not for
+board-state training.
 
-The Lannister port Ship is present in **77 of 77** round-1 full snapshots; in
+The Lannister port Ship is present in **162 of 162** round-1 full snapshots; in
 older games the first logged reveal can already be mid-game, so the port has
 sometimes changed hands and cannot answer the question.
 
@@ -157,17 +158,23 @@ pass over it after every self-play iteration (`--human-value-lr-scale`, default
 policy target, because the archive does not record the orders during planning —
 and it scales the learning rate instead of the loss weight, since AdamW
 normalises away a small weight but not a small learning rate.
+`--human-value-head-only` freezes the trunk and trains only the value head.
 
 The pass is off by default. Run 8 stays a pure self-play run; the human value
 target is an opt-in experiment until a game-level A/B shows it helps.
 
-The first A/B (`tools/ab_human_value.py`, 79 games split 63/16 by game) is
-sobering: both the full fine-tune and the head-only variant lower the MSE on
-the held-out snapshots (0.678 → 0.569 and 0.547) but do not improve the
-eventual-winner ranking (37.4% → 35.1% on 131 snapshots from 16 games, well
-inside noise). The head calibrates its absolute level; the ordering signal is
-not there at this sample size. Re-run the A/B on the complete 2023+ subset
-before deciding whether the pass belongs in a training run.
+The A/B (`tools/ab_human_value.py`, 164 games split 131/33 by game) says the
+pass calibrates but does not rank better. Twenty epochs lower the held-out MSE
+from 0.848 to 0.700 and move winner argmax from 23.5% to 24.8% on 294 snapshots
+from 33 games — inside noise. A hundred epochs push the training-game ranking
+from 29.7% to 37.7% while the held-out ranking stays at 24.1%: that is
+overfitting, not transfer. The head-only variant behaves the same way.
+
+So the pass stays off for run 8. The archive's training value is limited by
+what the log exposes: full board snapshots only for 2023+ games and no
+order-placement decisions at all. It remains a good benchmark and a House
+balance study; the next training idea would have to reconstruct action-phase
+states, which means replaying Swords and Ravens' open-source engine.
 
 ## Planned use
 
