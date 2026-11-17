@@ -222,6 +222,7 @@ def evaluate_match(
             wildling_tie_choice=base.wildling_tie_choice,
             bid_tie_choice=base.bid_tie_choice,
             choice_choices=base.choice_choices,
+            lannister_port_ship=base.lannister_port_ship,
         )
         policies = seat_policies(
             factory_a, factory_b, houses, seed=seed + game_index * 7, swap=swap
@@ -311,6 +312,7 @@ def _game_config(
         wildling_tie_choice=base.wildling_tie_choice,
         bid_tie_choice=base.bid_tie_choice,
         choice_choices=base.choice_choices,
+        lannister_port_ship=base.lannister_port_ship,
     )
 
 
@@ -393,6 +395,7 @@ def _play_model_games(
         "wildling_tie_choice": config.wildling_tie_choice,
         "bid_tie_choice": config.bid_tie_choice,
         "choice_choices": config.choice_choices,
+        "lannister_port_ship": config.lannister_port_ship,
         "houses": list(houses),
         "step_limit": step_limit,
         "scripted": [list(policies) for policies in scripted],

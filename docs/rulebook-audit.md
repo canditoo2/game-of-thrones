@@ -33,7 +33,7 @@ facts extracted from them are stored.
 | 1 | The Mountains of the Moon icon | Power 1, Supply 0 | Power 0, Supply 1 | `board.jpg`; matches `chibimagic` `area.rb` |
 | 2 | House Stark starting Supply | 2 | **1** (every other house stays 2) | Physical player screen, confirmed by the user |
 | 3 | House Martell House cards | Missing Darkstar; Red Viper 0, Areo Hotah 2, Obara 2, Nymeria 1, Arianne 4, Doran 3; included "Ellaria Sand" | Red Viper 4 (2 sword + 1 fort), Areo Hotah 3 (fort), Obara Sand 2 (sword), Darkstar 2 (sword), Nymeria Sand 1, Arianne Martell 1, Doran Martell 0 | `151060549-House-Cards-Reference-Sheet.txt` |
-| 4 | Lannister setup (reverted) | 1 Ship in The Golden Sound only | Briefly added a port Ship from the FAQ v2.0 errata; removed again at the user's request, so the base setup stands | Physical setup, per the user |
+| 4 | Lannister setup | 1 Ship in The Golden Sound only | **1 Ship in Lannisport Port** too, per the FAQ v2.0 errata. Opt-in in the engine (`GameConfig.lannister_port_ship`, default off so the frozen parity pins keep the printed setup); Python training, evaluation and play turn it on. Reinstated at the user's request to match the logged human games. | FAQ v2.0 errata, per the user |
 | 5 | Holders'-choice Westeros cards | Resolved as "no effect" | Real decisions for the named Influence token's holder | `Westeros_card.txt` |
 | 6 | House-card special abilities | Ignored (printed stats only) | All 42 implemented in `rust/crates/agot-core/src/house_cards.rs` | `151060549-House-Cards-Reference-Sheet.txt` |
 | 7 | Neutral Forces | Not modelled | King's Landing (5) and The Eyrie (6) placed at 6-player setup | Rulebook p. 4 and p. 26 |

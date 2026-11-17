@@ -224,6 +224,7 @@ pub fn selfplay<'py>(
     let max_rounds: u8 = spec_or(spec, "max_rounds", 10)?;
     let victory_castles: u8 = spec_or(spec, "victory_castles", 7)?;
     let use_westeros_decks: bool = spec_or(spec, "use_westeros_decks", true)?;
+    let lannister_port_ship: bool = spec_or(spec, "lannister_port_ship", false)?;
     let deferred_battles: bool = spec_or(spec, "deferred_battles", false)?;
     let sequential_westeros: bool = spec_or(spec, "sequential_westeros", false)?;
     let doran_choice: bool = spec_or(spec, "doran_choice", false)?;
@@ -302,6 +303,7 @@ pub fn selfplay<'py>(
                 victory_castles,
                 seed: game_seed(*index),
                 use_westeros_decks,
+                lannister_port_ship,
             });
         }
 

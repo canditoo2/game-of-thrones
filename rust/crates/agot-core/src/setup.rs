@@ -4,7 +4,7 @@
 
 use smallvec::SmallVec;
 
-use crate::enums::{HouseId, RegionId, Track, GARRISON_STRENGTH, N_HOUSES};
+use crate::enums::{HouseId, RegionId, Track, UnitType, GARRISON_STRENGTH, N_HOUSES};
 use crate::map::{DataSet, WesterosData};
 use crate::rng::Rng;
 use crate::state::{DeckState, House, State};
@@ -18,6 +18,10 @@ pub struct GameConfig {
     pub seed: u64,
     /// Draw and apply the three Westeros cards each round from round two.
     pub use_westeros_decks: bool,
+    /// The FAQ v2.0 errata opening: Lannister also starts with one Ship in
+    /// Lannisport Port. Off by default so the frozen parity fixtures keep the
+    /// printed setup; Python training, evaluation and play enable it.
+    pub lannister_port_ship: bool,
 }
 
 impl Default for GameConfig {
@@ -28,6 +32,7 @@ impl Default for GameConfig {
             victory_castles: 7,
             seed: 0,
             use_westeros_decks: true,
+            lannister_port_ship: false,
         }
     }
 }
@@ -131,6 +136,18 @@ pub fn initial_state(data: &DataSet, config: &GameConfig, rng: &mut Rng) -> Stat
         }
     }
 
+    // The FAQ v2.0 errata Lannister opening: one Ship in Lannisport Port.
+    if config.lannister_port_ship {
+        let lannister = HouseId::from_name("lannister").expect("known house");
+        if config.houses.contains(&lannister) {
+            if let Some(port) = map.lookup("lannisport_port") {
+                let region = &mut state.regions[port.index()];
+                region.controller = Some(lannister);
+                region.units[UnitType::Ship.index()] += 1;
+            }
+        }
+    }
+
     // Neutral Force tokens defend the areas printed on them.
     for (region_id, strength) in map.neutral_forces.iter().copied() {
         state.regions[region_id.index()].neutral_force = strength;
@@ -216,6 +233,41 @@ mod tests {
         reference.sort_unstable();
         assert_eq!(deck_i.as_slice(), reference.as_slice());
         assert_eq!(state.wildling_deck.cards.len(), data.wildlings.deck.len());
+    }
+
+    #[test]
+    fn errata_port_ship_is_opt_in() {
+        // The FAQ v2.0 errata gives Lannister one Ship in Lannisport Port. The
+        // flag stays off by default (the frozen parity pins record the printed
+        // setup) and the Python config turns it on for our games.
+        let data = data();
+        let port = data.map.lookup("lannisport_port").unwrap();
+        let lannister = HouseId::from_name("lannister").unwrap();
+
+        let plain = GameConfig::with_seed(1);
+        let mut rng = Rng::from_seed(plain.seed);
+        let state = initial_state(&data, &plain, &mut rng);
+        assert_eq!(state.region(port).unit_count(UnitType::Ship), 0);
+        assert_eq!(state.region(port).controller, None);
+
+        let mut errata = GameConfig::with_seed(1);
+        errata.lannister_port_ship = true;
+        let mut rng = Rng::from_seed(errata.seed);
+        let state = initial_state(&data, &errata, &mut rng);
+        assert_eq!(state.region(port).unit_count(UnitType::Ship), 1);
+        assert_eq!(state.region(port).controller, Some(lannister));
+        assert_eq!(state.region(port).owner, None);
+        // Nothing else moved: the printed ship stays in The Golden Sound.
+        let golden = data.map.lookup("the_golden_sound").unwrap();
+        assert_eq!(state.region(golden).unit_count(UnitType::Ship), 1);
+
+        // A game without Lannister cannot gain the ship.
+        let mut without = GameConfig::with_seed(1);
+        without.houses = smallvec::smallvec![HouseId(2), HouseId(3)];
+        without.lannister_port_ship = true;
+        let mut rng = Rng::from_seed(without.seed);
+        let state = initial_state(&data, &without, &mut rng);
+        assert_eq!(state.region(port).unit_count(UnitType::Ship), 0);
     }
 
     #[test]

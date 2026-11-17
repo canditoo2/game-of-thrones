@@ -421,6 +421,7 @@ class RustGame:
             wildling_tie_choice=config.wildling_tie_choice,
             bid_tie_choice=config.bid_tie_choice,
             choice_choices=config.choice_choices,
+            lannister_port_ship=config.lannister_port_ship,
             data_dir=None if data_dir is None else str(data_dir),
         )
         return cls(inner, config)

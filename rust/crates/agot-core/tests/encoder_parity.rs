@@ -120,6 +120,8 @@ fn config_from_json(value: &Value) -> GameConfig {
         use_westeros_decks: value["use_westeros_decks"]
             .as_bool()
             .expect("use_westeros_decks"),
+        // The frozen pins predate the errata and record the printed setup.
+        lannister_port_ship: false,
     }
 }
 

@@ -260,6 +260,7 @@ def configs_for(plan: SelfPlayPlan, base: GameConfig) -> list[GameConfig]:
             wildling_tie_choice=base.wildling_tie_choice,
             bid_tie_choice=base.bid_tie_choice,
             choice_choices=base.choice_choices,
+            lannister_port_ship=base.lannister_port_ship,
         )
         for index in range(plan.games)
     ]

@@ -367,7 +367,7 @@ impl PyGame {
     /// frozen fixtures pin.
     #[classmethod]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, deferred_battles=false, sequential_westeros=false, doran_choice=false, wildling_tie_choice=false, bid_tie_choice=false, choice_choices=false, data_dir=None))]
+    #[pyo3(signature = (houses=None, seed=0, max_rounds=10, victory_castles=7, use_westeros_decks=true, deferred_battles=false, sequential_westeros=false, doran_choice=false, wildling_tie_choice=false, bid_tie_choice=false, choice_choices=false, lannister_port_ship=false, data_dir=None))]
     fn new(
         _cls: &Bound<'_, PyType>,
         houses: Option<Vec<String>>,
@@ -381,6 +381,7 @@ impl PyGame {
         wildling_tie_choice: bool,
         bid_tie_choice: bool,
         choice_choices: bool,
+        lannister_port_ship: bool,
         data_dir: Option<String>,
     ) -> PyResult<PyGame> {
         let data = match data_dir {
@@ -407,6 +408,7 @@ impl PyGame {
             victory_castles,
             seed,
             use_westeros_decks,
+            lannister_port_ship,
         };
         let mut game = CoreGame::new(data, config).map_err(engine_error)?;
         game.deferred_battles = deferred_battles;

@@ -70,6 +70,10 @@ class GameConfig:
     #: training/evaluation enable them; the low-level Rust helpers keep their
     #: deterministic defaults.
     choice_choices: bool = True
+    #: The FAQ v2.0 errata opening: Lannister also starts with one Ship in
+    #: Lannisport Port. Python training, evaluation and play enable it; the raw
+    #: Rust fixture default stays off so the frozen parity pins are unchanged.
+    lannister_port_ship: bool = True
 
     def __post_init__(self) -> None:
         unknown = set(self.houses) - set(load_houses().houses)

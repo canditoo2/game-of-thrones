@@ -93,6 +93,7 @@ class GateSpec:
     wildling_tie_choice: bool = True
     bid_tie_choice: bool = True
     choice_choices: bool = True
+    lannister_port_ship: bool = True
     #: Which engine scored the leaves in the match. A gate must judge the search
     #: the training run actually performed, so the choice travels with the spec
     #: instead of being re-chosen when the candidate is played.
@@ -126,6 +127,7 @@ class GateSpec:
             wildling_tie_choice=self.wildling_tie_choice,
             bid_tie_choice=self.bid_tie_choice,
             choice_choices=self.choice_choices,
+            lannister_port_ship=self.lannister_port_ship,
         )
 
 

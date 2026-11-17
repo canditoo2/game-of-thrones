@@ -32,7 +32,10 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   the three cards, resolves its own mustering/supply/bidding/Wildling step, and only then
   draws the next card; `doran_choice` prompts for Doran Martell's Influence track. Combat card text
   resolves before the blade step. Python training/evaluation include Doran's choice as
-  three legal actions; the raw Rust fixture default stays deterministic.
+  three legal actions; the raw Rust fixture default stays deterministic. All Python games also use the FAQ v2.0
+  Lannister opening: one Ship in Lannisport Port (`GameConfig.lannister_port_ship`,
+  default on; the raw Rust default stays off so the frozen parity pins keep the
+  printed setup).
   AI seats default to 64 simulations over 2 determinizations (2 keeps face-down orders and bids
   hidden), and `--opponents greedy` is the fast fallback. Gauntlet = single-seat win rate vs
   a field; any policy argument accepts `net:<checkpoint>` (MCTS over that saved network), and

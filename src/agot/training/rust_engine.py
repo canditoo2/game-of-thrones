@@ -242,6 +242,7 @@ def spec_for(
         "wildling_tie_choice": base.wildling_tie_choice,
         "bid_tie_choice": base.bid_tie_choice,
         "choice_choices": base.choice_choices,
+        "lannister_port_ship": base.lannister_port_ship,
         "houses": list(base.houses),
     }
 
@@ -407,6 +408,7 @@ def try_batched_self_play(
         first.wildling_tie_choice,
         first.bid_tie_choice,
         first.choice_choices,
+        first.lannister_port_ship,
         tuple(first.houses),
     )
     for config in configs:
@@ -420,6 +422,7 @@ def try_batched_self_play(
             config.wildling_tie_choice,
             config.bid_tie_choice,
             config.choice_choices,
+            config.lannister_port_ship,
             tuple(config.houses),
         ) != shared:
             return None
@@ -454,6 +457,7 @@ def try_batched_self_play(
         "wildling_tie_choice": first.wildling_tie_choice,
         "bid_tie_choice": first.bid_tie_choice,
         "choice_choices": first.choice_choices,
+        "lannister_port_ship": first.lannister_port_ship,
         "houses": list(first.houses),
         "step_limit": step_limit,
         "scripted": scripted,
