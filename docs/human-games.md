@@ -70,6 +70,19 @@ The Lannister port Ship from the FAQ v2.0 errata is present in every round-1
 snapshot the archive can check, which is why the Python `GameConfig` now
 enables it.
 
+## House balance
+
+The 740 downloaded games with a known winner are representative of the site's
+own table (which uses 710 games): Greyjoy 23.6%, Stark 23.4%, Baratheon 17.0%,
+Martell 13.6%, Lannister 11.6%, Tyrell 10.7%.
+
+Lannister is the interesting one because the port Ship arrives only in the
+modern rules. Before 2023 (no Ship, 575 games) Lannister won 11.1%; from 2023
+(Ship, 165 games) 13.3%. That is a +2.2 pp difference with a standard error of
+about 2.9 pp — not distinguishable from zero, and confounded by the era's
+players and meta. The archive can describe the ship's effect; it cannot isolate
+it.
+
 ## What the log does and does not give
 
 - **Value labels are reliable**: every position has the eventual winner.
