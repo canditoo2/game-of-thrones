@@ -27,6 +27,27 @@ DEFAULT_ARCHIVE = ROOT / "checkpoints" / "human-games" / "games.ndjson.gz"
 DEFAULT_ROUNDS = ROOT / "checkpoints" / "human-games" / "rounds.ndjson.gz"
 DEFAULT_SUMMARY = ROOT / "checkpoints" / "human-games" / "summary.json"
 
+#: Our map's region ids; the site spells them with hyphens and `port-of-<host>`.
+OURS = {
+    region["id"]
+    for region in json.loads(
+        (ROOT / "src" / "agot" / "data" / "map_base_6p.json").read_text(encoding="utf-8")
+    )["regions"]
+}
+ALIASES = {"redwyne_straights": "redwyne_straits"}
+
+
+def translate_region(region_id: str) -> str:
+    if region_id in OURS:
+        return region_id
+    if region_id.startswith("port-of-"):
+        candidate = region_id[len("port-of-") :].replace("-", "_") + "_port"
+        if candidate in OURS:
+            return candidate
+    candidate = region_id.replace("-", "_")
+    candidate = ALIASES.get(candidate, candidate)
+    return candidate if candidate in OURS else region_id
+
 
 def read_games(path: Path):
     with gzip.open(path, "rt", encoding="utf-8") as handle:
@@ -66,7 +87,7 @@ def snapshots(game: dict) -> list[dict]:
         for region in world:
             units = [[unit.get("type"), unit.get("house")] for unit in region.get("units", [])]
             order = (region.get("order") or {}).get("type")
-            entry = {"id": region.get("id"), "units": units}
+            entry = {"id": translate_region(region.get("id")), "units": units}
             if order:
                 entry["order"] = order
             if region.get("garrison"):
@@ -115,6 +136,7 @@ def main() -> int:
     rounds: Counter = Counter()
     orders_by_round: dict[int, Counter] = {}
     port_ships = 0
+    openers = 0
     games = 0
     snapshots_total = 0
     full_snapshots = 0
@@ -128,11 +150,12 @@ def main() -> int:
             if winner:
                 winners[winner] += 1
             rounds[len(snap_list)] += 1
-            first = snap_list[0] if snap_list else None
-            if first:
-                port = next((r for r in first["regions"] if r["id"] == "port-of-lannisport"), None)
+            opener = next((s for s in snap_list if s["round"] == 1 and s["full"]), None)
+            if opener:
+                port = next((r for r in opener["regions"] if r["id"] == "lannisport_port"), None)
                 if port and any(unit[1] == "lannister" for unit in port["units"]):
                     port_ships += 1
+                openers += 1
             for snap in snap_list:
                 snapshots_total += 1
                 if snap["full"]:
@@ -156,6 +179,7 @@ def main() -> int:
         "winners": dict(winners.most_common()),
         "snapshots_per_game": dict(sorted(rounds.items())),
         "lannister_port_ship_at_round_1": port_ships,
+        "round_1_snapshots": openers,
         "orders_by_round": {
             str(round_number): dict(counter)
             for round_number, counter in sorted(orders_by_round.items())
@@ -171,7 +195,7 @@ def main() -> int:
     total = sum(winners.values())
     for house, wins in winners.most_common():
         print(f"  {house:10s} {wins:4d}  {wins / total * 100:5.1f}%")
-    print(f"Lannister port ship at round 1: {port_ships}/{games}")
+    print(f"Lannister port ship at round 1: {port_ships}/{openers}")
     print("orders round 1:", dict(orders_by_round.get(1, {})))
     return 0
 

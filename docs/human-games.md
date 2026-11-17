@@ -62,11 +62,13 @@ action phase starts. Each line carries
 - `regions`: units (`[type, house]`), the placed order, the garrison.
 
 `full` marks the games that also logged `gameSnapshot` (tracks and Houses);
-older games carry the board only. With the full archive that is roughly 8,700
-positions, about two thirds of them complete.
+older games carry the board only. Across the full archive that is roughly 8,700
+reveals, but only the 2023+ games are complete (see below); the first 347
+downloaded games yield 640 full snapshots.
 
-The Lannister port Ship from the FAQ v2.0 errata is present in **all** games,
-which is why the Python `GameConfig` now enables it.
+The Lannister port Ship from the FAQ v2.0 errata is present in every round-1
+snapshot the archive can check, which is why the Python `GameConfig` now
+enables it.
 
 ## What the log does and does not give
 
@@ -124,6 +126,26 @@ Lannister 50%, Stark/Tyrell/Martell 0%). By round the accuracy is flat at about
 That is the case for using the human positions as an auxiliary value target:
 the archive is large, the labels are clean, and the current value head does not
 transfer to human play.
+
+## What the archive actually covers
+
+The log format changed over the site's life, and the difference matters:
+
+- **2020–2021**: no `orders-revealed` entries at all. The log is a complete
+  event stream, but it never records a full board, so no round snapshots.
+- **2022**: a few `orders-revealed` entries, board only (`gameSnapshot` absent).
+- **2023 and later**: every reveal carries the board plus the round snapshot
+  (tracks, power, Supply, House cards), which is the dataset used here.
+
+So the complete-snapshot set is the 2023+ subset, not all 965 games. In the
+first 347 downloaded games that is 50 games with eight or more full reveals
+(640 full snapshots overall, 77 of them at round 1). The rest of the archive is
+still useful for outcomes, House win rates and the action-event stream, but not
+for board-state training.
+
+The Lannister port Ship is present in **77 of 77** round-1 full snapshots; in
+older games the first logged reveal can already be mid-game, so the port has
+sometimes changed hands and cannot answer the question.
 
 ## Planned use
 
