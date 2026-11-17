@@ -26,7 +26,9 @@ use agot_core::enums::{CardId, HouseId, UnitType, N_HOUSES};
 use agot_core::game::{EngineError, Game as CoreGame};
 use agot_core::map::DataSet;
 use agot_core::observation;
+use agot_core::rng::Rng;
 use agot_core::setup::GameConfig;
+use agot_core::snapshot::{state_from_snapshot, Snapshot};
 
 mod selfplay;
 
@@ -418,6 +420,42 @@ impl PyGame {
         game.bid_tie_choice = bid_tie_choice;
         game.choice_choices = choice_choices;
         game.state.choice_choices = choice_choices;
+        Ok(PyGame { game })
+    }
+
+    /// Build a read-only game from a logged round snapshot.
+    ///
+    /// The snapshot is the compact JSON written by
+    /// `tools/analyze_human_games.py`. Only the fields the state encoder reads
+    /// are filled; the position is not meant to be stepped.
+    #[classmethod]
+    #[pyo3(signature = (snapshot, data_dir=None))]
+    fn from_snapshot(
+        _cls: &Bound<'_, PyType>,
+        snapshot: &str,
+        data_dir: Option<String>,
+    ) -> PyResult<PyGame> {
+        let data = match data_dir {
+            Some(dir) => DataSet::load(std::path::Path::new(&dir)),
+            None => DataSet::load_default(),
+        }
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let data = Arc::new(data);
+        let snapshot: Snapshot = serde_json::from_str(snapshot)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let state = state_from_snapshot(&data, &snapshot).map_err(PyValueError::new_err)?;
+        let game = CoreGame {
+            data,
+            state,
+            config: GameConfig::default(),
+            deferred_battles: false,
+            sequential_westeros: false,
+            doran_choice: false,
+            wildling_tie_choice: false,
+            bid_tie_choice: false,
+            choice_choices: false,
+            rng: Rng::from_seed(0),
+        };
         Ok(PyGame { game })
     }
 

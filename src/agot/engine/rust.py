@@ -15,6 +15,7 @@ position goes through the extension's named builder (``set_region`` /
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -426,6 +427,29 @@ class RustGame:
         )
         return cls(inner, config)
 
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: dict | str,
+        data_dir: str | Path | None = None,
+    ) -> RustGame:
+        """A read-only game built from one logged round snapshot.
+
+        The engine fills only the fields the state encoder reads, so the
+        position is for evaluation, not for stepping.
+        """
+        from agot.engine.game import GameConfig  # noqa: PLC0415 - avoids a cycle
+
+        extension = core()
+        if extension is None:  # pragma: no cover - depends on the environment
+            raise RuntimeError(f"{MODULE} is not installed")
+        payload = snapshot if isinstance(snapshot, str) else json.dumps(snapshot)
+        inner = extension.Game.from_snapshot(
+            payload,
+            data_dir=None if data_dir is None else str(data_dir),
+        )
+        return cls(inner, GameConfig())
+
     @property
     def config(self) -> GameConfig:
         return self._config
@@ -557,3 +581,7 @@ class RustGame:
             state_features=state,
             action_features=matrix,
         )
+
+    def encode_state(self, actor: str | None = None):
+        """The state feature vector alone, for evaluating an imported position."""
+        return self._inner.encode_state(actor)

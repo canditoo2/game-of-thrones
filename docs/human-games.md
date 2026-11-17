@@ -83,6 +83,48 @@ which is why the Python `GameConfig` now enables it.
   engine is open source, GPL-3.0, in TypeScript) or writing a tracker. The
   reveals alone are already a usable value dataset.
 
+## From a snapshot to an engine state
+
+`Game.from_snapshot(line)` (on `agot.engine.rust.RustGame`) builds a read-only
+engine position from one exported line. It fills what the state encoder reads:
+regions, units, controllers, orders and garrisons, each House's power, Supply
+and available cards, the three tracks, the round and the Wildling threat. It
+then picks the first real Action-Phase decision (Raid, then March, then
+Consolidate) so `legal_actions()` and `encode_state()` work and the value head
+sees the same action context it was trained with. It is not a simulator: the
+position is for evaluation, not for stepping.
+
+The import is in `rust/crates/agot-core/src/snapshot.rs`, exposed as
+`Game.from_snapshot` in the extension and wrapped by the Python facade.
+
+## First benchmark
+
+`tools/benchmark_human_value.py` scores a checkpoint on the full snapshots:
+state encoder, real legal actions at the first decision, `value_context`
+pooling exactly as in training.
+
+On the first 119 games (640 full snapshots), run 7:
+
+| metric | value |
+|---|---|
+| winner argmax | **30.3%** (chance 16.7%) |
+| castle-count baseline | 28.7% |
+| MSE (targets ±1) | 0.767 |
+| Brier | 0.192 |
+| mean value, eventual winner | −0.445 |
+| mean value, eventual loser | −0.728 |
+
+The values are absolute per-House values with five losers per winner, so a
+negative mean is expected; the winner–loser gap is the signal. The ranking is
+the finding: the network beats chance but barely beats counting castles, and it
+is strongly House-biased (Greyjoy winners are recognised 71% of the time,
+Lannister 50%, Stark/Tyrell/Martell 0%). By round the accuracy is flat at about
+26% in rounds 1–4 and rises to 34–37% from round 5.
+
+That is the case for using the human positions as an auxiliary value target:
+the archive is large, the labels are clean, and the current value head does not
+transfer to human play.
+
 ## Planned use
 
 1. **Value benchmark**: encode the reveal positions and measure how well the

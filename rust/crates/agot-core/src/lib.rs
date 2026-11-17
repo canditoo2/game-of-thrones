@@ -33,6 +33,7 @@ pub mod rng;
 mod rules_fixes;
 pub mod search;
 pub mod setup;
+pub mod snapshot;
 pub mod state;
 #[cfg(test)]
 mod support_semantics;
