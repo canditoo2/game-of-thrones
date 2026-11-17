@@ -42,6 +42,25 @@ class HumanValueSet:
     def __len__(self) -> int:
         return int(self.states.shape[0])
 
+    def select(self, indices) -> HumanValueSet:
+        """A new set with only the selected rows, actions and offsets rebuilt."""
+        indices = np.asarray(indices, dtype=np.int64)
+        rows = []
+        offsets = [0]
+        for row in indices:
+            start = int(self.offsets[row])
+            end = int(self.offsets[row + 1])
+            rows.append(self.actions[start:end])
+            offsets.append(offsets[-1] + end - start)
+        return HumanValueSet(
+            states=self.states[indices],
+            actions=np.concatenate(rows, axis=0),
+            offsets=np.asarray(offsets, dtype=np.int64),
+            outcomes=self.outcomes[indices],
+            games=self.games[indices],
+            rounds=self.rounds[indices],
+        )
+
     def batch(self, indices: np.ndarray) -> tuple[torch.Tensor, ...]:
         """Return ``(state, actions, index, outcome)`` for the selected rows."""
         rows = []
