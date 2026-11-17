@@ -323,3 +323,50 @@ class Trainer:
             if callback is not None:
                 callback(record)
         return history
+
+    def train_value_only(
+        self,
+        dataset,
+        *,
+        lr_scale: float = 0.1,
+        epochs: int = 1,
+        batch_size: int | None = None,
+        seed: int = 0,
+    ) -> dict:
+        """One pass of the human-snapshot value loss, without a policy target.
+
+        The learning rate is scaled down for these steps (and restored), because
+        AdamW normalises the gradient: a small loss weight would not make the
+        step gentle, only a smaller learning rate does.
+        """
+        if not len(dataset):
+            return {"batches": 0, "value_loss": 0.0}
+        self.model.train()
+        size = batch_size or self.config.batch_size
+        saved = [group["lr"] for group in self.optimizer.param_groups]
+        for group in self.optimizer.param_groups:
+            group["lr"] *= lr_scale
+        total = 0.0
+        batches = 0
+        try:
+            for epoch in range(epochs):
+                for state, actions, index, outcome in dataset.batches(
+                    size, shuffle=True, seed=seed + epoch
+                ):
+                    state = state.to(self.device)
+                    actions = actions.to(self.device)
+                    index = index.to(self.device)
+                    outcome = outcome.to(self.device)
+                    _, values = self.model.forward_packed(state, actions, index)
+                    loss = ((values - outcome) ** 2).mean()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    if self.config.grad_clip:
+                        nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                    self.optimizer.step()
+                    total += float(loss.detach())
+                    batches += 1
+        finally:
+            for group, learning_rate in zip(self.optimizer.param_groups, saved, strict=True):
+                group["lr"] = learning_rate
+        return {"batches": batches, "value_loss": total / max(1, batches)}

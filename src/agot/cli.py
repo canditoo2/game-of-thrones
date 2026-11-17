@@ -635,6 +635,18 @@ def _run_training(args: argparse.Namespace) -> int:
     # torch every iteration is pure overhead.
     workers = worker_count(plan, args.games)
     executor = create_executor(workers) if workers > 1 else None
+    human_value = None
+    if args.human_value:
+        from agot.training.human_value import HumanValueSet
+
+        if not Path(args.human_value).exists():
+            raise SystemExit(f"--human-value: {args.human_value} does not exist")
+        human_value = HumanValueSet.load(args.human_value)
+        print(
+            f"human value: {len(human_value)} snapshots from "
+            f"{len(set(human_value.games.tolist()))} games",
+            flush=True,
+        )
     stop_training = False
     try:
         for iteration in range(run.iteration, args.iterations):
@@ -694,6 +706,11 @@ def _run_training(args: argparse.Namespace) -> int:
                 pending_trainer_state = None
             train_started = time.time()
             history = trainer.train(buffer)
+            human_stats = {}
+            if human_value is not None:
+                human_stats = trainer.train_value_only(
+                    human_value, lr_scale=args.human_value_lr_scale
+                )
             seconds_train = time.time() - train_started
             last = history[-1] if history else {}
             model.to("cpu")
@@ -708,6 +725,8 @@ def _run_training(args: argparse.Namespace) -> int:
                 f"policy_loss={last.get('policy_loss', 0):.4f} "
                 f"value_loss={last.get('value_loss', 0):.4f}"
             )
+            if human_stats:
+                line += f" human_value={human_stats['value_loss']:.4f}"
             record = {
                 "iteration": iteration + 1,
                 "seconds_selfplay": round(seconds_selfplay, 3),
@@ -727,6 +746,7 @@ def _run_training(args: argparse.Namespace) -> int:
                 "buffer": len(buffer),
                 "policy_loss": last.get("policy_loss"),
                 "value_loss": last.get("value_loss"),
+                "human_value_loss": human_stats.get("value_loss"),
             }
             gate_every = args.gate_every or args.eval_every
             eval_due = (
@@ -1288,6 +1308,20 @@ def build_parser() -> argparse.ArgumentParser:
             "start (e.g. tools/reanalyze_human_game.py output); ignored when a "
             "resume already restores the run's own buffer"
         ),
+    )
+    train.add_argument(
+        "--human-value",
+        default=None,
+        help=(
+            "NPZ from tools/export_human_value.py; after every self-play "
+            "iteration run one value-only pass on the human snapshots"
+        ),
+    )
+    train.add_argument(
+        "--human-value-lr-scale",
+        type=float,
+        default=0.1,
+        help="learning-rate multiplier for the human value-only pass",
     )
     train.add_argument("--checkpoint", default="checkpoints/agot.pt")
     train.add_argument(

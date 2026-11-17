@@ -147,6 +147,20 @@ The Lannister port Ship is present in **77 of 77** round-1 full snapshots; in
 older games the first logged reveal can already be mid-game, so the port has
 sometimes changed hands and cannot answer the question.
 
+## Training integration
+
+`tools/export_human_value.py` writes `checkpoints/human-games/values.npz`: one
+row per full snapshot with the encoded state, the concatenated legal-action
+rows and the ±1 outcome. `agot train --human-value <npz>` runs one value-only
+pass over it after every self-play iteration (`--human-value-lr-scale`, default
+0.1). The pass trains only the value head and the shared trunk — there is no
+policy target, because the archive does not record the orders during planning —
+and it scales the learning rate instead of the loss weight, since AdamW
+normalises away a small weight but not a small learning rate.
+
+The pass is off by default. Run 8 stays a pure self-play run; the human value
+target is an opt-in experiment until a game-level A/B shows it helps.
+
 ## Planned use
 
 1. **Value benchmark**: encode the reveal positions and measure how well the
