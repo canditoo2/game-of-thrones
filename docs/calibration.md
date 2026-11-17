@@ -15,7 +15,10 @@ draws are shared and the difference in the treated house's win rate is the
 effect of that one asset.
 
 - The **control is common**: one control game per seed serves every condition.
-  With eight conditions a seed costs nine games, not sixteen.
+  With ten conditions a seed costs eleven games, not twenty.
+- The **rules include the Lannister port Ship** from the FAQ v2.0 errata, so the
+  control already has it and every effect is measured against the setup our
+  games use.
 - The **treated house rotates** with the seed (`seed % 6`), so the pooled
   estimate is not one house's geography. `weights.json` also reports each
   house separately.
@@ -62,14 +65,24 @@ The Colab notebook is `colab/agot-calibra.ipynb`; the runner is
 
 ```bash
 python tools/calibrate_weights.py --data-dir src/agot/data \
-    --out /content/drive/MyDrive/agot/calibration \
+    --out /content/drive/MyDrive/agot/calibration-ship \
     --seeds 800 --max-seeds 2000 --workers 2 --target-half-width 0.02
 ```
 
+The rules include the FAQ v2.0 Lannister opening (one Ship in Lannisport Port),
+so every game in the run uses the current setup. The output directory is
+**separate** from the old `calibration` one: that run predates the Ship, and
+mixing its rows with the new games would compare two different rule sets.
+
+The runner writes `design.json` (rules, conditions, houses and a hash of the
+data files) and refuses to resume when it does not match, including a
+`seeds.jsonl` that predates the guard. A resume is safe; a changed design needs
+a new `--out`.
+
 It resumes from `seeds.jsonl` after a disconnect and stops extending once every
 substantial condition has a 95% half-width below the target (or at the cap).
-On two Colab vCPUs the measured cost is about 0.25 s per game effective, so
-800 seeds (nine games each) take roughly 30 minutes.
+On two Colab vCPUs the measured cost is 0.52 s per game, so 800 seeds (eleven
+games each) take roughly 40 minutes.
 
 ## Output
 

@@ -18,6 +18,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import random
@@ -42,6 +43,9 @@ BASE = dict(
     wildling_tie_choice=True,
     bid_tie_choice=True,
     choice_choices=True,
+    # The FAQ v2.0 Lannister opening. Spelled out so the calibration can never
+    # silently drift from the setup our games use.
+    lannister_port_ship=True,
 )
 
 #: A neutral castle with mustering 1 and no other icons: the positive control.
@@ -59,6 +63,22 @@ CONDITIONS = {
     "knight": "+1 starting Knight at home",
     "placebo": "identical data copy (must be exactly 0)",
 }
+
+
+def design_payload(base: Path) -> dict:
+    """The immutable ingredients of a run, hashed so a resume cannot mix designs."""
+    digest = hashlib.sha256()
+    for path in sorted(base.glob("*.json")):
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    return {
+        "version": 1,
+        "rules": BASE,
+        "conditions": CONDITIONS,
+        "fort_region": FORT_REGION,
+        "houses": list(HOUSES),
+        "data_hash": digest.hexdigest()[:16],
+    }
 
 
 def home_region(map_data: dict, house: str) -> dict:
@@ -332,13 +352,34 @@ def main() -> int:
 
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
+    rows_path = out / "seeds.jsonl"
+    design = design_payload(args.data_dir)
+    design_path = out / "design.json"
+    if design_path.exists():
+        previous = json.loads(design_path.read_text(encoding="utf-8"))
+        if previous != design:
+            raise SystemExit(
+                f"{design_path} records a different design (rules or data changed). "
+                "Use a new --out directory; resuming would mix incompatible games."
+            )
+    elif rows_path.exists():
+        raise SystemExit(
+            f"{rows_path} exists without design.json (a run from an older tool). "
+            "Use a new --out directory; do not resume it."
+        )
+    else:
+        design_path.write_text(json.dumps(design, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(
+            "design: Lannister port ship on, "
+            f"{len(CONDITIONS)} conditions, data {design['data_hash']}",
+            flush=True,
+        )
     cache = out / "variants"
     cache.mkdir(exist_ok=True)
     dirs = variant_dirs(args.data_dir, cache)
     if not args.skip_pairing_check:
         pairing_check(dirs, seeds=min(6, args.max_seeds))
 
-    rows_path = out / "seeds.jsonl"
     rows: list[dict] = []
     done: set[int] = set()
     if rows_path.exists():
