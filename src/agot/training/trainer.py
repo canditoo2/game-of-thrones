@@ -56,6 +56,27 @@ class PackedBatch:
     outcome_mask: torch.Tensor
     rows: int
 
+    @classmethod
+    def from_arrays(
+        cls,
+        state: np.ndarray,
+        actions: np.ndarray,
+        index: np.ndarray,
+        policy: np.ndarray,
+        outcome: np.ndarray,
+        outcome_mask: np.ndarray,
+    ) -> PackedBatch:
+        """Wrap :meth:`ReplayBuffer.packed_batch` arrays without copying."""
+        return cls(
+            state=torch.from_numpy(state),
+            actions=torch.from_numpy(actions),
+            index=torch.from_numpy(index),
+            policy=torch.from_numpy(policy),
+            outcome=torch.from_numpy(outcome),
+            outcome_mask=torch.from_numpy(outcome_mask),
+            rows=len(state),
+        )
+
     def to(self, device: str) -> PackedBatch:
         return PackedBatch(
             state=self.state.to(device),
@@ -314,12 +335,17 @@ class Trainer:
         stats = TrainStats()
         order = self.rng.permutation(len(examples))
         batch_size = self.config.batch_size
+        # A ReplayBuffer gathers whole batches by array indexing; any other
+        # sequence of examples goes through `collate_packed` one by one. Both
+        # produce identical tensors (tests/test_trainer_pass.py).
+        gather = examples.packed_batch if isinstance(examples, ReplayBuffer) else None
         for start in range(0, len(order), batch_size):
-            chunk = [
-                examples[int(index)]
-                for index in order[start : start + batch_size]
-            ]
-            batch = collate_packed(chunk).to(self.device)
+            chunk_order = order[start : start + batch_size]
+            if gather is not None:
+                batch = PackedBatch.from_arrays(*gather(chunk_order)).to(self.device)
+            else:
+                chunk = [examples[int(index)] for index in chunk_order]
+                batch = collate_packed(chunk).to(self.device)
             policy_loss, value_loss, total = self._step(batch)
             stats.batches += 1
             stats.policy_loss += policy_loss

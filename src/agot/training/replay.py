@@ -143,6 +143,47 @@ class ReplayBuffer:
             outcome=self._outcomes[index],
         )
 
+    def packed_batch(
+        self, indices: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Gather ``indices`` straight into the trainer's unpadded layout.
+
+        Returns ``(state, actions, index, policy, outcome, outcome_mask)`` with
+        the same contents, dtypes and order that
+        :func:`agot.training.trainer.collate_packed` builds from the same
+        examples one by one: each policy segment divided by its own float32 sum,
+        or uniform when that sum is not positive. Array indexing replaces about
+        five numpy-to-torch round trips per example.
+        """
+        indices = np.asarray(indices, dtype=np.int64)
+        size = len(indices)
+        starts = self._offsets[indices]
+        counts = self._offsets[indices + 1] - starts
+        total = int(counts.sum())
+        index = np.repeat(np.arange(size, dtype=np.int64), counts)
+        first = np.cumsum(counts) - counts  # where each segment starts in the batch
+        rows = np.repeat(starts - first, counts) + np.arange(total, dtype=np.int64)
+        actions = self._actions[rows]
+        policy = self._policies[rows]
+        # The same `ndarray.sum` over the same storage slice as the per-example
+        # path: numpy's float32 sum is pairwise with SIMD blocks, and neither
+        # `np.add.reduceat` nor a cumsum reproduces it bit for bit.
+        stored = self._policies
+        sums = np.array(
+            [stored[start:stop].sum() for start, stop in zip(starts, starts + counts, strict=True)],
+            dtype=np.float32,
+        ).reshape(size)
+        positive = sums > 0
+        uniform = (1.0 / np.maximum(counts, 1)).astype(np.float32)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            normalised = policy / sums[index]
+        policy = np.where(positive[index], normalised, uniform[index]).astype(
+            np.float32, copy=False
+        )
+        outcome = self._outcomes[indices]
+        outcome_mask = (outcome != 0).astype(np.float32)
+        return self._states[indices], actions, index, policy, outcome, outcome_mask
+
     def sample(self, batch_size: int, rng: np.random.Generator) -> list[Example]:
         if not self._size:
             raise ValueError("cannot sample from an empty buffer")

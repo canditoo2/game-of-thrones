@@ -11,10 +11,12 @@ torch = pytest.importorskip("torch")
 
 from agot.engine.observation import ACTION_DIM, N_HOUSES, STATE_DIM  # noqa: E402
 from agot.nn.model import PolicyValueNet  # noqa: E402
-from agot.training.replay import Example  # noqa: E402
+from agot.training.replay import Example, ReplayBuffer  # noqa: E402
 from agot.training.trainer import (  # noqa: E402
+    PackedBatch,
     TrainConfig,
     Trainer,
+    collate_packed,
     flush_denormals,
     scrub_subnormals,
 )
@@ -105,3 +107,44 @@ def test_subnormal_state_trains_like_the_plain_path() -> None:
         trainer.model.named_parameters(), reference.model.named_parameters(), strict=True
     ):
         assert torch.allclose(fast, slow, rtol=0, atol=1e-6), name
+
+
+PACKED_FIELDS = ("state", "actions", "index", "policy", "outcome", "outcome_mask")
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_buffer_gather_matches_per_example_collate(seed: int) -> None:
+    """`ReplayBuffer.packed_batch` is byte-identical to `collate_packed`."""
+    rng = np.random.default_rng(seed)
+    # Segments of 1..300 candidates cover numpy's sequential (<8), blocked
+    # (8..128) and recursive (>128) summation paths, plus zero-sum targets.
+    examples = _random_examples(150, seed=seed, max_actions=300)
+    buffer = ReplayBuffer(capacity=1000)
+    buffer.extend(examples)
+    for _ in range(20):
+        indices = rng.choice(len(buffer), size=int(rng.integers(1, 65)), replace=False)
+        old = collate_packed([buffer[int(index)] for index in indices])
+        new = PackedBatch.from_arrays(*buffer.packed_batch(indices))
+        assert new.rows == old.rows
+        for name in PACKED_FIELDS:
+            a, b = getattr(old, name), getattr(new, name)
+            assert a.dtype == b.dtype and a.shape == b.shape, name
+            assert a.numpy().tobytes() == b.numpy().tobytes(), name
+
+
+def test_epoch_over_buffer_matches_epoch_over_list() -> None:
+    """Training from the buffer and from a list of its examples is identical."""
+    examples = _random_examples(70, seed=5)
+    buffer = ReplayBuffer(capacity=1000)
+    buffer.extend(examples)
+    torch.manual_seed(0)
+    model = PolicyValueNet(hidden=16, value_context=True)
+    fast = Trainer(model, TrainConfig(batch_size=8))
+    slow = copy.deepcopy(fast)
+    fast_stats = fast.train_epoch(buffer).as_dict()
+    slow_stats = slow.train_epoch([buffer[index] for index in range(len(buffer))]).as_dict()
+    assert fast_stats == slow_stats
+    for (name, a), (_, b) in zip(
+        fast.model.named_parameters(), slow.model.named_parameters(), strict=True
+    ):
+        assert torch.equal(a, b), name
