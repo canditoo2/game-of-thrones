@@ -107,7 +107,7 @@ one row is meaningful.
 ### Production CLI A/B (`ab_iter.py --games 0`, run8 notebook flags, 4 interleaved rounds)
 
 A = untouched `7952ae2` checkout with its own extension, B = branch head (`3e54423`).
-`.venv\Scripts\python checkpoints\perf-2xb_iter.py --arm "A=<baseline>" --arm "B=<repo>"
+`.venv\Scripts\python checkpoints\perf-2x\ab_iter.py --arm "A=<baseline>" --arm "B=<repo>"
 --rounds 4 --games 0`.
 
 | round | A `seconds_train` | B `seconds_train` | A/B | A `seconds` | B `seconds` | A/B |
