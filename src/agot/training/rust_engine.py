@@ -139,6 +139,7 @@ def leaf_evaluator(
     *,
     checkpoint: str | None = None,
     threads: int = 0,
+    keep=None,
 ):
     """Adapt a :class:`PolicyValueNet` to the driver's callback protocol.
 
@@ -158,6 +159,10 @@ def leaf_evaluator(
     ``threads`` is the ORT intra-op thread count for the ONNX backends
     (``0`` = ORT's default). Self-play workers pass 1 to match the one thread
     they give torch.
+
+    ``keep`` (ONNX backends only) opens the compact graph of those trunk
+    keep-sets (see ``onnx_backend.calibrate_keep``); the torch backend always
+    runs the full network and ignores it.
     """
     if backend not in LEAF_BACKENDS:
         raise ValueError(
@@ -180,7 +185,7 @@ def leaf_evaluator(
     from agot.nn.onnx_backend import LeafBackend  # noqa: PLC0415 - optional dependency
 
     return LeafBackend.from_model(
-        model, backend, checkpoint=checkpoint, threads=threads
+        model, backend, checkpoint=checkpoint, threads=threads, keep=keep
     )
 
 
@@ -205,6 +210,7 @@ def spec_for(
     dedupe_leaves: bool = True,
     phase_budgets: dict[str, int] | None = None,
     leaf_backend: str | None = None,
+    leaf_cache: bool | None = None,
 ) -> dict:
     """Translate a :class:`SelfPlayPlan` into the driver's spec mapping.
 
@@ -214,6 +220,9 @@ def spec_for(
 
     ``phase_budgets`` is the per-phase cap table (see :data:`PHASE_BUDGETS`);
     ``None`` keeps the fixed simulation budget.
+    ``leaf_cache`` overrides ``plan.leaf_cache``, the driver's cross-pass
+    evaluation cache (exact for a pure row-wise evaluator; see
+    ``agot_core::leaf_cache``).
     ``leaf_backend`` is which engine scores the leaves (see
     :func:`leaf_evaluator`). The driver ignores it; it travels in the spec so a
     recorded plan says how its games were searched, and so a gate reproduces the
@@ -226,6 +235,7 @@ def spec_for(
         "determinizations": plan.determinizations,
         "batch_games": max(1, plan.batch_games),
         "dedupe_leaves": dedupe_leaves,
+        "leaf_cache": plan.leaf_cache if leaf_cache is None else leaf_cache,
         "phase_budgets": phase_budgets,
         "leaf_backend": plan.leaf_backend if leaf_backend is None else leaf_backend,
         "seed": plan.seed,
@@ -315,8 +325,7 @@ def self_play_records(
 
     ``dedupe_leaves`` is forwarded to :func:`spec_for`; turn it off to compare
     a run against the same leaves scored individually. ``phase_budgets`` is the
-    per-phase cap table; ``None`` keeps the fixed budget.
-    a run against the same leaves scored individually. ``leaf_backend``
+    per-phase cap table; ``None`` keeps the fixed budget. ``leaf_backend``
     overrides ``plan.leaf_backend`` for this call.
     """
     extension = core()
@@ -325,15 +334,17 @@ def self_play_records(
             f"{MODULE} is not installed; build it with maturin or use "
             "agot.training.selfplay.batched_self_play"
         )
+    # One driver call. A merge once left a second, discarded call ahead of
+    # this one (the games were played twice) and dropped `phase_budgets` from
+    # the call that counted.
+    backend = plan.leaf_backend if leaf_backend is None else leaf_backend
     spec = spec_for(
         plan,
         base_config,
         dedupe_leaves=dedupe_leaves,
         phase_budgets=phase_budgets,
+        leaf_backend=backend,
     )
-    result = extension.selfplay(spec, leaf_evaluator(model))
-    backend = plan.leaf_backend if leaf_backend is None else leaf_backend
-    spec = spec_for(plan, base_config, dedupe_leaves=dedupe_leaves, leaf_backend=backend)
     evaluate = leaf_evaluator(
         model, backend, checkpoint=plan.leaf_checkpoint, threads=1
     )
@@ -359,6 +370,8 @@ def try_batched_self_play(
     leaf_backend: str = "torch",
     leaf_checkpoint: str | None = None,
     leaf_threads: int = 1,
+    leaf_cache: bool = True,
+    leaf_keep=None,
 ) -> list[GameRecord] | None:
     """Run a ``batched_self_play`` request on the Rust driver, or return ``None``.
 
@@ -368,7 +381,10 @@ def try_batched_self_play(
     whether those decisions are imitated.
 
     ``dedupe_leaves`` (default true) scores bit-identical leaves once per batch;
-    turn it off to A/B the exactness-preserving shortcut.
+    turn it off to A/B the exactness-preserving shortcut. ``leaf_cache``
+    (default true) keeps every leaf evaluation for the rest of the call, so a
+    leaf whose exact network input was scored in an earlier pass is not sent
+    again; it subsumes ``dedupe_leaves`` while on.
 
     ``phase_budgets`` caps the simulations a decision may spend by phase (see
     :data:`PHASE_BUDGETS`). ``None`` is the fixed budget; the driver divides a
@@ -378,6 +394,7 @@ def try_batched_self_play(
     record of a plan says how its leaves were scored. ``leaf_checkpoint`` is
     where an ONNX graph is cached and ``leaf_threads`` is its intra-op thread
     count (1 by default, because this driver is used one thread per process).
+    ``leaf_keep`` selects the compact ONNX graph of those keep-sets.
 
     Returns ``None`` — leaving the caller to use the Python driver — when the
     games do not share one configuration or when the evaluator is not a
@@ -441,6 +458,7 @@ def try_batched_self_play(
         "determinizations": determinizations,
         "batch_games": max(1, batch_games),
         "dedupe_leaves": dedupe_leaves,
+        "leaf_cache": leaf_cache,
         "phase_budgets": phase_budgets,
         "leaf_backend": leaf_backend,
         "seed": first.seed if first.seed is not None else seed,
@@ -467,7 +485,11 @@ def try_batched_self_play(
         evaluate = hook()
     else:
         evaluate = leaf_evaluator(
-            model, leaf_backend, checkpoint=leaf_checkpoint, threads=leaf_threads
+            model,
+            leaf_backend,
+            checkpoint=leaf_checkpoint,
+            threads=leaf_threads,
+            keep=leaf_keep,
         )
     result = extension.selfplay(spec, evaluate, decider)
     return _unpack(result, len(configs))

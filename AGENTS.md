@@ -86,6 +86,23 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   The choice travels in the self-play spec (`leaf_backend`) and in the
   deferred `GateSpec`, so a queued gate is judged with the engine its training run used;
   `agot gate --leaf-backend` overrides it. Repro: `python -m agot.nn.onnx_backend <ckpt>`.
+- Compact leaf graph (`agot train --leaf-compact {auto,off}`, default `auto`, ONNX backends
+  only): most trunk ReLU units of a trained net never fire (run7: 202/173/173/165 of 256 dead
+  on the replay buffer, none of them firing on 40k real search leaves). Once per iteration,
+  in the parent, `onnx_backend.calibrate_keep` measures which trunk units fire on the replay
+  buffer (~1.2 s at 62k examples, two threads) and `_prepare_leaf_graph` exports
+  `<stem>.<backend>.compact.onnx` without the others; the keep-sets ride the plan
+  (`SelfPlayPlan.leaf_keep`) so the workers open that same graph. Below
+  `MIN_CALIBRATION_EXAMPLES` (50k: 33k contiguous examples still missed units that fire on
+  leaves) the run keeps the full graph. Compact fp32 is exact against the full graph on real
+  leaves (policy KL 0, value |diff| <= 2.6e-6) and 2.6x cheaper per call; compact int8 is
+  1.6x cheaper than full int8. Gate, evaluate, gauntlet and play always use the full graph.
+  The log records `leaf_compact` (kept widths, `null` = full) and the calibration/export
+  seconds. Measure real leaves with `python -m agot.nn.onnx_backend <ckpt> --leaves
+  <leaves.npz> --replay <agot.replay.npz>` (per-call time, policy KL and value drift of full
+  vs compact, fp32 vs int8, against torch). Note that int8 is not round-off: on run7's real
+  leaves full int8 moves the value by 0.059 on average and up to 1.06
+  (`docs/optimization/iterations/008-compact-leaf-graph.md`).
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 
@@ -104,6 +121,15 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   of `index_add_`, which does not export); `tests/test_onnx_backend.py` pins the two against
   each other. Changing `forward_packed` means changing `PackedGraph` too and bumping
   `GRAPH_REVISION`, or a stale cached graph would quietly score the old arithmetic.
+  `PackedGraph(model, keep)` is the compact variant: only the trunks shrink (rows of each trunk
+  layer, the matching columns of the next layer, of both halves of `policy_head[0]` and of
+  `value_merge`); `policy_head` and `value_head` must stay full width, because their
+  replay-dead units do fire on real leaves (value change up to 1.08). The keep-sets are part
+  of the cache key and the file name, so a graph for other keep-sets, or the full graph, is
+  rebuilt rather than reused; `keep=None` is exactly the full graph. Dropping a unit is exact
+  only while it would have output zero, so calibrate on enough data (coverage, not a margin:
+  the dead action-trunk units sit just below zero, and a margin of 0.05 already keeps 138
+  instead of 83 units of `action_trunk[0]`).
 - `Game.step` applies one player decision and auto-advances every phase that needs no input;
   legal actions are non-empty only when a player must decide. `RustGame` caches its snapshot
   view per step (`StateView._version`); any new mutation path must invalidate it.
