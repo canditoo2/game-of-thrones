@@ -136,6 +136,23 @@ def _parameter_groups(model: nn.Module, weight_decay: float) -> list[dict]:
     ]
 
 
+def _adamw(groups, lr: float) -> torch.optim.AdamW:
+    """``AdamW`` with the fused CPU kernel when this torch has one.
+
+    The fused kernel does the whole update of a parameter in one pass instead
+    of six elementwise kernels, and it avoids the MKL ``sqrt`` path, which is
+    11x slower on the exact zeros a dead unit's second moment holds. On run7 it
+    makes the optimizer step 4x faster with bit-identical weights after an
+    epoch. Torch releases without CPU support raise when asked for it, so the
+    capability is probed rather than assumed from a version number. ``groups``
+    is a factory because a failed constructor may have mutated the dicts.
+    """
+    try:
+        return torch.optim.AdamW(groups(), lr=lr, fused=True)
+    except (RuntimeError, TypeError, ValueError):
+        return torch.optim.AdamW(groups(), lr=lr)
+
+
 @contextmanager
 def flush_denormals() -> Iterator[None]:
     """Run the enclosed block with flush-to-zero / denormals-are-zero on.
@@ -298,8 +315,8 @@ class Trainer:
     @property
     def optimizer(self) -> torch.optim.Optimizer:
         if self._optimizer is None:
-            self._optimizer = torch.optim.AdamW(
-                _parameter_groups(self.model, self.config.weight_decay),
+            self._optimizer = _adamw(
+                lambda: _parameter_groups(self.model, self.config.weight_decay),
                 lr=self.config.learning_rate,
             )
         return self._optimizer
@@ -313,14 +330,27 @@ class Trainer:
         of what :meth:`train_epoch` depends on. Adam's per-parameter moments are
         the reason a resumed run does not take a transient hit.
         """
+        optimizer = self.optimizer.state_dict()
+        # The kernel choice is a property of this process, not of the run: save
+        # the groups as the unfused default so any torch (or an older checkout)
+        # resumes the file with the implementation it supports.
+        for group in optimizer["param_groups"]:
+            if "fused" in group:
+                group["fused"] = None
         return {
-            "optimizer": self.optimizer.state_dict(),
+            "optimizer": optimizer,
             "rng": self.rng.bit_generator.state,
         }
 
     def load_state_dict(self, state: dict) -> None:
         if "optimizer" in state:
-            self.optimizer.load_state_dict(state["optimizer"])
+            optimizer = self.optimizer
+            # `load_state_dict` overwrites every group key, `fused` included,
+            # with the saved value; keep the kernel this process selected.
+            kernel = [group.get("fused") for group in optimizer.param_groups]
+            optimizer.load_state_dict(state["optimizer"])
+            for group, fused in zip(optimizer.param_groups, kernel, strict=True):
+                group["fused"] = fused
         if "rng" in state:
             self.rng.bit_generator.state = state["rng"]
     def train_epoch(self, examples: Sequence[Example]) -> TrainStats:

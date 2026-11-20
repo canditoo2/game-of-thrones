@@ -148,3 +148,49 @@ def test_epoch_over_buffer_matches_epoch_over_list() -> None:
         fast.model.named_parameters(), slow.model.named_parameters(), strict=True
     ):
         assert torch.equal(a, b), name
+
+
+def _plain_trainer(model: PolicyValueNet, config: TrainConfig) -> Trainer:
+    """A trainer on the unfused AdamW the code used before the fused kernel."""
+    from agot.training.trainer import _parameter_groups
+
+    trainer = Trainer(model, config)
+    trainer._optimizer = torch.optim.AdamW(
+        _parameter_groups(model, config.weight_decay), lr=config.learning_rate
+    )
+    return trainer
+
+
+def test_optimizer_state_resumes_across_kernels() -> None:
+    """Old (unfused) states resume on the new trainer and the reverse."""
+    examples = _random_examples(48, seed=7)
+    config = TrainConfig(batch_size=8)
+    torch.manual_seed(0)
+    plain = _plain_trainer(PolicyValueNet(hidden=16, value_context=True), config)
+    plain.train_epoch(examples)
+    old_state = copy.deepcopy(plain.state_dict())
+
+    current = Trainer(copy.deepcopy(plain.model), config)
+    fused = [group.get("fused") for group in current.optimizer.param_groups]
+    current.load_state_dict(copy.deepcopy(old_state))
+    assert [group.get("fused") for group in current.optimizer.param_groups] == fused
+
+    plain.train_epoch(examples)
+    current.train_epoch(examples)
+    for (name, a), (_, b) in zip(
+        plain.model.named_parameters(), current.model.named_parameters(), strict=True
+    ):
+        assert torch.allclose(a, b, rtol=0, atol=1e-6), name
+
+    # The saved groups carry no kernel choice, so the unfused code resumes them.
+    saved = current.state_dict()
+    assert all(group.get("fused") is None for group in saved["optimizer"]["param_groups"])
+    again = _plain_trainer(copy.deepcopy(current.model), config)
+    again.load_state_dict(copy.deepcopy(saved))
+    assert all(not group.get("fused") for group in again.optimizer.param_groups)
+    again.train_epoch(examples)
+    current.train_epoch(examples)
+    for (name, a), (_, b) in zip(
+        again.model.named_parameters(), current.model.named_parameters(), strict=True
+    ):
+        assert torch.allclose(a, b, rtol=0, atol=1e-6), name
