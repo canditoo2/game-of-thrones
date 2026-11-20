@@ -1154,6 +1154,7 @@ fn agot_core_ext(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(observation_dims, module)?)?;
     module.add_function(wrap_pyfunction!(selfplay::selfplay, module)?)?;
     module.add_function(wrap_pyfunction!(selfplay::game_outcome, module)?)?;
+    module.add_function(wrap_pyfunction!(selfplay::selfplay_stats, module)?)?;
     module.add_class::<PyAction>()?;
     module.add_class::<PyGame>()?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
