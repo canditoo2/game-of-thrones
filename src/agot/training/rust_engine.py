@@ -509,8 +509,20 @@ def _scripted_decider(opponents, record_opponents: bool):
     def decide(game_index: int, house: str, game) -> tuple[int, list[float] | None]:
         policy = opponents[game_index][house]
         view = RustGame(game)
-        action, target = policy.decide(view)
+        # The view is private to this decision and nothing steps it, so its
+        # actions are converted once and the policy gets a fresh list of the
+        # same objects. The index is still the first *equal* action, as before.
         actions = view.legal_actions()
+        view.legal_actions = lambda: list(actions)
+        try:
+            action, target = policy.decide(view)
+        finally:
+            # `RustGame` and its `StateView` point at each other, so without
+            # this the view, its snapshot and its region views (a few thousand
+            # objects) would wait for the cyclic GC; on Python 3.14 the
+            # collections that garbage triggered cost ~60 us per decision.
+            # Breaking the cycle frees it by reference counting right here.
+            view._state_view = None
         try:
             index = actions.index(action)
         except ValueError as error:  # pragma: no cover - defensive

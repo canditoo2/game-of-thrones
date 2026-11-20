@@ -778,6 +778,15 @@ impl<E: Evaluator> Mcts<E> {
         })
     }
 
+    /// A paused simulation's leaf position, borrowed from the arena.
+    ///
+    /// The position [`Mcts::leaf_game`] would copy, for a driver that only
+    /// reads it (the encoder). `None` when the simulation has no leaf.
+    pub fn leaf_state(&self, simulation: &Simulation) -> Option<&State> {
+        let leaf = simulation.leaf?;
+        self.nodes[leaf as usize].state.as_deref()
+    }
+
     // -- internals -------------------------------------------------------
 
     /// Appends a root for `game` without clearing the arena.

@@ -704,25 +704,34 @@ pub fn selfplay<'py>(
         let mut steps = vec![0u32; chunk.len()];
         let mut winners: Vec<Option<HouseId>> = vec![None; chunk.len()];
 
+        // Each game's open decision: its roots, its simulations per PIMC
+        // world (the phase budget, or `simulations`, divided by the
+        // determinizations) and how many passes it has run. A game that has
+        // spent its budget picks, records and steps right after the pass, and
+        // opens its next decision before the following pass, so the passes stay
+        // full instead of waiting for the deepest decision of the batch. Every
+        // game still runs exactly its own sequence of simulations on its own
+        // searcher; only which games share a leaf callback changes.
+        let mut searching: Vec<Option<(Vec<u32>, u32, u32)>> = vec![None; chunk.len()];
+        let mut finished_slot = vec![false; chunk.len()];
+        let mut cache = observation::RegionCache::new();
+
         loop {
-            // Advance every game to its next decision. Scripted seats decide
-            // immediately (possibly several in a row); search seats open their
-            // roots and wait for the shared leaf batch below.
-            //
-            // The third field is this decision's simulations *per PIMC world*:
-            // the phase budget (or `simulations` when none is set) divided by
-            // the determinizations, exactly as the fixed setting was divided
-            // before. Two games in a batch may therefore ask for different
-            // depths.
+            // Advance every game that is neither searching nor over to its
+            // next decision. Scripted seats decide immediately (possibly
+            // several in a row); search seats open their roots and join the
+            // shared leaf batch below.
             let mark = Instant::now();
-            let mut active: Vec<(usize, Vec<u32>, u32)> = Vec::new();
-            let mut acted = false;
             for slot in 0..states.len() {
+                if finished_slot[slot] || searching[slot].is_some() {
+                    continue;
+                }
                 loop {
                     if states[slot].is_terminal() || steps[slot] >= step_limit {
                         if winners[slot].is_none() {
                             winners[slot] = states[slot].winner();
                         }
+                        finished_slot[slot] = true;
                         break;
                     }
                     if states[slot].state.phase == Phase::Westeros
@@ -734,11 +743,11 @@ pub fn selfplay<'py>(
                         states[slot]
                             .continue_westeros()
                             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-                        acted = true;
                         continue;
                     }
                     let Some(house) = states[slot].current_player() else {
                         winners[slot] = states[slot].winner();
+                        finished_slot[slot] = true;
                         break;
                     };
                     let global = start + slot;
@@ -749,7 +758,10 @@ pub fn selfplay<'py>(
                     if !is_scripted {
                         let roots = searchers[slot].open_search_worlds(&states[slot]);
                         if roots.is_empty() {
+                            // Nothing to search: the position can never move
+                            // again, so the game is over for this driver.
                             winners[slot] = states[slot].winner();
+                            finished_slot[slot] = true;
                         } else {
                             let budget = decision_budget(
                                 phase_budgets.as_ref(),
@@ -757,7 +769,7 @@ pub fn selfplay<'py>(
                                 states[slot].legal_actions().len(),
                                 simulations,
                             );
-                            active.push((slot, roots, (budget / determinizations).max(1)));
+                            searching[slot] = Some((roots, (budget / determinizations).max(1), 0));
                         }
                         break;
                     }
@@ -805,220 +817,216 @@ pub fn selfplay<'py>(
                         .step(actions[index])
                         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
                     steps[slot] += 1;
-                    acted = true;
                 }
             }
             stats.time_advance += mark.elapsed();
-            if active.is_empty() {
-                if acted {
-                    continue;
-                }
+            if searching.iter().all(Option::is_none) {
                 break;
             }
 
-            // Search every world of every active game, batching the leaves.
-            // One pass runs one simulation on every root of every game that
-            // still has budget left, so the games with the deepest decision set
-            // the pass count and the shorter ones simply wait for them. With no
-            // phase budgets every decision has the same per-world budget, which
-            // is the fixed loop this replaced.
-            let passes = active
-                .iter()
-                .map(|(_, _, per_world)| *per_world)
-                .max()
-                .unwrap_or(0);
-            for pass in 0..passes {
-                let mark = Instant::now();
-                let mut pending: Vec<(usize, Simulation)> = Vec::new();
-                for (slot, roots, per_world) in &active {
-                    if pass >= *per_world {
-                        continue;
-                    }
-                    for root in roots {
-                        let simulation = searchers[*slot]
-                            .prepare_simulation(*root)
-                            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-                        pending.push((*slot, simulation));
-                    }
-                }
-
-                // Encode every leaf, grouped by the model that owns its seat.
-                // One cache for the whole batch: each leaf clears it, which is
-                // far cheaper than allocating (and zeroing) 64 entries per leaf.
-                stats.time_prepare += mark.elapsed();
-                let mark = Instant::now();
-                let mut cache = observation::RegionCache::new();
-                let mut groups: Vec<LeafGroup> = Vec::new();
-                for (position, (slot, simulation)) in pending.iter().enumerate() {
-                    if simulation.leaf.is_none() {
-                        continue;
-                    }
-                    let game = searchers[*slot]
-                        .leaf_game(simulation)
-                        .ok_or_else(|| PyRuntimeError::new_err("a leaf without a position"))?;
-                    let house = game.current_player().ok_or_else(|| {
-                        PyRuntimeError::new_err("a search leaf without an acting house")
-                    })?;
-                    let model = seat_models
-                        .get(start + slot)
-                        .and_then(|models| models.get(house.index()))
-                        .copied()
-                        .flatten()
-                        .unwrap_or(0);
-                    if model >= evaluators.len() {
-                        return Err(PyValueError::new_err(format!(
-                            "seat model {model} is out of range for {} evaluators",
-                            evaluators.len()
-                        )));
-                    }
-                    let group_index = match groups.iter().position(|group| group.model == model) {
-                        Some(index) => index,
-                        None => {
-                            groups.push(LeafGroup::new(model));
-                            groups.len() - 1
-                        }
-                    };
-                    let group = &mut groups[group_index];
-                    let row = group.positions.len();
-                    cache.clear();
-                    let state_start = group.states.len();
-                    group.states.resize(state_start + STATE_DIM, 0.0);
-                    observation::encode_state_into(
-                        &game.state,
-                        &data,
-                        None,
-                        &mut group.states[state_start..],
-                    );
-                    for action in &simulation.actions {
-                        let action_start = group.actions.len();
-                        group.actions.resize(action_start + ACTION_DIM, 0.0);
-                        observation::encode_action_into(
-                            &game.state,
-                            &data,
-                            action,
-                            None,
-                            &mut group.actions[action_start..],
-                            &mut cache,
-                        );
-                        group.index.push(row as i64);
-                    }
-                    group.positions.push(position);
-                }
-
-                stats.time_encode += mark.elapsed();
-                let mark = Instant::now();
-                let mut evaluations: Vec<Option<Evaluation>> = pending
-                    .iter()
-                    .map(|(_, simulation)| {
-                        if simulation.leaf.is_some() {
-                            None
-                        } else {
-                            Some(Evaluation {
-                                priors: Vec::new(),
-                                value: simulation.value.unwrap_or([0.0; N_HOUSES]),
-                            })
-                        }
-                    })
-                    .collect();
-
-                for group in groups {
-                    let rows = group.positions.len();
-                    if rows == 0 {
-                        continue;
-                    }
-                    stats.leaves += rows as u64;
-                    stats.slots += group.index.len() as u64;
-
-                    // Each leaf's candidate-slot range in the packed layout.
-                    let mut bounds = Vec::with_capacity(rows + 1);
-                    bounds.push(0usize);
-                    for position in &group.positions {
-                        bounds.push(
-                            bounds.last().copied().unwrap_or(0)
-                                + pending[*position].1.actions.len(),
-                        );
-                    }
-
-                    let (logits, values) = if use_leaf_cache {
-                        let cache = caches[group.model].get_or_insert_with(|| {
-                            LeafCache::new(leaf_cache_entries, leaf_cache_logits, leaf_cache_verify)
-                        });
-                        evaluate_cached(
-                            py,
-                            &evaluators[group.model],
-                            cache,
-                            leaf_cache_verify,
-                            &group,
-                            &bounds,
-                            &mut stats,
-                        )?
-                    } else {
-                        evaluate_direct(
-                            py,
-                            &evaluators[group.model],
-                            &group,
-                            dedupe_leaves,
-                            &mut stats,
-                        )?
-                    };
-                    debug_assert_eq!(logits.len(), group.index.len());
-                    debug_assert_eq!(values.len(), rows * N_HOUSES);
-                    let priors = segment_softmax(&logits, &group.index, rows);
-
-                    // Scatter each leaf's slice back to its simulation.
-                    for (row, position) in group.positions.iter().enumerate() {
-                        let mut value = [0.0f64; N_HOUSES];
-                        for (slot, entry) in value.iter_mut().enumerate() {
-                            *entry = values[row * N_HOUSES + slot] as f64;
-                        }
-                        evaluations[*position] = Some(Evaluation {
-                            priors: priors[bounds[row]..bounds[row + 1]]
-                                .iter()
-                                .map(|value| *value as f64)
-                                .collect(),
-                            value,
-                        });
-                    }
-                }
-
-                stats.time_evaluate += mark.elapsed();
-                let mark = Instant::now();
-                for ((slot, simulation), evaluation) in pending.into_iter().zip(evaluations) {
-                    searchers[slot]
-                        .finish_simulation(simulation, evaluation)
+            // One pass: one simulation on every root of every searching game,
+            // in slot order and, inside a game, in root order (the order the
+            // fixed loop used), with the leaves batched across games.
+            let mark = Instant::now();
+            let mut pending: Vec<(usize, Simulation)> = Vec::new();
+            for (slot, open) in searching.iter().enumerate() {
+                let Some((roots, _, _)) = open else {
+                    continue;
+                };
+                for root in roots {
+                    let simulation = searchers[slot]
+                        .prepare_simulation(*root)
                         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                    pending.push((slot, simulation));
                 }
-                stats.time_finish += mark.elapsed();
             }
 
-            // Aggregate the worlds, pick, record, step.
+            // Encode every leaf, grouped by the model that owns its seat.
+            // One region cache for the whole call (declared with the batch):
+            // each leaf clears it, which only bumps its generation.
+            stats.time_prepare += mark.elapsed();
             let mark = Instant::now();
-            for (slot, roots, _) in &active {
-                let observer = states[*slot].current_player();
-                let result: SearchResult = if roots.len() == 1 {
-                    searchers[*slot].result_from_root(roots[0])
-                } else {
-                    searchers[*slot].aggregate_roots(roots, observer)
+            let mut groups: Vec<LeafGroup> = Vec::new();
+            for (position, (slot, simulation)) in pending.iter().enumerate() {
+                if simulation.leaf.is_none() {
+                    continue;
+                }
+                // Borrowed from the arena: the encoder only reads the position,
+                // so the leaf is not copied out of its node.
+                let leaf_state = searchers[*slot]
+                    .leaf_state(simulation)
+                    .ok_or_else(|| PyRuntimeError::new_err("a leaf without a position"))?;
+                let house = leaf_state.active_house.ok_or_else(|| {
+                    PyRuntimeError::new_err("a search leaf without an acting house")
+                })?;
+                let model = seat_models
+                    .get(start + slot)
+                    .and_then(|models| models.get(house.index()))
+                    .copied()
+                    .flatten()
+                    .unwrap_or(0);
+                if model >= evaluators.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "seat model {model} is out of range for {} evaluators",
+                        evaluators.len()
+                    )));
+                }
+                let group_index = match groups.iter().position(|group| group.model == model) {
+                    Some(index) => index,
+                    None => {
+                        groups.push(LeafGroup::new(model));
+                        groups.len() - 1
+                    }
                 };
-                let round = states[*slot].state.round;
+                let group = &mut groups[group_index];
+                let row = group.positions.len();
+                cache.clear();
+                let state_start = group.states.len();
+                group.states.resize(state_start + STATE_DIM, 0.0);
+                observation::encode_state_into(
+                    leaf_state,
+                    &data,
+                    None,
+                    &mut group.states[state_start..],
+                );
+                for action in &simulation.actions {
+                    let action_start = group.actions.len();
+                    group.actions.resize(action_start + ACTION_DIM, 0.0);
+                    observation::encode_action_into(
+                        leaf_state,
+                        &data,
+                        action,
+                        None,
+                        &mut group.actions[action_start..],
+                        &mut cache,
+                    );
+                    group.index.push(row as i64);
+                }
+                group.positions.push(position);
+            }
+
+            stats.time_encode += mark.elapsed();
+            let mark = Instant::now();
+            let mut evaluations: Vec<Option<Evaluation>> = pending
+                .iter()
+                .map(|(_, simulation)| {
+                    if simulation.leaf.is_some() {
+                        None
+                    } else {
+                        Some(Evaluation {
+                            priors: Vec::new(),
+                            value: simulation.value.unwrap_or([0.0; N_HOUSES]),
+                        })
+                    }
+                })
+                .collect();
+
+            for group in groups {
+                let rows = group.positions.len();
+                if rows == 0 {
+                    continue;
+                }
+                stats.leaves += rows as u64;
+                stats.slots += group.index.len() as u64;
+
+                // Each leaf's candidate-slot range in the packed layout.
+                let mut bounds = Vec::with_capacity(rows + 1);
+                bounds.push(0usize);
+                for position in &group.positions {
+                    bounds.push(
+                        bounds.last().copied().unwrap_or(0) + pending[*position].1.actions.len(),
+                    );
+                }
+
+                let (logits, values) = if use_leaf_cache {
+                    let cache = caches[group.model].get_or_insert_with(|| {
+                        LeafCache::new(leaf_cache_entries, leaf_cache_logits, leaf_cache_verify)
+                    });
+                    evaluate_cached(
+                        py,
+                        &evaluators[group.model],
+                        cache,
+                        leaf_cache_verify,
+                        &group,
+                        &bounds,
+                        &mut stats,
+                    )?
+                } else {
+                    evaluate_direct(
+                        py,
+                        &evaluators[group.model],
+                        &group,
+                        dedupe_leaves,
+                        &mut stats,
+                    )?
+                };
+                debug_assert_eq!(logits.len(), group.index.len());
+                debug_assert_eq!(values.len(), rows * N_HOUSES);
+                let priors = segment_softmax(&logits, &group.index, rows);
+
+                // Scatter each leaf's slice back to its simulation.
+                for (row, position) in group.positions.iter().enumerate() {
+                    let mut value = [0.0f64; N_HOUSES];
+                    for (slot, entry) in value.iter_mut().enumerate() {
+                        *entry = values[row * N_HOUSES + slot] as f64;
+                    }
+                    evaluations[*position] = Some(Evaluation {
+                        priors: priors[bounds[row]..bounds[row + 1]]
+                            .iter()
+                            .map(|value| *value as f64)
+                            .collect(),
+                        value,
+                    });
+                }
+            }
+
+            stats.time_evaluate += mark.elapsed();
+            let mark = Instant::now();
+            for ((slot, simulation), evaluation) in pending.into_iter().zip(evaluations) {
+                searchers[slot]
+                    .finish_simulation(simulation, evaluation)
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            }
+            stats.time_finish += mark.elapsed();
+
+            // A game whose decision has spent its budget aggregates its worlds,
+            // picks, records and steps; it opens its next decision in the next
+            // advance.
+            let mark = Instant::now();
+            for slot in 0..searching.len() {
+                let Some((roots, per_world, done)) = searching[slot].as_mut() else {
+                    continue;
+                };
+                *done += 1;
+                if *done < *per_world {
+                    continue;
+                }
+                let observer = states[slot].current_player();
+                let result: SearchResult = if roots.len() == 1 {
+                    searchers[slot].result_from_root(roots[0])
+                } else {
+                    searchers[slot].aggregate_roots(roots, observer)
+                };
+                searching[slot] = None;
+                let round = states[slot].state.round;
                 let temperature = scheduled_temperature(&schedule, round);
-                let (action, target) = searchers[*slot]
+                let (action, target) = searchers[slot]
                     .pick(&result, Some(temperature))
                     .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
                 let observation =
-                    observation::observe(&states[*slot].state, &data, &result.actions, observer);
-                histories[*slot].push(Record {
+                    observation::observe(&states[slot].state, &data, &result.actions, observer);
+                histories[slot].push(Record {
                     state: observation.state_features,
                     actions: observation.action_features,
                     policy: target,
                     player: observer.map(|house| house.index() as u8).unwrap_or(0),
                 });
 
-                states[*slot]
+                states[slot]
                     .step(action)
                     .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-                steps[*slot] += 1;
+                steps[slot] += 1;
             }
             stats.time_record += mark.elapsed();
         }
