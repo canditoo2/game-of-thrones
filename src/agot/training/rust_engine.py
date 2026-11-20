@@ -514,7 +514,15 @@ def _scripted_decider(opponents, record_opponents: bool):
         # same objects. The index is still the first *equal* action, as before.
         actions = view.legal_actions()
         view.legal_actions = lambda: list(actions)
-        action, target = policy.decide(view)
+        try:
+            action, target = policy.decide(view)
+        finally:
+            # `RustGame` and its `StateView` point at each other, so without
+            # this the view, its snapshot and its region views (a few thousand
+            # objects) would wait for the cyclic GC; on Python 3.14 the
+            # collections that garbage triggered cost ~60 us per decision.
+            # Breaking the cycle frees it by reference counting right here.
+            view._state_view = None
         try:
             index = actions.index(action)
         except ValueError as error:  # pragma: no cover - defensive
