@@ -33,6 +33,23 @@ Branch: `optimization/speed-leaf-engine`, based on `b01c99a`.
 | 006 | 2026-11-20 | SPEED | replay restore adopts the saved arrays | run7 restore | 0.99-1.54 s | 0.69-0.84 s | 1.43-1.83x (byte-identical) | kept | `3e54423` |
 | 006 | 2026-11-20 | SPEED | levers 1-5, production CLI (`ab_iter.py --games 0`, 4 rounds vs `7952ae2`) | `seconds_train` | 23.72 s (19.70-25.78) | 11.06 s (10.54-12.11) | **2.02x median** (1.84-2.44) | kept | `3e54423` |
 | 006 | 2026-11-20 | SPEED | same | `seconds` (iteration) | 26.10 s | 13.84 s | 1.76x median | — | `3e54423` |
+| 007 | 2026-11-20 | SPEED | exact cross-pass leaf evaluation cache in the Rust driver | `share.py 16` selfplay (int8 / fp32, median of 3) | 18.43 s / 34.34 s | 10.80 s / 15.92 s | 1.67x / 2.10x | kept | `c4af05f` |
+| 007 | 2026-11-20 | SPEED | same | `ab_iter.py` `seconds_selfplay`, int8, 32 games, median of 5 | 32.20 s | 18.66 s | 1.73x (quiet rounds 1.64–1.81x) | kept | `c4af05f` |
+| 007b | 2026-11-20 | HYGIENE | per-section timers in `selfplay_stats` | overhead | — | few ms/call | — | kept | `d455eb2` |
+| 008 | 2026-11-20 | SPEED | compact leaf graph (trunk units that never fire on the replay buffer are not exported) | `seconds_selfplay`, 1 run7 iteration, 32 games, int8, 3 interleaved rounds | 47.25 s | 30.95 s | 1.85x (1.12–1.90) | kept | `c5b7bfa` |
+| 007+008 | 2026-11-20 | SPEED | cache + compact graph together vs `7952ae2` | `ab_multi.py` `seconds_selfplay`, 32 games, 3 rounds, int8 / fp32 | 21.55 s | 10.80 s / 11.29 s | **2.00x / 1.91x** (spread < 1 %) | — | `7a81c5e` |
+| 009 | 2026-11-20 | SPEED | scripted greedy seats: direct snapshot, one action conversion, no GC cycle | `split_compact.py onnx-fp32 16` scripted section | 1.50 s | 0.72 s | −52 % | kept | `be208ae` `ae1a9af` `94dbe85` `fd749d4` |
+| 009b | 2026-11-20 | SPEED | per-game decision scheduling in the batch | passes / leaf calls per 16-game chunk | 45 758 / 32 359 | 26 330 / 23 589 | −42 % / −27 % | kept | `b13f67c` |
+| 009c | 2026-11-20 | HYGIENE | leaf State borrow, RegionCache generation, fortification bit set, native ORT run | `split_compact.py` total, median of 3 | 7.91 s | 7.53 s | 1.049x | kept | `b3e3659` `71c0b2a` |
+| 009 | 2026-11-20 | SPEED | all of 009 | `ab_multi.py` `seconds_selfplay`, 32 games, int8 / fp32, median of 3 | 13.37 s / 14.31 s | 11.46 s / 12.47 s | 1.20x / 1.14x | kept | `fd749d4` |
+| 010a | 2026-11-20 | SPEED | replay snapshot written in a background thread, atomically | other (`seconds` − selfplay − train), 2nd of 2 iterations, run7, 32 games, 3 interleaved rounds | 4.33 s | 2.62 s | 1.73x (1.65–1.74) | kept | `92d9d87` |
+| 010b | 2026-11-20 | SPEED | compact-graph calibration over distinct (bit-verified) rows | same | 2.60 s | 1.34 s | 1.93x (1.89–2.09) | kept | `2ad2317` |
+| — | 2026-11-20 | combined | 006–010 vs `7952ae2`, int8 leaves (run8 launch flags, run7 resumed, 32 games, 2nd of 2 iterations, 5 interleaved rounds on a quiet box, `ab_iters.py`) | `seconds` (iteration) | 43.25 s (41.00–46.04) | 17.77 s (17.61–19.21) | **2.33x median** (2.27–2.46) | — | `3da4097` |
+| — | 2026-11-20 | combined | same | `seconds_selfplay` | 18.21 s | 6.97 s | **2.57x** (2.50–2.67) | — | `3da4097` |
+| — | 2026-11-20 | combined | same | `seconds_train` | 22.07 s | 9.98 s | **2.22x** (2.04–2.34) | — | `3da4097` |
+| — | 2026-11-20 | combined | same | `seconds` − selfplay − train | 2.64 s | 1.18 s | 2.22x (2.18–2.54) | — | `3da4097` |
+| — | 2026-11-20 | combined | same | process wall, 2 iterations incl. start-up and restore | 94.29 s | 43.22 s | 2.16x (2.03–2.20) | — | `3da4097` |
+| — | 2026-11-20 | combined | same, `--leaf-backend onnx-fp32` on the branch arm only (baseline stays int8) | `seconds` / `seconds_selfplay` | 43.25 s / 18.21 s | 18.29 s / 7.77 s | **2.30x** (2.18–2.52) / 2.21x | — | `3da4097` |
 
 The combined rows were measured against `b01c99a` itself (`git checkout b01c99a -- src/agot`, run,
 `git checkout HEAD -- src/agot`, run, five rounds) because this box's clock drifts by more than the
@@ -51,3 +68,7 @@ in `iterations/000-baseline.md` were taken in an earlier session and are only co
 | 2026-11-20 | SPEED | live columns on the 64-row state trunk as well | 1.26x vs 1.21-1.25x without it: inside the noise | rejected |
 | 2026-11-20 | SPEED | replay snapshot at zlib level 1 | write 1.61 s -> 0.56 s, file 8.5 MB -> 28.3 MB (Drive upload cost) | rejected |
 | 2026-11-20 | SPEED | `np.add.reduceat` for the per-example policy sums | not bit-identical to `ndarray.sum` (pairwise/SIMD) | rejected |
+| 2026-11-20 | HYGIENE | fresh leaf's legal actions computed in `materialize` (also avoids the re-box) | prepare 1.18 s → 1.01 s, ~2.4 % of self-play | reverted (< 3 %, inside the noise) |
+| 2026-11-20 | SPEED | pruning the head hidden layers like the trunks | replay-dead head units fire on real leaves: policy KL up to 2.5e-4 on 0.48 % of leaves, value change up to 1.08 on 26 of 40 179 | rejected (heads stay full width) |
+| 2026-11-20 | SPEED | calibration margin instead of calibration coverage | margin 0.05 keeps 138 instead of 83 units of `action_trunk[0]`; the missed units needed > 0.38 | rejected |
+| 2026-11-20 | SPEED | calibration: live columns for the second trunk layer, every core, `argsort` grouping; faster `extend`; cheaper int8 quantize | each under 3 % of the out-of-phase bucket after 010b | rejected |

@@ -94,3 +94,48 @@ Durable facts only, each with the command that proves it. Measured 2026-11-11 on
   runs or a reference-GEMM-normalised harness.
 - Wall-clock comparisons against the documented §6.1 table (recorded on a different machine
   state). The numbers in `iterations/000-baseline.md` were re-measured today.
+
+## Self-play and the iteration around it (2026-11-20, iterations 007–010)
+
+- **~73 % of the leaves of one production `selfplay()` call repeat an input already scored in
+  that call**, and the repeats are recent (an LRU of 2 000 reaches the same hit rate). Every
+  decision restarts its tree, and the 97-float state carries no board, so many positions encode
+  to the same network input. `checkpoints/perf-2x/dup_study.py 16`; counters in
+  `_core.selfplay_stats()`.
+- **Trained nets here have 65–80 % dead trunk units** (run7: 202/173/173/165 of 256 never fire
+  on the whole replay buffer; run5 and run6 look the same) **and a nearly dead value head**
+  (251 of 256 hidden units). Dropping the dead trunk units from the leaf graph is exact (fp32
+  self-play games identical to the full graph) and makes a leaf call 2.6x cheaper in fp32 and
+  1.6x in int8. `python -m agot.nn.onnx_backend <ckpt> --leaves <leaves.npz> --replay
+  <agot.replay.npz>`. Whether the dead units cost playing strength has not been tested.
+- **Head hidden layers must not be pruned this way**: replay-dead head units fire on real leaves.
+- **Calibration needs coverage of games, not rows**: 33k contiguous examples miss units that
+  fire on leaves, 45k+ do not; random 10k subsets are nearly clean. A margin is a bad substitute.
+- **int8 is not round-off on real leaves.** Full int8 against torch on run7's leaves: value
+  |diff| mean 0.059, max 1.06; policy KL mean 1.05e-3, p95 4.0e-3, max 1.35e-2 (1 581 calls).
+  The same leaf scored in two different batches differs by up to 1.24 in a value
+  (`cache_eq_rust.py onnx-int8 16 drift`). ORT fp32 is row-invariant for 99.8 % of repeated
+  leaves, the rest differ by ≤ 3e-7. Iteration 005 only ever measured the policy KL on a
+  synthetic net.
+- **With the cache and the compact graph, fp32 leaves cost about what int8 leaves do**: whole
+  iteration 2.30x against 2.33x over the old int8 baseline (`ab_iters.py`, 5 rounds).
+- **A scripted greedy decision on the Rust driver cost ~630 µs**, of which ~312 µs was the JSON
+  round trip of `Game.snapshot()` and ~60 µs Python 3.14's cyclic GC collecting the
+  `RustGame`/`StateView` cycle. `scripted_only.py` under cProfile; `gc_probe.py`.
+- **With phase budgets a fixed per-batch pass loop leaves passes ~40 % full** (6.6 of 16
+  leaves). Scheduling each game's decisions independently fills them to ~72 % and is exact.
+- **Replay candidate rows are ~95 % repeats** (run7: 54k distinct of 1.0–1.3M); calibration
+  over distinct, bit-verified rows gives bit-identical per-unit peaks at a third of the cost.
+- **The time outside both phase timers is attributed in the log** (`seconds_leaf_calibration`,
+  `seconds_leaf_graph`, `seconds_extend`, `seconds_checkpoint`, `seconds_replay_save`,
+  `seconds_replay_wait`, `seconds_replay_snapshot`, `seconds_trainer_restore`).
+- **`ab_multi.py` (one iteration per process) hides work moved after the log record**; use
+  `ab_iters.py --iters 2` and read the second iteration for anything that overlaps phases.
+- **Training is not bit-reproducible on this box under load**: with identical examples the
+  losses differ in the 5th–6th digit about once in eight runs, on unchanged code too.
+
+## Not measured
+
+- Nothing in iterations 006–010 was run on the 2-vCPU Colab runtime. The subnormal penalty, the
+  thread flags and the contention between the background snapshot and two self-play workers
+  all depend on that CPU; the new log timers will show them on the next run.

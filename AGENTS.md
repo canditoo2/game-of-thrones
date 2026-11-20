@@ -104,6 +104,20 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   vs compact, fp32 vs int8, against torch). Note that int8 is not round-off: on run7's real
   leaves full int8 moves the value by 0.059 on average and up to 1.06
   (`docs/optimization/iterations/008-compact-leaf-graph.md`).
+- Leaf evaluation cache (Rust driver, on by default; `agot train --leaf-cache {on,off}`, spec
+  key `leaf_cache`): about 73% of the leaves of one `selfplay()` call repeat a network input
+  already scored in that call, so the driver keeps each input's raw logits and values
+  (`agot-core/src/leaf_cache.rs`, keyed by a 256-bit digest of the encoded state and candidate
+  rows, one cache per evaluator, bounded at 2^16 entries) and only sends misses to Python.
+  Records are bit-identical with the cache on and off for any evaluator that is a pure
+  row-wise function (pinned by `tests/test_leaf_cache.py`; onnx-fp32 is one in practice). int8
+  is not, with or without the cache: its dynamic quantization range depends on the batch, so
+  the same leaf in two batches differs by up to 1.24 in a value. Gate and evaluation matches
+  get the cache too. Counters and per-section timers: `_core.selfplay_stats()`.
+- Speed record of 2026-11-20 (`docs/optimization/LEDGER.md`, iterations 006-010): one run8-shaped
+  iteration is 2.33x faster than commit `7952ae2` on this PC (self-play 2.57x, training pass
+  2.22x), and 2.30x with `--leaf-backend onnx-fp32`, which now costs about what int8 does and
+  has none of its value drift. None of it has been measured on Colab yet.
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 
