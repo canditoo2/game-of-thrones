@@ -173,6 +173,7 @@ def batched_self_play(
     leaf_checkpoint: str | None = None,
     leaf_threads: int = 1,
     leaf_cache: bool = True,
+    leaf_keep=None,
 ) -> list[GameRecord]:
     """Play several games in lockstep, batching every network call.
 
@@ -217,6 +218,7 @@ def batched_self_play(
     intra-op threads (1 by default — this function drives one process).
     ``leaf_cache`` (default true) is the Rust driver's cross-pass evaluation
     cache: exact for a pure row-wise evaluator, an A/B switch otherwise.
+    ``leaf_keep`` selects the compact ONNX graph of those keep-sets.
     """
     # Fast path: when the Rust extension is installed and the request needs
     # nothing it does not implement, the whole game runs natively and only the
@@ -243,6 +245,7 @@ def batched_self_play(
         leaf_checkpoint=leaf_checkpoint,
         leaf_threads=leaf_threads,
         leaf_cache=leaf_cache,
+        leaf_keep=leaf_keep,
     )
     if rust_records is not None:
         LAST_BACKEND = "rust"

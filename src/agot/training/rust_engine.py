@@ -139,6 +139,7 @@ def leaf_evaluator(
     *,
     checkpoint: str | None = None,
     threads: int = 0,
+    keep=None,
 ):
     """Adapt a :class:`PolicyValueNet` to the driver's callback protocol.
 
@@ -158,6 +159,10 @@ def leaf_evaluator(
     ``threads`` is the ORT intra-op thread count for the ONNX backends
     (``0`` = ORT's default). Self-play workers pass 1 to match the one thread
     they give torch.
+
+    ``keep`` (ONNX backends only) opens the compact graph of those trunk
+    keep-sets (see ``onnx_backend.calibrate_keep``); the torch backend always
+    runs the full network and ignores it.
     """
     if backend not in LEAF_BACKENDS:
         raise ValueError(
@@ -180,7 +185,7 @@ def leaf_evaluator(
     from agot.nn.onnx_backend import LeafBackend  # noqa: PLC0415 - optional dependency
 
     return LeafBackend.from_model(
-        model, backend, checkpoint=checkpoint, threads=threads
+        model, backend, checkpoint=checkpoint, threads=threads, keep=keep
     )
 
 
@@ -366,6 +371,7 @@ def try_batched_self_play(
     leaf_checkpoint: str | None = None,
     leaf_threads: int = 1,
     leaf_cache: bool = True,
+    leaf_keep=None,
 ) -> list[GameRecord] | None:
     """Run a ``batched_self_play`` request on the Rust driver, or return ``None``.
 
@@ -388,6 +394,7 @@ def try_batched_self_play(
     record of a plan says how its leaves were scored. ``leaf_checkpoint`` is
     where an ONNX graph is cached and ``leaf_threads`` is its intra-op thread
     count (1 by default, because this driver is used one thread per process).
+    ``leaf_keep`` selects the compact ONNX graph of those keep-sets.
 
     Returns ``None`` — leaving the caller to use the Python driver — when the
     games do not share one configuration or when the evaluator is not a
@@ -478,7 +485,11 @@ def try_batched_self_play(
         evaluate = hook()
     else:
         evaluate = leaf_evaluator(
-            model, leaf_backend, checkpoint=leaf_checkpoint, threads=leaf_threads
+            model,
+            leaf_backend,
+            checkpoint=leaf_checkpoint,
+            threads=leaf_threads,
+            keep=leaf_keep,
         )
     result = extension.selfplay(spec, evaluate, decider)
     return _unpack(result, len(configs))

@@ -69,6 +69,11 @@ class SelfPlayPlan:
     #: row-wise evaluator (torch, onnx-fp32 in practice); with int8 a cached
     #: leaf keeps the scores of the batch it was first quantized in.
     leaf_cache: bool = True
+    #: Keep-sets of the compact leaf graph (``onnx_backend.calibrate_keep``),
+    #: calibrated by the training parent, which has the replay buffer. Workers
+    #: have none, so they receive the sets and open the parent's graph. ``None``
+    #: is the full graph.
+    leaf_keep: tuple[tuple[int, ...], ...] | None = None
 
     def temperature_schedule(self) -> tuple[tuple[int, float], ...]:
         """``(last_round, temperature)`` bands handed to the self-play loop."""
@@ -92,6 +97,7 @@ def _options(plan: SelfPlayPlan) -> dict:
         "leaf_backend": plan.leaf_backend,
         "leaf_checkpoint": plan.leaf_checkpoint,
         "leaf_cache": plan.leaf_cache,
+        "leaf_keep": plan.leaf_keep,
     }
 
 
@@ -157,6 +163,7 @@ def _play_chunk(configs: list[GameConfig], options: dict) -> list[GameRecord]:
                 phase_budgets=options["phase_budgets"],
                 leaf_backend=options.get("leaf_backend", "torch"),
                 leaf_checkpoint=options.get("leaf_checkpoint"),
+                leaf_keep=options.get("leaf_keep"),
                 # One thread per worker process, matching `torch.set_num_threads(1)`.
                 leaf_threads=1,
                 leaf_cache=options.get("leaf_cache", True),
