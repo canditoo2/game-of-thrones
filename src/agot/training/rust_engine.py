@@ -509,8 +509,12 @@ def _scripted_decider(opponents, record_opponents: bool):
     def decide(game_index: int, house: str, game) -> tuple[int, list[float] | None]:
         policy = opponents[game_index][house]
         view = RustGame(game)
-        action, target = policy.decide(view)
+        # The view is private to this decision and nothing steps it, so its
+        # actions are converted once and the policy gets a fresh list of the
+        # same objects. The index is still the first *equal* action, as before.
         actions = view.legal_actions()
+        view.legal_actions = lambda: list(actions)
+        action, target = policy.decide(view)
         try:
             index = actions.index(action)
         except ValueError as error:  # pragma: no cover - defensive

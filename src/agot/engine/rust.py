@@ -39,10 +39,16 @@ def core():
     return _core
 
 
+#: Unit names to members; a dict lookup is several times cheaper than the
+#: ``UnitType(name)`` call and returns the same member.
+_UNIT_BY_NAME = {unit.value: unit for unit in UnitType}
+
+
 def _units(raw: dict[str, int]) -> dict[UnitType, int]:
     """The snapshot's name-keyed counts as the enum-keyed mapping Python uses."""
+    by_name = _UNIT_BY_NAME
     return {
-        UnitType(name): count
+        by_name.get(name) or UnitType(name): count
         for name, count in raw.items()
         if count
     }
@@ -270,6 +276,11 @@ class StateView:
 
     @property
     def regions(self) -> dict[str, RegionView]:
+        # Policies read this inside per-action loops: answer a current memo
+        # without the `_sync` call.
+        regions = self._regions
+        if regions is not None and self._version == self._game._version:
+            return regions
         self._sync()
         if self._regions is None:
             raw = self._data()["regions"]
