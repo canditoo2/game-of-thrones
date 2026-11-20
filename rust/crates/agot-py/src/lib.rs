@@ -701,10 +701,7 @@ impl PyGame {
     /// caring which implementation produced it.
     fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let value = agot_core::fingerprint::state_fingerprint(&self.game.state, &self.game.data);
-        let text = serde_json::to_string(&value)
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        let json = py.import("json")?;
-        Ok(json.call_method1("loads", (text,))?.unbind())
+        to_python(py, &value)
     }
 
     /// Whether the desktop-sequenced Westeros phase is waiting for Continue.
