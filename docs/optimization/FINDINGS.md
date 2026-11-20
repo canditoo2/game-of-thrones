@@ -39,6 +39,21 @@ Durable facts only, each with the command that proves it. Measured 2026-11-11 on
 - **The engine is not the bottleneck for training**: self-play is ~93 % network. A 1.36x
   engine win shows up on `agot demo`, the gauntlet and the rules tests, not on training.
 
+- **Adam moments of dead ReLU units live in the float32 subnormal range forever** and made
+  the optimizer step 2-6x slower. A dead unit's gradient is exactly zero, the EMA
+  `m*beta` of a subnormal rounds back to itself, and run7's `agot.state.pt` was 73 %
+  subnormal (761 900 of 1 046 542 entries). Activations and gradients have none (50 run7
+  batches, every Linear). Fixed by FTZ during the gradient pass plus a per-epoch scrub
+  (iteration 006); the scrub is the portable half, because GNU OpenMP (Linux/Colab wheels)
+  does not propagate the FP flags to an existing pool, Intel OpenMP (Windows) does.
+- **MKL's vector `sqrt` is slow on exact zeros, not only on subnormals, and FTZ/DAZ do not
+  help it**: 131 072 floats, 1 thread: normal 20 µs, zeros 170 µs, subnormal 860 µs. The
+  unfused AdamW calls it every step on second moments that are mostly zero; the fused CPU
+  kernel does not (optimizer step 4x, bit-identical; iteration 006).
+- **70-76 % of the action trunk's ReLU columns are zero for a whole run7 batch** (state
+  trunk 75-79 %, value hidden 99 %, policy hidden 41 %). Feeding the next matmul only the
+  live columns makes the training backward 1.36-1.40x faster (iteration 006).
+
 ## Wrong / corrected beliefs
 
 - **"The planning phase is the heavy legal-action path, so that is where the engine loses
@@ -57,8 +72,23 @@ Durable facts only, each with the command that proves it. Measured 2026-11-11 on
   int8 is 3.4x at 2 leaves and 2.5x at 16. The real cost of int8 is numeric (KL 4e-4 on a
   trained net), not a small-batch cliff.
 
+- **"Training on run7 is reproducible bit for bit only on the same code."** It is not even
+  that: changing the torch thread count (1 vs 2) moves the weights by up to 0.11 after 300
+  AdamW steps and the epoch loss in the 5th digit, because Adam turns round-off in near-zero
+  gradients into lr-sized steps. That is the floor any summation-order change is judged
+  against (iteration 006, `bench_epoch.py` with `BENCH_THREADS`).
+- **`Optimizer.load_state_dict` restores `fused`/`foreach` from the file** and keeps the
+  caller's moment tensors when dtype/device already match (two optimizers loaded from one
+  dict share their state). Both bit an A/B harness here; `Trainer.load_state_dict` re-applies
+  the kernel choice.
+- **numpy's float32 `sum` is not reproducible by `np.add.reduceat` or `cumsum`** (pairwise,
+  SIMD-blocked). Bit-identical vectorised collation has to keep the per-example `.sum()`.
+
 ## Unmeasurable on this box
 
+- **A ~10 % effect in a whole-epoch subprocess A/B**: rounds swing 0.87-1.38x from clock drift
+  alone. Same-process, batch-interleaved arms (two trainer copies, A,B / B,A each batch) are
+  stable to ~2 % and A-vs-A is bit-identical (iteration 006).
 - Anything that needs more than ~2 minutes of sustained CPU: the clock collapses and the last
   measurement of a run is not comparable to the first. All numbers here come from interleaved
   runs or a reference-GEMM-normalised harness.
