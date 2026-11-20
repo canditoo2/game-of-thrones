@@ -139,3 +139,32 @@ Durable facts only, each with the command that proves it. Measured 2026-11-11 on
 - Nothing in iterations 006–010 was run on the 2-vCPU Colab runtime. The subnormal penalty, the
   thread flags and the contention between the background snapshot and two self-play workers
   all depend on that CPU; the new log timers will show them on the next run.
+
+## Effectiveness checks for iterations 006–010 (2026-11-20)
+
+All against commit `7952ae2`, run7 resumed, run8 launch flags, 32 games per iteration.
+
+- **Self-play data, fp32 leaves on both sides**: the replay buffer after one iteration has
+  bit-identical `states`, `actions`, `offsets`, `players` and `outcomes` (every position, move
+  and result of 17 582 new decisions). `policies` differs in one example (one visit moved
+  between two candidates, same top action; KL 1.9e-3 on that example, 1.1e-7 averaged). With
+  `--leaf-cache off --leaf-compact off` the whole buffer is bit-identical.
+  `ab_multi.py` with `@--leaf-backend,onnx-fp32` on both arms, then compare `agot.replay.npz`.
+- **Trainer, live columns off** (`PolicyValueNet.live_columns = False`): one epoch on run7's
+  buffer gives the baseline's losses to the last printed digit (policy 1.576066554, value
+  0.121023210) and the same held-out numbers, so the subnormal handling, the batch gather, the
+  fused AdamW and the replay restore are exact. `train_only.py`, `heldout_loss.py`.
+- **Trainer, live columns on** (the default): on two held-out sets (17 940 and 17 582 fresh
+  examples) the policy cross-entropy is within 1e-4 of the baseline at 1, 2 and 4 threads, and
+  the value MSE (0.534–0.547 and 0.593–0.620) sits inside or next to the range the baseline
+  itself spans across thread counts (0.552–0.559 and 0.599–0.612).
+- **Head-to-head after three iterations of each pipeline** (gate protocol: three seats each,
+  swapped, 128 simulations, 96 games, fp32 leaves): the branch-trained net with int8 leaves
+  won 54–42 against the baseline-trained net (0.562 ± 0.051), the branch-trained net with fp32
+  leaves lost 42–54 (0.438 ± 0.051). Pooled 96–96. Neither differs from 0.5 by more than
+  1.2 standard errors; three iterations on a 500-iteration net can only expose a large
+  regression, and it did not. It also does not show that fp32 training leaves are stronger.
+  `head_to_head.py`.
+- One epoch of training raised the held-out value MSE in every arm (0.526 → 0.53–0.56 on one
+  set, 0.585 → 0.59–0.62 on the other) while the training value loss is 0.12–0.17: the value
+  head memorises game outcomes. Not caused by this work, and not addressed by it.
