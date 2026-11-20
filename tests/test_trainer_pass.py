@@ -194,3 +194,47 @@ def test_optimizer_state_resumes_across_kernels() -> None:
         again.model.named_parameters(), current.model.named_parameters(), strict=True
     ):
         assert torch.allclose(a, b, rtol=0, atol=1e-6), name
+
+
+def _packed_loss_grads(model: PolicyValueNet, batch: PackedBatch) -> dict[str, torch.Tensor]:
+    from agot.nn.model import segment_log_softmax
+
+    model.zero_grad(set_to_none=True)
+    logits, values = model.forward_packed(batch.state, batch.actions, batch.index)
+    log_probs = segment_log_softmax(logits, batch.index, batch.rows)
+    policy = -(batch.policy * log_probs).sum() / batch.rows
+    mask = batch.outcome_mask
+    value = (((values - batch.outcome) ** 2) * mask).sum() / mask.sum().clamp(min=1.0)
+    (policy + value).backward()
+    grads = {name: p.grad.clone() for name, p in model.named_parameters()}
+    grads["logits"] = logits.detach().clone()
+    grads["values"] = values.detach().clone()
+    return grads
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_live_column_training_forward_matches_dense(seed: int) -> None:
+    """Skipping all-zero ReLU columns changes outputs and gradients by round-off only."""
+    torch.manual_seed(seed)
+    model = PolicyValueNet(hidden=64, value_context=True)
+    with torch.no_grad():
+        # Kill most action-trunk units, as a trained net does (70-76 % on run7).
+        for layer in (model.action_trunk[0], model.action_trunk[2]):
+            layer.bias[: 48] = -1e3
+    buffer = ReplayBuffer(capacity=1000)
+    buffer.extend(_random_examples(64, seed=seed, max_actions=30))
+    batch = PackedBatch.from_arrays(*buffer.packed_batch(np.arange(64)))
+
+    model.live_columns = False
+    dense = _packed_loss_grads(model, batch)
+    model.live_columns = True
+    live = _packed_loss_grads(model, batch)
+    for name, reference in dense.items():
+        scale = float(reference.abs().max())
+        error = float((live[name] - reference).abs().max())
+        assert error <= 1e-5 * max(scale, 1e-3), (name, error, scale)
+    # Dead columns get exactly-zero weight gradients on both paths.
+    dead = slice(0, 48)
+    weight = "action_trunk.2.weight"
+    assert torch.equal(live[weight][:, dead], dense[weight][:, dead])
+    assert not live[weight][:, dead].any()
