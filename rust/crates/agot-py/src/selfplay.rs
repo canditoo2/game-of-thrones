@@ -30,6 +30,7 @@
 //! applies the per-leaf softmax, so the callback stays a single torch expression.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -115,6 +116,24 @@ struct DriverStats {
     cache_verified: u64,
     cache_peak_entries: u64,
     cache_peak_logits: u64,
+    /// Wall time by section (a few clock reads per pass, never per leaf).
+    time_total: Duration,
+    /// Advancing games to their next decision, scripted seats included.
+    time_advance: Duration,
+    /// Of which: the scripted decider's Python calls.
+    time_scripted: Duration,
+    /// `prepare_simulation` (tree descent and child materialization).
+    time_prepare: Duration,
+    /// Leaf positions and their network-input encoding.
+    time_encode: Duration,
+    /// Leaf evaluation: cache/dedupe, the callback, softmax and scatter.
+    time_evaluate: Duration,
+    /// Of which: the evaluator callback (array handover, Python, extraction).
+    time_callback: Duration,
+    /// `finish_simulation` (expansion and backup).
+    time_finish: Duration,
+    /// Aggregate, pick, record (observe) and step each decision.
+    time_record: Duration,
 }
 
 impl DriverStats {
@@ -136,6 +155,19 @@ impl DriverStats {
         dict.set_item("cache_verified", self.cache_verified)?;
         dict.set_item("cache_peak_entries", self.cache_peak_entries)?;
         dict.set_item("cache_peak_logits", self.cache_peak_logits)?;
+        for (name, time) in [
+            ("seconds_total", self.time_total),
+            ("seconds_advance", self.time_advance),
+            ("seconds_scripted", self.time_scripted),
+            ("seconds_prepare", self.time_prepare),
+            ("seconds_encode", self.time_encode),
+            ("seconds_evaluate", self.time_evaluate),
+            ("seconds_callback", self.time_callback),
+            ("seconds_finish", self.time_finish),
+            ("seconds_record", self.time_record),
+        ] {
+            dict.set_item(name, time.as_secs_f64())?;
+        }
         Ok(dict)
     }
 }
@@ -211,6 +243,7 @@ fn evaluate_direct(
     stats.rows_sent += scored_rows as u64;
     stats.slots_sent += scored_slots as u64;
 
+    let callback_started = Instant::now();
     let state_array = array2(py, scored_rows, STATE_DIM, scored_states)?;
     let action_array = array2(py, scored_slots, ACTION_DIM, scored_actions)?;
     let index_array = numpy::ndarray::Array1::from_vec(scored_index)
@@ -223,6 +256,7 @@ fn evaluate_direct(
     let (logits, values): (PyReadonlyArray1<f32>, PyReadonlyArray2<f32>) = reply.extract(py)?;
     let logits = logits.as_slice()?;
     let values = values.as_slice()?;
+    stats.time_callback += callback_started.elapsed();
     if logits.len() != scored_slots {
         return Err(PyValueError::new_err(format!(
             "evaluator returned {} logits for {scored_slots} candidates",
@@ -337,6 +371,7 @@ fn evaluate_cached(
     stats.rows_sent += scored_rows as u64;
     stats.slots_sent += scored_slots as u64;
 
+    let callback_started = Instant::now();
     let state_array = array2(py, scored_rows, STATE_DIM, miss_states)?;
     let action_array = array2(py, scored_slots, ACTION_DIM, miss_actions)?;
     let index_array = numpy::ndarray::Array1::from_vec(miss_index)
@@ -348,6 +383,7 @@ fn evaluate_cached(
         reply.extract(py)?;
     let reply_logits = reply_logits.as_slice()?;
     let reply_values = reply_values.as_slice()?;
+    stats.time_callback += callback_started.elapsed();
     if reply_logits.len() != scored_slots {
         return Err(PyValueError::new_err(format!(
             "evaluator returned {} logits for {scored_slots} candidates",
@@ -614,6 +650,7 @@ pub fn selfplay<'py>(
     // (new weights) starts empty.
     let mut caches: Vec<Option<LeafCache>> = (0..evaluators.len()).map(|_| None).collect();
     let mut stats = DriverStats::default();
+    let started_total = Instant::now();
 
     let mut finished: Vec<FinishedGame> = Vec::with_capacity(games);
     for start in (0..games).step_by(batch_games) {
@@ -677,6 +714,7 @@ pub fn selfplay<'py>(
             // the determinizations, exactly as the fixed setting was divided
             // before. Two games in a batch may therefore ask for different
             // depths.
+            let mark = Instant::now();
             let mut active: Vec<(usize, Vec<u32>, u32)> = Vec::new();
             let mut acted = false;
             for slot in 0..states.len() {
@@ -730,8 +768,10 @@ pub fn selfplay<'py>(
                         )
                     })?;
                     let view = Py::new(py, crate::PyGame::from_game(states[slot].clone()))?;
+                    let scripted_started = Instant::now();
                     let reply = decider.call1(py, (global, house.name(), view))?;
                     let (index, target): (usize, Option<Vec<f32>>) = reply.extract(py)?;
+                    stats.time_scripted += scripted_started.elapsed();
                     let actions = states[slot].legal_actions();
                     if index >= actions.len() {
                         return Err(PyValueError::new_err(format!(
@@ -768,6 +808,7 @@ pub fn selfplay<'py>(
                     acted = true;
                 }
             }
+            stats.time_advance += mark.elapsed();
             if active.is_empty() {
                 if acted {
                     continue;
@@ -787,6 +828,7 @@ pub fn selfplay<'py>(
                 .max()
                 .unwrap_or(0);
             for pass in 0..passes {
+                let mark = Instant::now();
                 let mut pending: Vec<(usize, Simulation)> = Vec::new();
                 for (slot, roots, per_world) in &active {
                     if pass >= *per_world {
@@ -803,6 +845,8 @@ pub fn selfplay<'py>(
                 // Encode every leaf, grouped by the model that owns its seat.
                 // One cache for the whole batch: each leaf clears it, which is
                 // far cheaper than allocating (and zeroing) 64 entries per leaf.
+                stats.time_prepare += mark.elapsed();
+                let mark = Instant::now();
                 let mut cache = observation::RegionCache::new();
                 let mut groups: Vec<LeafGroup> = Vec::new();
                 for (position, (slot, simulation)) in pending.iter().enumerate() {
@@ -861,6 +905,8 @@ pub fn selfplay<'py>(
                     group.positions.push(position);
                 }
 
+                stats.time_encode += mark.elapsed();
+                let mark = Instant::now();
                 let mut evaluations: Vec<Option<Evaluation>> = pending
                     .iter()
                     .map(|(_, simulation)| {
@@ -935,14 +981,18 @@ pub fn selfplay<'py>(
                     }
                 }
 
+                stats.time_evaluate += mark.elapsed();
+                let mark = Instant::now();
                 for ((slot, simulation), evaluation) in pending.into_iter().zip(evaluations) {
                     searchers[slot]
                         .finish_simulation(simulation, evaluation)
                         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
                 }
+                stats.time_finish += mark.elapsed();
             }
 
             // Aggregate the worlds, pick, record, step.
+            let mark = Instant::now();
             for (slot, roots, _) in &active {
                 let observer = states[*slot].current_player();
                 let result: SearchResult = if roots.len() == 1 {
@@ -970,6 +1020,7 @@ pub fn selfplay<'py>(
                     .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
                 steps[*slot] += 1;
             }
+            stats.time_record += mark.elapsed();
         }
 
         for (slot, game) in states.iter().enumerate() {
@@ -983,6 +1034,7 @@ pub fn selfplay<'py>(
         }
     }
 
+    stats.time_total += started_total.elapsed();
     for cache in caches.iter().flatten() {
         let cache_stats = cache.stats();
         stats.cache_inserts += cache_stats.inserts;
