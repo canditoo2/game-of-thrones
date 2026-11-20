@@ -11,11 +11,20 @@ an offset table. :meth:`ReplayBuffer.all` and :meth:`ReplayBuffer.sample` hand
 back :class:`Example` objects whose arrays are **views** into that storage, so
 the training loop still sees the same API without paying a copy per example.
 Views are valid until the buffer is mutated (an add compacts only when full).
+
+:meth:`ReplayBuffer.save_async` writes the snapshot from a background thread.
+Every mutation first waits for a pending snapshot (and re-raises its error), so
+the thread always reads exactly the arrays a synchronous save would have
+written at that point.
 """
 
 from __future__ import annotations
 
+import os
+import threading
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -52,6 +61,11 @@ class ReplayBuffer:
         self._players = np.zeros((0,), dtype=np.int64)
         self._outcomes = np.zeros((0, N_HOUSES), dtype=np.float32)
         self._offsets = np.zeros((1,), dtype=np.int64)
+        # A snapshot being written in the background (see `save_async`).
+        self._save_thread: threading.Thread | None = None
+        self._save_error: BaseException | None = None
+        #: Seconds the last completed snapshot took to write (any thread).
+        self.last_save_seconds: float | None = None
 
     # -- sizing ----------------------------------------------------------
 
@@ -111,6 +125,8 @@ class ReplayBuffer:
         return self._example(index)
 
     def add(self, example: Example) -> None:
+        if self._save_thread is not None:
+            self.wait_save()
         if self._size >= self.capacity:
             self._drop_oldest()
         self._ensure_examples(self._size + 1)
@@ -129,6 +145,7 @@ class ReplayBuffer:
         self._rows = start + count
 
     def extend(self, examples) -> None:
+        self.wait_save()
         for example in examples:
             self.add(example)
 
@@ -195,6 +212,7 @@ class ReplayBuffer:
         return [self._example(index) for index in range(self._size)]
 
     def clear(self) -> None:
+        self.wait_save()
         self._size = 0
         self._rows = 0
         self._offsets[0] = 0
@@ -203,6 +221,7 @@ class ReplayBuffer:
 
     def _adopt(self, states, actions, offsets, policies, players, outcomes) -> None:
         """Take over saved arrays as the storage of an empty buffer."""
+        self.wait_save()
         size = len(states)
         rows = int(offsets[size])
         self._ensure_examples(size)
@@ -216,7 +235,12 @@ class ReplayBuffer:
         self._size = size
         self._rows = rows
 
-    def save(self, path: str) -> None:
+    def _snapshot_arrays(self) -> dict[str, np.ndarray]:
+        """The arrays a snapshot stores, as views where no conversion is needed.
+
+        The views stay valid while a background write reads them because every
+        mutation waits for that write first.
+        """
         states = (
             self._states[: self._size]
             if self._size
@@ -227,15 +251,83 @@ class ReplayBuffer:
             if self._size
             else np.zeros((0, N_HOUSES), dtype=np.float32)
         )
-        np.savez_compressed(
-            path,
-            states=states,
-            actions=np.asarray(self._actions[: self._rows], dtype=np.float32),
-            offsets=self._offsets[: self._size + 1].astype(np.int64),
-            policies=np.asarray(self._policies[: self._rows], dtype=np.float32),
-            players=self._players[: self._size].astype(np.int64),
-            outcomes=outcomes.astype(np.float32),
-        )
+        return {
+            "states": states,
+            "actions": np.asarray(self._actions[: self._rows], dtype=np.float32),
+            "offsets": self._offsets[: self._size + 1].astype(np.int64),
+            "policies": np.asarray(self._policies[: self._rows], dtype=np.float32),
+            "players": self._players[: self._size].astype(np.int64),
+            "outcomes": outcomes.astype(np.float32),
+        }
+
+    @staticmethod
+    def _snapshot_path(path) -> Path:
+        # `np.savez_compressed` given a name appends `.npz` when it is missing;
+        # writing through a handle does not, so keep the old file name here.
+        path = Path(path)
+        return path if path.name.endswith(".npz") else path.with_name(path.name + ".npz")
+
+    def _write_snapshot(self, path: Path, arrays: dict[str, np.ndarray]) -> None:
+        """Compress ``arrays`` beside ``path`` and rename into place.
+
+        An interrupted write (a crash, a full disk, a Drive disconnect) leaves
+        only the temporary behind, never a truncated snapshot under the real
+        name, so the previous snapshot stays loadable for a resume.
+        """
+        started = time.perf_counter()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+        try:
+            with temporary.open("wb") as handle:
+                np.savez_compressed(handle, **arrays)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.last_save_seconds = time.perf_counter() - started
+
+    def save(self, path: str) -> None:
+        """Write the snapshot now (waits for a pending background one first)."""
+        self.wait_save()
+        self._write_snapshot(self._snapshot_path(path), self._snapshot_arrays())
+
+    def save_async(self, path: str) -> None:
+        """Start writing the snapshot in a background thread and return.
+
+        The file holds exactly the arrays :meth:`save` would write at this
+        point: the thread reads the buffer's storage in place, and every
+        mutating method (``add``, ``extend``, ``clear``) first waits for it.
+        Call :meth:`wait_save` before the process ends or to collect an error;
+        the thread is not a daemon, so an interpreter exit also waits for it.
+        """
+        self.wait_save()
+        target = self._snapshot_path(path)
+        arrays = self._snapshot_arrays()
+
+        def write() -> None:
+            try:
+                self._write_snapshot(target, arrays)
+            except BaseException as error:  # noqa: BLE001 - re-raised by wait_save
+                self._save_error = error
+
+        thread = threading.Thread(target=write, name="replay-snapshot", daemon=False)
+        self._save_thread = thread
+        thread.start()
+
+    @property
+    def save_pending(self) -> bool:
+        """Whether a background snapshot has been started and not yet waited for."""
+        return self._save_thread is not None
+
+    def wait_save(self) -> None:
+        """Wait for a background snapshot; re-raise its error, once, if it failed."""
+        thread = self._save_thread
+        if thread is None:
+            return
+        thread.join()
+        self._save_thread = None
+        error, self._save_error = self._save_error, None
+        if error is not None:
+            raise error
 
     @classmethod
     def load(cls, path: str, capacity: int | None = None) -> ReplayBuffer:

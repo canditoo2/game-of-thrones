@@ -682,6 +682,11 @@ def _run_training(args: argparse.Namespace) -> int:
                 model, plan, base_config=config, executor=executor
             )
             seconds_selfplay = time.time() - selfplay_started
+            # The previous iteration's snapshot was compressed in the background
+            # while this one calibrated and played; it must be on disk before
+            # the buffer changes (`extend` would also wait, but here an error is
+            # reported instead of stopping the run).
+            replay_wait = _finish_replay_snapshot(buffer)
             extend_started = time.time()
             for record in records:
                 buffer.extend(record.examples)
@@ -766,6 +771,10 @@ def _run_training(args: argparse.Namespace) -> int:
                 # The rest of the bookkeeping outside both phase timers, so the
                 # remainder of `seconds` stays attributed.
                 "seconds_extend": round(seconds_extend, 3),
+                # Time this iteration blocked on the previous background
+                # snapshot, and what that snapshot cost in its own thread.
+                "seconds_replay_wait": replay_wait["wait"],
+                "seconds_replay_snapshot": replay_wait["snapshot"],
                 "seconds_trainer_restore": seconds_trainer_restore,
                 "examples_new": sum(len(record.examples) for record in records),
                 "games": len(records),
@@ -901,9 +910,12 @@ def _run_training(args: argparse.Namespace) -> int:
             if args.buffer_save_every > 0 and (
                 (iteration + 1) % args.buffer_save_every == 0
             ):
+                # Compressed in a background thread that overlaps the next
+                # iteration's calibration and self-play; written to a temporary
+                # and renamed, so an interruption keeps the previous snapshot.
                 save_started = time.time()
                 try:
-                    buffer.save(str(replay_file))
+                    buffer.save_async(str(replay_file))
                 except Exception as error:  # never lose training over a snapshot
                     print(f"replay buffer not saved: {error}", flush=True)
                 record["seconds_replay_save"] = round(time.time() - save_started, 3)
@@ -945,9 +957,34 @@ def _run_training(args: argparse.Namespace) -> int:
             if stop_training:
                 break
     finally:
+        # Never end a run (normally or on an exception) with the last snapshot
+        # still being written.
+        _finish_replay_snapshot(buffer)
         if executor is not None:
             executor.shutdown()
     return 0
+
+
+def _finish_replay_snapshot(buffer) -> dict:
+    """Wait for a background replay snapshot; report, never raise, its failure.
+
+    Returns the seconds spent waiting here and the snapshot's own duration
+    (``None`` when no snapshot was pending).
+    """
+    if not buffer.save_pending:
+        return {"wait": None, "snapshot": None}
+    started = time.time()
+    try:
+        buffer.wait_save()
+    except Exception as error:  # never lose training over a snapshot
+        print(f"replay buffer not saved: {error}", flush=True)
+        snapshot = None
+    else:
+        snapshot = buffer.last_save_seconds
+    return {
+        "wait": round(time.time() - started, 3),
+        "snapshot": None if snapshot is None else round(snapshot, 3),
+    }
 
 
 def _prepare_leaf_graph(
