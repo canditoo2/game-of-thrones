@@ -31,6 +31,7 @@ use agot_core::setup::GameConfig;
 use agot_core::snapshot::{state_from_snapshot, Snapshot};
 
 mod selfplay;
+mod snapshot_py;
 
 /// Which engine implementation is loaded. Logged by training runs so a run's
 /// timings can be attributed to the right backend.
@@ -700,6 +701,12 @@ impl PyGame {
     /// which is what the engine tests need in order to read a position without
     /// caring which implementation produced it.
     fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(snapshot_py::snapshot(py, &self.game.state, &self.game.data)?.unbind())
+    }
+
+    /// The snapshot through the generic `serde_json` fingerprint: the
+    /// reference `snapshot()` must equal, kept for the equality tests.
+    fn _snapshot_reference(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let value = agot_core::fingerprint::state_fingerprint(&self.game.state, &self.game.data);
         to_python(py, &value)
     }
