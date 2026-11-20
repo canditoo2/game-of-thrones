@@ -118,6 +118,9 @@ KEY_FIELDS = (
 MIN_CALIBRATION_EXAMPLES = 50_000
 #: Rows per calibration matmul. Larger batches measured no faster.
 CALIBRATION_CHUNK = 8192
+#: Seed of the projection that groups candidate rows before calibration. The
+#: grouping is verified bit for bit, so the seed only affects speed.
+ROW_KEY_SEED = 0x5EED_CA1B
 
 
 class StaleGraphError(RuntimeError):
@@ -197,6 +200,52 @@ def keep_widths(keep) -> list[int] | None:
     return None if keep is None else [len(units) for units in keep]
 
 
+def _row_keys(rows: np.ndarray) -> np.ndarray:
+    """A 64-bit grouping key per row: two random projections, bit-cast.
+
+    Different rows may collide, and equal rows nearly always but not always
+    share a key (the matmul may round one row differently depending on where it
+    sits in the batch), so callers must verify (see :func:`distinct_rows`);
+    this is a speed device only.
+    """
+    generator = torch.Generator().manual_seed(ROW_KEY_SEED)
+    projection = torch.randn(rows.shape[1], 2, generator=generator, dtype=torch.float32)
+    with torch.inference_mode():
+        keys = torch.from_numpy(rows) @ projection
+    return np.ascontiguousarray(keys.numpy()).view(np.uint64).reshape(len(rows))
+
+
+def distinct_rows(rows: np.ndarray, *, chunk: int = 1 << 16) -> np.ndarray:
+    """``rows`` with bitwise-identical repeats (nearly all) removed, in row order.
+
+    Rows are grouped by :func:`_row_keys`; every row is then compared, bit for
+    bit, with its group's first row, and any row that differs is kept as well.
+    So every input row is either returned or bitwise equal to a returned row:
+    a key collision can only add rows, never drop one, and a forward pass over
+    the result reaches exactly the row values the full array holds. (A repeat
+    whose key came out different is merely scored twice.) A replay
+    buffer repeats candidate rows heavily (run7: 54k distinct of 1.29M), which
+    is what makes this pay.
+    """
+    rows = np.ascontiguousarray(rows, dtype=np.float32)
+    if len(rows) < 2:
+        return rows
+    _, first, inverse = np.unique(_row_keys(rows), return_index=True, return_inverse=True)
+    representative = torch.from_numpy(first[inverse.reshape(len(rows))])
+    bits = torch.from_numpy(rows.view(np.int32))
+    extra = []
+    with torch.inference_mode():
+        for start in range(0, len(rows), chunk):
+            stop = min(len(rows), start + chunk)
+            differs = torch.ne(
+                bits[start:stop], bits.index_select(0, representative[start:stop])
+            ).any(dim=1)
+            if bool(differs.any()):
+                extra.append(torch.nonzero(differs).flatten().numpy() + start)
+    selected = np.concatenate([first, *extra]) if extra else first
+    return rows[np.sort(selected)]
+
+
 def calibrate_keep(
     model,
     states: np.ndarray,
@@ -204,6 +253,7 @@ def calibrate_keep(
     *,
     margin: float = 0.0,
     chunk: int = CALIBRATION_CHUNK,
+    dedupe: bool = True,
 ) -> tuple[tuple[int, ...], ...]:
     """Keep-sets of the trunk ReLU units that fire on the calibration rows.
 
@@ -215,8 +265,11 @@ def calibrate_keep(
     at least its most active unit, so a graph never has an empty layer
     (keeping an extra unit is always exact).
 
-    Only the trunk forward runs, with pre-transposed weights and large batches:
-    ~1.2 s for run7's 61.7k examples / 1.0M candidate rows on two threads.
+    Only the trunk forward runs, with pre-transposed weights and large batches,
+    and (``dedupe``, the default) only over the distinct rows: a unit's maximum
+    over repeated rows is the maximum over one copy (:func:`distinct_rows`).
+    run7 after one iteration (79k examples / 1.29M candidate rows, 54k
+    distinct): 1.46 s without dedupe, ~0.45 s with it, on two threads.
     A margin is a poor safety lever on trained nets (iteration 008: the dead
     action-trunk units sit just below zero, so a margin of 0.05 already keeps
     138 instead of 83 units of ``action_trunk[0]``); coverage, i.e. enough
@@ -238,6 +291,8 @@ def calibrate_keep(
             ]
             peaks = [torch.full((weight.shape[1],), -torch.inf) for weight, _ in weights]
             rows = np.asarray(rows, dtype=np.float32)
+            if dedupe:
+                rows = distinct_rows(rows)
             step = max(1, int(chunk))
             for start in range(0, len(rows), step):
                 x = torch.from_numpy(np.ascontiguousarray(rows[start : start + step]))

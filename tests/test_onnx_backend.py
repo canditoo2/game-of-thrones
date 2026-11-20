@@ -414,6 +414,74 @@ def test_a_layer_never_ends_up_empty() -> None:
     assert len(keep[1]) == 1, "the most active unit stays, so the graph has a layer"
 
 
+def _row_set(rows: np.ndarray) -> set[bytes]:
+    return {row.tobytes() for row in np.ascontiguousarray(rows, dtype=np.float32)}
+
+
+def _repeating_rows(seed: int = 5) -> np.ndarray:
+    """Candidate-like rows: a few distinct ones repeated many times, plus
+    sign-of-zero twins that compare equal as floats but not as bits."""
+    rng = np.random.default_rng(seed)
+    base = rng.standard_normal((40, ACTION_DIM)).astype(np.float32)
+    base[rng.random(base.shape) < 0.9] = 0.0
+    rows = base[rng.integers(0, len(base), size=3000)]
+    twin = rows[17].copy()
+    twin[twin == 0] = -0.0
+    return np.concatenate([rows, twin[None]])
+
+
+def test_distinct_rows_keeps_every_bit_pattern_and_drops_the_repeats() -> None:
+    rows = _repeating_rows()
+    distinct = onnx_backend.distinct_rows(rows)
+    assert _row_set(distinct) == _row_set(rows)
+    # Nearly one copy each: a repeat is kept twice only when the matmul rounded
+    # its key differently at another position in the batch.
+    assert len(_row_set(rows)) <= len(distinct) < 50
+    assert onnx_backend.distinct_rows(rows[:1]).tobytes() == rows[:1].tobytes()
+    assert onnx_backend.distinct_rows(rows[:0]).shape == (0, ACTION_DIM)
+
+
+def test_a_key_collision_never_drops_a_row(monkeypatch) -> None:
+    """Every key equal: the bitwise check must keep every differing row."""
+    rows = _repeating_rows()
+    monkeypatch.setattr(
+        onnx_backend, "_row_keys", lambda rows: np.zeros(len(rows), dtype=np.uint64)
+    )
+    distinct = onnx_backend.distinct_rows(rows, chunk=97)
+    assert _row_set(distinct) == _row_set(rows)
+
+
+@pytest.mark.parametrize("collide", [False, True])
+def test_calibration_over_distinct_rows_is_the_full_calibration(monkeypatch, collide) -> None:
+    model = _dead_model()
+    unit = DEAD[1]
+    first_action = onnx_backend.trunk_linears(model)[2]  # action_trunk[0]
+    with torch.no_grad():
+        first_action.weight[unit].zero_()
+        first_action.weight[unit, 3] = 1.0
+        first_action.bias[unit] = -10.0  # fires only when action[3] > 10
+    states, _ = _calibration_rows()
+    states = np.concatenate([states, states[::3]])  # repeated states too
+    actions = np.clip(_repeating_rows(), -3.0, 3.0)
+    if collide:
+        monkeypatch.setattr(
+            onnx_backend, "_row_keys", lambda rows: np.zeros(len(rows), dtype=np.uint64)
+        )
+    full = onnx_backend.calibrate_keep(model, states, actions, dedupe=False)
+    assert unit not in full[2]
+    assert onnx_backend.calibrate_keep(model, states, actions) == full
+    # One row that differs from a heavily repeated one in a single entry, and
+    # fires the unit: it must survive the grouping.
+    actions[2000] = actions[1]
+    actions[2000, 3] = 10.5
+    full = onnx_backend.calibrate_keep(model, states, actions, dedupe=False)
+    assert unit in full[2]
+    assert onnx_backend.calibrate_keep(model, states, actions) == full
+    assert onnx_backend.calibrate_keep(model, *_calibration_rows()) == onnx_backend.calibrate_keep(
+        model, *_calibration_rows(), dedupe=False
+    )
+
+
 @pytest.mark.parametrize("backend", ["onnx-fp32", "onnx-int8"])
 def test_the_compact_graph_matches_the_full_forward(tmp_path, backend) -> None:
     """Exact (to fp32 round-off) on inputs from the calibration distribution."""
