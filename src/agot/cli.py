@@ -682,8 +682,10 @@ def _run_training(args: argparse.Namespace) -> int:
                 model, plan, base_config=config, executor=executor
             )
             seconds_selfplay = time.time() - selfplay_started
+            extend_started = time.time()
             for record in records:
                 buffer.extend(record.examples)
+            seconds_extend = time.time() - extend_started
             sample = [
                 example.policy
                 for record in records[:4]
@@ -708,9 +710,12 @@ def _run_training(args: argparse.Namespace) -> int:
             # The search and its leaf batches stay on CPU; only the gradient
             # pass moves to the GPU.
             model.to(device)
+            seconds_trainer_restore = None
             if pending_trainer_state is not None:
+                restore_started = time.time()
                 trainer.load_state_dict(pending_trainer_state)
                 pending_trainer_state = None
+                seconds_trainer_restore = round(time.time() - restore_started, 3)
             train_started = time.time()
             history = trainer.train(buffer)
             human_stats = {}
@@ -724,7 +729,9 @@ def _run_training(args: argparse.Namespace) -> int:
             last = history[-1] if history else {}
             model.to("cpu")
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            save_started = time.time()
             model.save(str(checkpoint))
+            seconds_checkpoint = time.time() - save_started
             # No graph preparation here: the next iteration exports once, right
             # before the games, from exactly these weights. Doing it in both
             # places exported the same graph twice per iteration.
@@ -756,6 +763,10 @@ def _run_training(args: argparse.Namespace) -> int:
                 "leaf_compact": leaf_graph["widths"],
                 "seconds_leaf_calibration": leaf_graph["seconds_calibration"],
                 "seconds_leaf_graph": leaf_graph["seconds"],
+                # The rest of the bookkeeping outside both phase timers, so the
+                # remainder of `seconds` stays attributed.
+                "seconds_extend": round(seconds_extend, 3),
+                "seconds_trainer_restore": seconds_trainer_restore,
                 "examples_new": sum(len(record.examples) for record in records),
                 "games": len(records),
                 "buffer": len(buffer),
@@ -882,14 +893,20 @@ def _run_training(args: argparse.Namespace) -> int:
             run.gate_failures = gate_failures
             run.trainer = trainer.state_dict()
             run.gate_mode = args.gate_mode
+            save_started = time.time()
             run.save(state_file)
+            record["seconds_checkpoint"] = round(
+                seconds_checkpoint + time.time() - save_started, 3
+            )
             if args.buffer_save_every > 0 and (
                 (iteration + 1) % args.buffer_save_every == 0
             ):
+                save_started = time.time()
                 try:
                     buffer.save(str(replay_file))
                 except Exception as error:  # never lose training over a snapshot
                     print(f"replay buffer not saved: {error}", flush=True)
+                record["seconds_replay_save"] = round(time.time() - save_started, 3)
             # The iteration is committed from here on: a resume cannot re-run
             # it, so enqueueing the gate candidate now cannot duplicate a
             # directory while another process is playing it.
