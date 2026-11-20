@@ -10,7 +10,8 @@ The training objective is the AlphaZero one, generalised to six players:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -112,6 +113,55 @@ def _parameter_groups(model: nn.Module, weight_decay: float) -> list[dict]:
         {"params": decayed, "weight_decay": weight_decay},
         {"params": undecayed, "weight_decay": 0.0},
     ]
+
+
+@contextmanager
+def flush_denormals() -> Iterator[None]:
+    """Run the enclosed block with flush-to-zero / denormals-are-zero on.
+
+    A dead ReLU unit receives an exactly-zero gradient, so its Adam moments decay
+    geometrically toward zero and settle in the float32 subnormal range for good
+    (``x * 0.9`` rounds back to ``x`` for the smallest subnormals). Every
+    arithmetic op that reads or writes a subnormal takes the CPU's microcode slow
+    path: on run7's state that made the optimizer step 2-3x slower. The update
+    such a moment produces is below float32 resolution of any weight, so
+    flushing it changes the trained weights by round-off at most (measured: bit
+    identical over a 965-step epoch).
+
+    The flags are per thread and process-global, so they are only held for the
+    gradient pass and switched back off afterwards: inference and self-play in
+    the same process keep IEEE subnormals. ``set_flush_denormal`` returns
+    ``False`` on CPUs without the feature, which makes this a no-op there.
+    """
+    enabled = torch.set_flush_denormal(True)
+    try:
+        yield
+    finally:
+        if enabled:
+            torch.set_flush_denormal(False)
+
+
+def scrub_subnormals(optimizer: torch.optim.Optimizer) -> int:
+    """Zero every subnormal entry in ``optimizer``'s state; return how many.
+
+    Flushing stops new subnormals from being written on threads that honour
+    the flags, but a state saved by an older run (or written by an OpenMP
+    thread that did not inherit the flags) still carries them. Adam's moments
+    for a dead unit stay where they are once zeroed (``0 * beta + 0``), so one
+    scrub per epoch keeps the state clean.
+    """
+    scrubbed = 0
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if key == "step" or not torch.is_tensor(value) or not value.is_floating_point():
+                continue
+            tiny = torch.finfo(value.dtype).tiny
+            mask = (value != 0) & (value.abs() < tiny)
+            count = int(mask.sum())
+            if count:
+                value.masked_fill_(mask, 0.0)
+                scrubbed += count
+    return scrubbed
 
 
 def collate(examples: list[Example]) -> Batch:
@@ -255,6 +305,11 @@ class Trainer:
     def train_epoch(self, examples: Sequence[Example]) -> TrainStats:
         if not examples:
             return TrainStats()
+        with flush_denormals():
+            scrub_subnormals(self.optimizer)
+            return self._train_epoch(examples)
+
+    def _train_epoch(self, examples: Sequence[Example]) -> TrainStats:
         self.model.train()
         stats = TrainStats()
         order = self.rng.permutation(len(examples))
@@ -360,23 +415,24 @@ class Trainer:
         total = 0.0
         batches = 0
         try:
-            for epoch in range(epochs):
-                for state, actions, index, outcome in dataset.batches(
-                    size, shuffle=True, seed=seed + epoch
-                ):
-                    state = state.to(self.device)
-                    actions = actions.to(self.device)
-                    index = index.to(self.device)
-                    outcome = outcome.to(self.device)
-                    _, values = self.model.forward_packed(state, actions, index)
-                    loss = ((values - outcome) ** 2).mean()
-                    self.optimizer.zero_grad(set_to_none=True)
-                    loss.backward()
-                    if self.config.grad_clip:
-                        nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
-                    self.optimizer.step()
-                    total += float(loss.detach())
-                    batches += 1
+            with flush_denormals():
+                for epoch in range(epochs):
+                    for state, actions, index, outcome in dataset.batches(
+                        size, shuffle=True, seed=seed + epoch
+                    ):
+                        state = state.to(self.device)
+                        actions = actions.to(self.device)
+                        index = index.to(self.device)
+                        outcome = outcome.to(self.device)
+                        _, values = self.model.forward_packed(state, actions, index)
+                        loss = ((values - outcome) ** 2).mean()
+                        self.optimizer.zero_grad(set_to_none=True)
+                        loss.backward()
+                        if self.config.grad_clip:
+                            nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                        self.optimizer.step()
+                        total += float(loss.detach())
+                        batches += 1
         finally:
             for group, learning_rate in zip(self.optimizer.param_groups, saved_lr, strict=True):
                 group["lr"] = learning_rate
