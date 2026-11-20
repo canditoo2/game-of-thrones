@@ -126,6 +126,32 @@ def test_export_and_load_round_trip(tmp_path) -> None:
     assert reused.path == backend.path
 
 
+@pytest.mark.parametrize("backend_name", ["onnx-fp32", "onnx-int8"])
+def test_the_native_run_path_returns_the_public_runs_bits(tmp_path, backend_name) -> None:
+    """The leaf call skips ORT's Python checks; its output must not change."""
+    model = _model(hidden=16, sharpness=1.0)
+    backend = onnx_backend.LeafBackend.from_model(model, backend_name, cache_dir=tmp_path)
+    assert backend._native_run is not None, "a CPU session exposes its native run"
+    for seed, widths in ((0, WIDTHS), (5, (1, 9, 2)), (7, (3,))):
+        state, actions, index, mask = _batch(seed=seed, widths=widths)
+        fast = backend(state, actions, index, mask)
+        public = backend.session.run(
+            list(onnx_backend.OUTPUT_NAMES),
+            {"state": state, "actions": actions, "index": index},
+        )
+        for got, want in zip(fast, public, strict=True):
+            assert got.dtype == want.dtype and got.shape == want.shape
+            assert got.tobytes() == want.tobytes()
+    # Without a native handle the public run is used.
+    backend._native_run = None
+    again = backend(*_batch())
+    first = onnx_backend.LeafBackend.from_model(model, backend_name, cache_dir=tmp_path)(
+        *_batch()
+    )
+    for got, want in zip(again, first, strict=True):
+        assert got.tobytes() == want.tobytes()
+
+
 def test_int8_output_shape_dtype_and_kernels(tmp_path) -> None:
     """int8 must keep the driver's contract and really hold int8 weights."""
     model = _model(hidden=16)

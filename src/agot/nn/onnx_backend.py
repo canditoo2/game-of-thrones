@@ -745,6 +745,8 @@ class LeafBackend:
         self.session = session
         self.cached = cached
         self.threads = int(threads)
+        self._output_names = list(OUTPUT_NAMES)
+        self._native_run = self._find_native_run(session)
 
     @classmethod
     def from_model(
@@ -807,15 +809,32 @@ class LeafBackend:
         return self
 
     def __call__(self, state, actions, index, mask=None):
-        logits, values = self.session.run(
-            list(OUTPUT_NAMES),
-            {
-                "state": np.ascontiguousarray(state, dtype=np.float32),
-                "actions": np.ascontiguousarray(actions, dtype=np.float32),
-                "index": np.ascontiguousarray(index, dtype=np.int64),
-            },
-        )
+        feed = {
+            "state": np.ascontiguousarray(state, dtype=np.float32),
+            "actions": np.ascontiguousarray(actions, dtype=np.float32),
+            "index": np.ascontiguousarray(index, dtype=np.int64),
+        }
+        # The self-play driver calls this tens of thousands of times per chunk
+        # with ~3 leaves each, so the Python wrapper's per-call checks (feed
+        # names, OrtValue ownership, WebGPU capture) are a visible share. The
+        # feed is always these three numpy arrays on a CPU session, which is
+        # exactly what those checks accept, so call the native run directly
+        # when the session exposes it; the result is the same C call.
+        native = self._native_run
+        if native is not None:
+            logits, values = native(self._output_names, feed, None)
+        else:
+            logits, values = self.session.run(self._output_names, feed)
         return logits, values
+
+    @staticmethod
+    def _find_native_run(session):
+        """The session's native ``run``, or ``None`` to use the public one."""
+        inner = getattr(session, "_sess", None)
+        run = getattr(inner, "run", None)
+        get_providers = getattr(session, "get_providers", None)
+        providers = list(get_providers()) if callable(get_providers) else []
+        return run if callable(run) and providers == ["CPUExecutionProvider"] else None
 
 
 # ---------------------------------------------------------------------------
