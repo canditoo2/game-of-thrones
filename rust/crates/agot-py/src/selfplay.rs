@@ -714,6 +714,7 @@ pub fn selfplay<'py>(
         // searcher; only which games share a leaf callback changes.
         let mut searching: Vec<Option<(Vec<u32>, u32, u32)>> = vec![None; chunk.len()];
         let mut finished_slot = vec![false; chunk.len()];
+        let mut cache = observation::RegionCache::new();
 
         loop {
             // Advance every game that is neither searching nor over to its
@@ -841,20 +842,21 @@ pub fn selfplay<'py>(
             }
 
             // Encode every leaf, grouped by the model that owns its seat.
-            // One cache for the whole batch: each leaf clears it, which is
-            // far cheaper than allocating (and zeroing) 64 entries per leaf.
+            // One region cache for the whole call (declared with the batch):
+            // each leaf clears it, which only bumps its generation.
             stats.time_prepare += mark.elapsed();
             let mark = Instant::now();
-            let mut cache = observation::RegionCache::new();
             let mut groups: Vec<LeafGroup> = Vec::new();
             for (position, (slot, simulation)) in pending.iter().enumerate() {
                 if simulation.leaf.is_none() {
                     continue;
                 }
-                let game = searchers[*slot]
-                    .leaf_game(simulation)
+                // Borrowed from the arena: the encoder only reads the position,
+                // so the leaf is not copied out of its node.
+                let leaf_state = searchers[*slot]
+                    .leaf_state(simulation)
                     .ok_or_else(|| PyRuntimeError::new_err("a leaf without a position"))?;
-                let house = game.current_player().ok_or_else(|| {
+                let house = leaf_state.active_house.ok_or_else(|| {
                     PyRuntimeError::new_err("a search leaf without an acting house")
                 })?;
                 let model = seat_models
@@ -882,7 +884,7 @@ pub fn selfplay<'py>(
                 let state_start = group.states.len();
                 group.states.resize(state_start + STATE_DIM, 0.0);
                 observation::encode_state_into(
-                    &game.state,
+                    leaf_state,
                     &data,
                     None,
                     &mut group.states[state_start..],
@@ -891,7 +893,7 @@ pub fn selfplay<'py>(
                     let action_start = group.actions.len();
                     group.actions.resize(action_start + ACTION_DIM, 0.0);
                     observation::encode_action_into(
-                        &game.state,
+                        leaf_state,
                         &data,
                         action,
                         None,
