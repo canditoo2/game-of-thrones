@@ -90,7 +90,8 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   only): most trunk ReLU units of a trained net never fire (run7: 202/173/173/165 of 256 dead
   on the replay buffer, none of them firing on 40k real search leaves). Once per iteration,
   in the parent, `onnx_backend.calibrate_keep` measures which trunk units fire on the replay
-  buffer (~1.2 s at 62k examples, two threads) and `_prepare_leaf_graph` exports
+  buffer (over its distinct rows only, bit-verified: ~0.5 s at 79k examples, two threads)
+  and `_prepare_leaf_graph` exports
   `<stem>.<backend>.compact.onnx` without the others; the keep-sets ride the plan
   (`SelfPlayPlan.leaf_keep`) so the workers open that same graph. Below
   `MIN_CALIBRATION_EXAMPLES` (50k: 33k contiguous examples still missed units that fire on
@@ -188,7 +189,9 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   `--resume`), `agot.log.jsonl` (one line per iteration), `agot-best.pt` (gate-approved best)
   and `agot.replay.npz` (compressed replay snapshot, ~15-60 MB at 100k examples, written every
   `--buffer-save-every` iterations and restored on resume, which removes the empty-buffer loss
-  spike). The log carries `seconds_selfplay`, `seconds_train`, `target_entropy` and
+  spike). The snapshot is compressed in a background thread (`ReplayBuffer.save_async`) that
+  every buffer mutation waits for, and written to a temporary that is renamed into place, so
+  an interrupted write keeps the previous one. The log carries `seconds_selfplay`, `seconds_train`, `target_entropy` and
   `buffer_restored`; with raw-visit targets the policy-loss floor is the mean target entropy
   (~2.2-2.6 nats), so the old "<2.0" smoke reading no longer applies.
 - The GUI writes human-vs-bot matches under `checkpoints/play-logs/`: a JSONL decision/result
