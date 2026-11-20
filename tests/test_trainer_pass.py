@@ -238,3 +238,53 @@ def test_live_column_training_forward_matches_dense(seed: int) -> None:
     weight = "action_trunk.2.weight"
     assert torch.equal(live[weight][:, dead], dense[weight][:, dead])
     assert not live[weight][:, dead].any()
+
+
+def _sequential_load(path: str, capacity: int) -> ReplayBuffer:
+    """The pre-vectorised restore: one `add` per saved example."""
+    buffer = ReplayBuffer(capacity=capacity)
+    with np.load(path) as data:
+        saved = {name: data[name] for name in data.files}
+    offsets = saved["offsets"]
+    for index in range(len(saved["states"])):
+        start, stop = int(offsets[index]), int(offsets[index + 1])
+        buffer.add(
+            Example(
+                state=saved["states"][index],
+                actions=saved["actions"][start:stop],
+                policy=saved["policies"][start:stop],
+                player=int(saved["players"][index]),
+                outcome=saved["outcomes"][index],
+            )
+        )
+    return buffer
+
+
+def _contents(buffer: ReplayBuffer) -> tuple:
+    size, rows = len(buffer), buffer._rows
+    return (
+        buffer._states[:size].tobytes(),
+        buffer._actions[:rows].tobytes(),
+        buffer._policies[:rows].tobytes(),
+        buffer._players[:size].tobytes(),
+        buffer._outcomes[:size].tobytes(),
+        buffer._offsets[: size + 1].tobytes(),
+    )
+
+
+@pytest.mark.parametrize("capacity", [400, 120, 37])
+def test_vectorised_restore_matches_sequential_adds(tmp_path, capacity: int) -> None:
+    source = ReplayBuffer(capacity=500)
+    source.extend(_random_examples(120, seed=11, max_actions=25))
+    path = str(tmp_path / "replay.npz")
+    source.save(path)
+
+    restored = ReplayBuffer.load(path, capacity=capacity)
+    reference = _sequential_load(path, capacity)
+    assert len(restored) == len(reference)
+    assert _contents(restored) == _contents(reference)
+    # The restored buffer keeps behaving the same: more adds, then an eviction.
+    extra = _random_examples(capacity, seed=12, max_actions=25)
+    restored.extend(extra)
+    reference.extend(extra)
+    assert _contents(restored) == _contents(reference)

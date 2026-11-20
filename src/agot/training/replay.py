@@ -201,6 +201,21 @@ class ReplayBuffer:
 
     # -- persistence -----------------------------------------------------
 
+    def _adopt(self, states, actions, offsets, policies, players, outcomes) -> None:
+        """Take over saved arrays as the storage of an empty buffer."""
+        size = len(states)
+        rows = int(offsets[size])
+        self._ensure_examples(size)
+        self._ensure_rows(rows)
+        self._states[:size] = states
+        self._players[:size] = players
+        self._outcomes[:size] = outcomes
+        self._offsets[: size + 1] = offsets[: size + 1]
+        self._actions[:rows] = actions
+        self._policies[:rows] = policies
+        self._size = size
+        self._rows = rows
+
     def save(self, path: str) -> None:
         states = (
             self._states[: self._size]
@@ -235,6 +250,20 @@ class ReplayBuffer:
             # current files store one flat float32 vector.
             legacy = policies.dtype == object
             buffer = cls(capacity=max(1, capacity or len(states)))
+            contiguous = (
+                not legacy
+                and len(offsets) == len(states) + 1
+                and int(offsets[0]) == 0
+                and int(offsets[-1]) == len(actions) == len(policies)
+                and bool(np.all(np.diff(offsets) >= 0))
+            )
+            if contiguous and 0 < len(states) <= buffer.capacity:
+                # Fits without eviction: the arrays already have the layout
+                # `add` would build, so adopt them instead of copying 60k
+                # examples one by one. Anything else keeps the add path, whose
+                # quarter-at-a-time eviction defines what survives.
+                buffer._adopt(states, actions, offsets, policies, players, outcomes)
+                return buffer
             for index in range(len(states)):
                 start, stop = int(offsets[index]), int(offsets[index + 1])
                 policy = (
