@@ -29,7 +29,6 @@
 //! float32/int32 arrays and returns `(logits (T,), values (B, N_HOUSES))`. Rust
 //! applies the per-leaf softmax, so the callback stays a single torch expression.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
@@ -40,6 +39,7 @@ use pyo3::types::{PyAny, PyDict, PyTuple};
 use agot_core::budget::{decision_budget, PhaseBudgets};
 use agot_core::enums::{HouseId, Phase, N_HOUSES};
 use agot_core::game::Game;
+use agot_core::leaf_cache::{self, LeafCache, LeafKey, LeafKeyMap};
 use agot_core::leaf_dedupe::LeafDedupe;
 use agot_core::map::DataSet;
 use agot_core::observation::{self, ACTION_DIM, STATE_DIM};
@@ -83,6 +83,311 @@ impl LeafGroup {
             index: Vec::new(),
         }
     }
+}
+
+/// Leaf-evaluation counters for one `selfplay()` call.
+///
+/// Read from Python with `selfplay_stats()` after the call returns; the
+/// driver's return tuple is unchanged, so existing consumers keep working.
+#[derive(Clone, Copy, Debug, Default)]
+struct DriverStats {
+    /// Leaves that needed a network score.
+    leaves: u64,
+    /// Candidate rows of those leaves.
+    slots: u64,
+    /// Leaves answered by the cross-pass cache.
+    cache_hits: u64,
+    /// Candidate rows of those leaves.
+    cache_hit_slots: u64,
+    /// Leaves merged into an identical leaf of the same pass.
+    pass_duplicates: u64,
+    /// Evaluator callbacks made.
+    evaluator_calls: u64,
+    /// Passes whose leaves were all answered without a callback.
+    calls_skipped: u64,
+    /// Leaves and candidate rows actually sent to the evaluator.
+    rows_sent: u64,
+    slots_sent: u64,
+    /// Cache bookkeeping, summed over the per-evaluator caches.
+    cache_inserts: u64,
+    cache_evicted: u64,
+    cache_rotations: u64,
+    cache_verified: u64,
+    cache_peak_entries: u64,
+    cache_peak_logits: u64,
+}
+
+impl DriverStats {
+    fn to_dict<'py>(self, py: Python<'py>, leaf_cache: bool) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        dict.set_item("leaf_cache", leaf_cache)?;
+        dict.set_item("leaves", self.leaves)?;
+        dict.set_item("slots", self.slots)?;
+        dict.set_item("cache_hits", self.cache_hits)?;
+        dict.set_item("cache_hit_slots", self.cache_hit_slots)?;
+        dict.set_item("pass_duplicates", self.pass_duplicates)?;
+        dict.set_item("evaluator_calls", self.evaluator_calls)?;
+        dict.set_item("calls_skipped", self.calls_skipped)?;
+        dict.set_item("rows_sent", self.rows_sent)?;
+        dict.set_item("slots_sent", self.slots_sent)?;
+        dict.set_item("cache_inserts", self.cache_inserts)?;
+        dict.set_item("cache_evicted", self.cache_evicted)?;
+        dict.set_item("cache_rotations", self.cache_rotations)?;
+        dict.set_item("cache_verified", self.cache_verified)?;
+        dict.set_item("cache_peak_entries", self.cache_peak_entries)?;
+        dict.set_item("cache_peak_logits", self.cache_peak_logits)?;
+        Ok(dict)
+    }
+}
+
+/// The counters of the most recent completed `selfplay()` call in this
+/// process, with whether its cache was on.
+static LAST_STATS: std::sync::Mutex<Option<(DriverStats, bool)>> = std::sync::Mutex::new(None);
+
+/// Leaf-evaluation counters of the last completed `selfplay()` call in this
+/// process (`None` before the first one).
+///
+/// `leaves` counts the leaves that needed a score; `cache_hits` were answered
+/// from an earlier pass of the same call, `pass_duplicates` were merged with
+/// an identical leaf of their own pass, and `rows_sent` / `slots_sent` are what
+/// actually reached the evaluator in `evaluator_calls` callbacks.
+#[pyfunction]
+pub fn selfplay_stats(py: Python<'_>) -> PyResult<Option<Bound<'_, PyDict>>> {
+    let last = *LAST_STATS
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("selfplay stats lock poisoned"))?;
+    match last {
+        Some((stats, leaf_cache)) => Ok(Some(stats.to_dict(py, leaf_cache)?)),
+        None => Ok(None),
+    }
+}
+
+/// Score one model group without the cache: the whole group in one callback,
+/// optionally merged by the in-pass [`LeafDedupe`]. This is the path every run
+/// took before the cache, kept for A/B runs (`leaf_cache = False`).
+fn evaluate_direct(
+    py: Python<'_>,
+    evaluator: &Py<PyAny>,
+    group: &LeafGroup,
+    dedupe_leaves: bool,
+    stats: &mut DriverStats,
+) -> PyResult<(Vec<f32>, Vec<f32>)> {
+    let rows = group.positions.len();
+    let total = group.index.len();
+
+    // Index the batch by exact contents. A leaf is identified by its state row
+    // *and* its ordered action rows, so two positions with the same board but
+    // different candidates stay separate. The evaluator never sees a duplicate.
+    let dedupe = if dedupe_leaves {
+        Some(LeafDedupe::from_packed(
+            &group.states,
+            STATE_DIM,
+            &group.actions,
+            ACTION_DIM,
+            &group.index,
+            rows,
+        ))
+    } else {
+        None
+    };
+    let (scored_rows, scored_slots) = match &dedupe {
+        Some(dedupe) => (dedupe.unique_rows(), dedupe.unique_slots()),
+        None => (rows, total),
+    };
+    let (scored_states, scored_actions, scored_index) = match &dedupe {
+        Some(dedupe) => (
+            dedupe.states().to_vec(),
+            dedupe.actions().to_vec(),
+            dedupe.index().to_vec(),
+        ),
+        None => (
+            group.states.clone(),
+            group.actions.clone(),
+            group.index.clone(),
+        ),
+    };
+    stats.pass_duplicates += (rows - scored_rows) as u64;
+    stats.evaluator_calls += 1;
+    stats.rows_sent += scored_rows as u64;
+    stats.slots_sent += scored_slots as u64;
+
+    let state_array = array2(py, scored_rows, STATE_DIM, scored_states)?;
+    let action_array = array2(py, scored_slots, ACTION_DIM, scored_actions)?;
+    let index_array = numpy::ndarray::Array1::from_vec(scored_index)
+        .into_pyarray(py)
+        .unbind();
+    let mask = vec![1.0f32; scored_slots];
+    let mask_array = PyArray1::from_vec(py, mask).unbind();
+
+    let reply = evaluator.call1(py, (state_array, action_array, index_array, mask_array))?;
+    let (logits, values): (PyReadonlyArray1<f32>, PyReadonlyArray2<f32>) = reply.extract(py)?;
+    let logits = logits.as_slice()?;
+    let values = values.as_slice()?;
+    if logits.len() != scored_slots {
+        return Err(PyValueError::new_err(format!(
+            "evaluator returned {} logits for {scored_slots} candidates",
+            logits.len()
+        )));
+    }
+    if values.len() != scored_rows * N_HOUSES {
+        return Err(PyValueError::new_err(format!(
+            "evaluator returned {} values for {scored_rows} leaves",
+            values.len()
+        )));
+    }
+
+    // Restore the full packed layout before the per-leaf softmax: each
+    // duplicate gets exactly the bits its own forward pass would have produced.
+    Ok(match &dedupe {
+        Some(dedupe) => (
+            dedupe.scatter_logits(logits),
+            dedupe.scatter_values(values, N_HOUSES),
+        ),
+        None => (logits.to_vec(), values.to_vec()),
+    })
+}
+
+/// Score one model group through the cross-pass evaluation cache.
+///
+/// Every leaf is looked up by its exact network input. Hits are copied from
+/// the cache; misses are packed in first-occurrence order (an input repeated
+/// inside the pass is sent once) and sent in one callback, or no callback at
+/// all when nothing is new. Returns the raw logits in the group's packed slot
+/// order and the value rows in its leaf order, exactly the layout the
+/// evaluator would have returned for the whole group.
+fn evaluate_cached(
+    py: Python<'_>,
+    evaluator: &Py<PyAny>,
+    cache: &mut LeafCache,
+    verify: bool,
+    group: &LeafGroup,
+    bounds: &[usize],
+    stats: &mut DriverStats,
+) -> PyResult<(Vec<f32>, Vec<f32>)> {
+    let rows = group.positions.len();
+    let total = group.index.len();
+    let mut logits = vec![0.0f32; total];
+    let mut values = vec![0.0f32; rows * N_HOUSES];
+
+    let mismatch = |error: leaf_cache::CacheMismatch| PyRuntimeError::new_err(error.to_string());
+    let state_of = |row: usize| &group.states[row * STATE_DIM..(row + 1) * STATE_DIM];
+    let actions_of =
+        |row: usize| &group.actions[bounds[row] * ACTION_DIM..bounds[row + 1] * ACTION_DIM];
+
+    // The misses, packed as the evaluator wants them.
+    let mut miss_keys: Vec<LeafKey> = Vec::new();
+    let mut miss_rows: Vec<usize> = Vec::new();
+    let mut miss_states: Vec<f32> = Vec::new();
+    let mut miss_actions: Vec<f32> = Vec::new();
+    let mut miss_index: Vec<i64> = Vec::new();
+    let mut in_pass: LeafKeyMap<usize> = LeafKeyMap::default();
+    // (row, miss) for leaves that repeat a miss of this pass.
+    let mut waiting: Vec<(usize, usize)> = Vec::new();
+
+    for row in 0..rows {
+        let state = state_of(row);
+        let actions = actions_of(row);
+        let count = bounds[row + 1] - bounds[row];
+        let key = cache.key(state, actions, count);
+        if let Some((hit_logits, hit_value)) = cache
+            .lookup(&key, count, state, actions)
+            .map_err(mismatch)?
+        {
+            logits[bounds[row]..bounds[row + 1]].copy_from_slice(hit_logits);
+            values[row * N_HOUSES..(row + 1) * N_HOUSES].copy_from_slice(hit_value);
+            stats.cache_hits += 1;
+            stats.cache_hit_slots += count as u64;
+            continue;
+        }
+        if let Some(&miss) = in_pass.get(&key) {
+            if verify {
+                let first = miss_rows[miss];
+                let same = |left: &[f32], right: &[f32]| {
+                    left.len() == right.len()
+                        && left
+                            .iter()
+                            .zip(right)
+                            .all(|(a, b)| a.to_bits() == b.to_bits())
+                };
+                if !same(state_of(first), state) || !same(actions_of(first), actions) {
+                    return Err(mismatch(leaf_cache::CacheMismatch));
+                }
+            }
+            waiting.push((row, miss));
+            stats.pass_duplicates += 1;
+            continue;
+        }
+        let miss = miss_rows.len();
+        in_pass.insert(key, miss);
+        miss_keys.push(key);
+        miss_rows.push(row);
+        miss_states.extend_from_slice(state);
+        miss_actions.extend_from_slice(actions);
+        miss_index.extend(std::iter::repeat(miss as i64).take(count));
+    }
+
+    if miss_rows.is_empty() {
+        stats.calls_skipped += 1;
+        return Ok((logits, values));
+    }
+
+    let scored_rows = miss_rows.len();
+    let scored_slots = miss_index.len();
+    stats.evaluator_calls += 1;
+    stats.rows_sent += scored_rows as u64;
+    stats.slots_sent += scored_slots as u64;
+
+    let state_array = array2(py, scored_rows, STATE_DIM, miss_states)?;
+    let action_array = array2(py, scored_slots, ACTION_DIM, miss_actions)?;
+    let index_array = numpy::ndarray::Array1::from_vec(miss_index)
+        .into_pyarray(py)
+        .unbind();
+    let mask_array = PyArray1::from_vec(py, vec![1.0f32; scored_slots]).unbind();
+    let reply = evaluator.call1(py, (state_array, action_array, index_array, mask_array))?;
+    let (reply_logits, reply_values): (PyReadonlyArray1<f32>, PyReadonlyArray2<f32>) =
+        reply.extract(py)?;
+    let reply_logits = reply_logits.as_slice()?;
+    let reply_values = reply_values.as_slice()?;
+    if reply_logits.len() != scored_slots {
+        return Err(PyValueError::new_err(format!(
+            "evaluator returned {} logits for {scored_slots} candidates",
+            reply_logits.len()
+        )));
+    }
+    if reply_values.len() != scored_rows * N_HOUSES {
+        return Err(PyValueError::new_err(format!(
+            "evaluator returned {} values for {scored_rows} leaves",
+            reply_values.len()
+        )));
+    }
+
+    // Each miss's slice of the reply, in reply order.
+    let mut miss_bounds = Vec::with_capacity(scored_rows + 1);
+    miss_bounds.push(0usize);
+    for row in &miss_rows {
+        let last = *miss_bounds.last().unwrap_or(&0);
+        miss_bounds.push(last + bounds[row + 1] - bounds[*row]);
+    }
+    for (miss, row) in miss_rows.iter().enumerate() {
+        let miss_logits = &reply_logits[miss_bounds[miss]..miss_bounds[miss + 1]];
+        let miss_value = &reply_values[miss * N_HOUSES..(miss + 1) * N_HOUSES];
+        logits[bounds[*row]..bounds[row + 1]].copy_from_slice(miss_logits);
+        values[row * N_HOUSES..(row + 1) * N_HOUSES].copy_from_slice(miss_value);
+        cache.insert(
+            miss_keys[miss],
+            miss_logits,
+            miss_value,
+            state_of(*row),
+            actions_of(*row),
+        );
+    }
+    for (row, miss) in waiting {
+        logits[bounds[row]..bounds[row + 1]]
+            .copy_from_slice(&reply_logits[miss_bounds[miss]..miss_bounds[miss + 1]]);
+        values[row * N_HOUSES..(row + 1) * N_HOUSES]
+            .copy_from_slice(&reply_values[miss * N_HOUSES..(miss + 1) * N_HOUSES]);
+    }
+    Ok((logits, values))
 }
 
 fn spec_value<'py, T>(spec: &Bound<'py, PyDict>, key: &str) -> PyResult<Option<T>>
@@ -235,6 +540,17 @@ pub fn selfplay<'py>(
     // common under PIMC and across games. The evaluator is pure, so scoring
     // each unique leaf once is exact; the switch exists for A/B runs.
     let dedupe_leaves: bool = spec_or(spec, "dedupe_leaves", true)?;
+    // Cross-pass evaluation cache (see `agot_core::leaf_cache`): a leaf whose
+    // exact network input was scored earlier in this call reuses that output.
+    // Exact for an evaluator that is a pure row-wise function of its input;
+    // the cache also merges in-pass repeats, so it subsumes `dedupe_leaves`.
+    // `leaf_cache_verify` keeps every input and compares it on each hit.
+    let use_leaf_cache: bool = spec_or(spec, "leaf_cache", true)?;
+    let leaf_cache_verify: bool = spec_or(spec, "leaf_cache_verify", false)?;
+    let leaf_cache_entries: usize =
+        spec_or(spec, "leaf_cache_entries", leaf_cache::DEFAULT_MAX_ENTRIES)?;
+    let leaf_cache_logits: usize =
+        spec_or(spec, "leaf_cache_logits", leaf_cache::DEFAULT_MAX_LOGITS)?;
     // Per-phase caps on the simulations one decision may spend. Absent or
     // `null` is the fixed budget, so existing specs are unchanged.
     let phase_budgets = match spec.get_item("phase_budgets")? {
@@ -246,6 +562,9 @@ pub fn selfplay<'py>(
     let step_limit: u32 = spec_or(spec, "step_limit", 20_000)?;
 
     if games == 0 {
+        if let Ok(mut last) = LAST_STATS.lock() {
+            *last = Some((DriverStats::default(), use_leaf_cache));
+        }
         return Ok(PyTuple::empty(py));
     }
 
@@ -289,6 +608,12 @@ pub fn selfplay<'py>(
         (temperature_rounds, temperature),
         (u8::MAX, final_temperature),
     ];
+
+    // One cache per evaluator, created on first use and dropped with this
+    // call: a network never sees another network's outputs, and the next call
+    // (new weights) starts empty.
+    let mut caches: Vec<Option<LeafCache>> = (0..evaluators.len()).map(|_| None).collect();
+    let mut stats = DriverStats::default();
 
     let mut finished: Vec<FinishedGame> = Vec::with_capacity(games);
     for start in (0..games).step_by(batch_games) {
@@ -550,88 +875,15 @@ pub fn selfplay<'py>(
                     })
                     .collect();
 
-                for mut group in groups {
+                for group in groups {
                     let rows = group.positions.len();
                     if rows == 0 {
                         continue;
                     }
-                    let total = group.index.len();
+                    stats.leaves += rows as u64;
+                    stats.slots += group.index.len() as u64;
 
-                    // Index the batch by exact contents. A leaf is identified
-                    // by its state row *and* its ordered action rows, so two
-                    // positions with the same board but different candidates
-                    // stay separate. The evaluator never sees a duplicate.
-                    let dedupe = if dedupe_leaves {
-                        Some(LeafDedupe::from_packed(
-                            &group.states,
-                            STATE_DIM,
-                            &group.actions,
-                            ACTION_DIM,
-                            &group.index,
-                            rows,
-                        ))
-                    } else {
-                        None
-                    };
-                    let (scored_rows, scored_slots) = match &dedupe {
-                        Some(dedupe) => (dedupe.unique_rows(), dedupe.unique_slots()),
-                        None => (rows, total),
-                    };
-                    let (scored_states, scored_actions) = match &dedupe {
-                        Some(dedupe) => (dedupe.states().to_vec(), dedupe.actions().to_vec()),
-                        None => (
-                            std::mem::take(&mut group.states),
-                            std::mem::take(&mut group.actions),
-                        ),
-                    };
-                    let scored_index = match &dedupe {
-                        Some(dedupe) => dedupe.index().to_vec(),
-                        None => group.index.clone(),
-                    };
-
-                    let state_array = array2(py, scored_rows, STATE_DIM, scored_states)?;
-                    let action_array = array2(py, scored_slots, ACTION_DIM, scored_actions)?;
-                    let index_array = numpy::ndarray::Array1::from_vec(scored_index)
-                        .into_pyarray(py)
-                        .unbind();
-                    let mask = vec![1.0f32; scored_slots];
-                    let mask_array = PyArray1::from_vec(py, mask).unbind();
-
-                    let reply = evaluators[group.model]
-                        .call1(py, (state_array, action_array, index_array, mask_array))?;
-                    let (logits, values): (PyReadonlyArray1<f32>, PyReadonlyArray2<f32>) =
-                        reply.extract(py)?;
-                    let logits = logits.as_slice()?;
-                    let values = values.as_slice()?;
-                    if logits.len() != scored_slots {
-                        return Err(PyValueError::new_err(format!(
-                            "evaluator returned {} logits for {scored_slots} candidates",
-                            logits.len()
-                        )));
-                    }
-                    if values.len() != scored_rows * N_HOUSES {
-                        return Err(PyValueError::new_err(format!(
-                            "evaluator returned {} values for {scored_rows} leaves",
-                            values.len()
-                        )));
-                    }
-
-                    // Restore the full packed layout before the per-leaf
-                    // softmax: each duplicate gets exactly the bits its own
-                    // forward pass would have produced.
-                    let logits: Cow<'_, [f32]> = match &dedupe {
-                        Some(dedupe) => Cow::Owned(dedupe.scatter_logits(logits)),
-                        None => Cow::Borrowed(logits),
-                    };
-                    let values: Cow<'_, [f32]> = match &dedupe {
-                        Some(dedupe) => Cow::Owned(dedupe.scatter_values(values, N_HOUSES)),
-                        None => Cow::Borrowed(values),
-                    };
-                    debug_assert_eq!(logits.len(), total);
-                    debug_assert_eq!(values.len(), rows * N_HOUSES);
-                    let priors = segment_softmax(logits.as_ref(), &group.index, rows);
-
-                    // Scatter each leaf's slice back to its simulation.
+                    // Each leaf's candidate-slot range in the packed layout.
                     let mut bounds = Vec::with_capacity(rows + 1);
                     bounds.push(0usize);
                     for position in &group.positions {
@@ -640,6 +892,34 @@ pub fn selfplay<'py>(
                                 + pending[*position].1.actions.len(),
                         );
                     }
+
+                    let (logits, values) = if use_leaf_cache {
+                        let cache = caches[group.model].get_or_insert_with(|| {
+                            LeafCache::new(leaf_cache_entries, leaf_cache_logits, leaf_cache_verify)
+                        });
+                        evaluate_cached(
+                            py,
+                            &evaluators[group.model],
+                            cache,
+                            leaf_cache_verify,
+                            &group,
+                            &bounds,
+                            &mut stats,
+                        )?
+                    } else {
+                        evaluate_direct(
+                            py,
+                            &evaluators[group.model],
+                            &group,
+                            dedupe_leaves,
+                            &mut stats,
+                        )?
+                    };
+                    debug_assert_eq!(logits.len(), group.index.len());
+                    debug_assert_eq!(values.len(), rows * N_HOUSES);
+                    let priors = segment_softmax(&logits, &group.index, rows);
+
+                    // Scatter each leaf's slice back to its simulation.
                     for (row, position) in group.positions.iter().enumerate() {
                         let mut value = [0.0f64; N_HOUSES];
                         for (slot, entry) in value.iter_mut().enumerate() {
@@ -701,6 +981,19 @@ pub fn selfplay<'py>(
                 rounds: game.state.round,
             });
         }
+    }
+
+    for cache in caches.iter().flatten() {
+        let cache_stats = cache.stats();
+        stats.cache_inserts += cache_stats.inserts;
+        stats.cache_evicted += cache_stats.evicted;
+        stats.cache_rotations += cache_stats.rotations;
+        stats.cache_verified += cache_stats.verified;
+        stats.cache_peak_entries += cache_stats.peak_entries;
+        stats.cache_peak_logits += cache_stats.peak_logits;
+    }
+    if let Ok(mut last) = LAST_STATS.lock() {
+        *last = Some((stats, use_leaf_cache));
     }
 
     // Pack the examples into flat buffers the replay buffer can slice.

@@ -586,6 +586,7 @@ def _run_training(args: argparse.Namespace) -> int:
         phase_budgets=rust_engine.resolve_phase_budgets(args.phase_budgets),
         leaf_backend=args.leaf_backend,
         leaf_checkpoint=str(checkpoint),
+        leaf_cache=args.leaf_cache == "on",
     )
     # The caps are per decision and divided by --determinizations like
     # --simulations, so a run that kept the switch off is byte-identical to the
@@ -1388,6 +1389,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Planning/Mustering/Action/Bidding at 32, Wildling attacks at 16 and "
             "keeps 64 for Raven/Combat/Westeros; the cap is divided by "
             "--determinizations exactly like --simulations"
+        ),
+    )
+    train.add_argument(
+        "--leaf-cache",
+        choices=("on", "off"),
+        default="on",
+        help=(
+            "the self-play driver's cross-pass leaf evaluation cache (default: "
+            "on). Exact for a pure row-wise evaluator; 'off' is the A/B switch"
         ),
     )
     train.add_argument(

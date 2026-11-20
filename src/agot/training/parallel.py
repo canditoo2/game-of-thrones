@@ -65,6 +65,10 @@ class SelfPlayPlan:
     #: Checkpoint whose directory holds the ONNX graph cache. Workers only get a
     #: state dict, so they need the path explicitly to share one graph.
     leaf_checkpoint: str | None = None
+    #: The Rust driver's cross-pass leaf evaluation cache. Exact for a pure
+    #: row-wise evaluator (torch, onnx-fp32 in practice); with int8 a cached
+    #: leaf keeps the scores of the batch it was first quantized in.
+    leaf_cache: bool = True
 
     def temperature_schedule(self) -> tuple[tuple[int, float], ...]:
         """``(last_round, temperature)`` bands handed to the self-play loop."""
@@ -87,6 +91,7 @@ def _options(plan: SelfPlayPlan) -> dict:
         "phase_budgets": plan.phase_budgets,
         "leaf_backend": plan.leaf_backend,
         "leaf_checkpoint": plan.leaf_checkpoint,
+        "leaf_cache": plan.leaf_cache,
     }
 
 
@@ -154,6 +159,7 @@ def _play_chunk(configs: list[GameConfig], options: dict) -> list[GameRecord]:
                 leaf_checkpoint=options.get("leaf_checkpoint"),
                 # One thread per worker process, matching `torch.set_num_threads(1)`.
                 leaf_threads=1,
+                leaf_cache=options.get("leaf_cache", True),
             )
         )
     return records
