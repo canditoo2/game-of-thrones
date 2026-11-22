@@ -136,9 +136,13 @@ Durable facts only, each with the command that proves it. Measured 2026-11-11 on
 
 ## Not measured
 
-- Nothing in iterations 006–010 was run on the 2-vCPU Colab runtime. The subnormal penalty, the
-  thread flags and the contention between the background snapshot and two self-play workers
-  all depend on that CPU; the new log timers will show them on the next run.
+- Nothing in iterations 006–010 was run on the 2-vCPU Colab runtime itself. The nearest this
+  box gets is pinning the whole A/B tree to two logical CPUs (`cpu2_pin.py`, mask 0x5, two
+  physical cores, 2026-11-22): 2.78x median per iteration over four paired rounds (1.49–4.83x;
+  2.63–4.83x without the one round whose branch self-play was anomalous). The baseline arm
+  degraded more than the branch as the box throttled, so the ratio does not shrink in the
+  Colab shape. Colab's own vCPUs, disk and contention are still unmeasured: the subnormal
+  penalty, the thread flags and the snapshot/worker contention still need a real run to confirm.
 
 ## Effectiveness checks for iterations 006–010 (2026-11-20)
 
@@ -168,3 +172,33 @@ All against commit `7952ae2`, run7 resumed, run8 launch flags, 32 games per iter
 - One epoch of training raised the held-out value MSE in every arm (0.526 → 0.53–0.56 on one
   set, 0.585 → 0.59–0.62 on the other) while the training value loss is 0.12–0.17: the value
   head memorises game outcomes. Not caused by this work, and not addressed by it.
+
+## int8 search fidelity at game level (2026-11-22)
+
+Same harness as the section above (run7 resumed, run8 flags, 32 games, one iteration per
+arm), int8 arms against their fp32 twins plus two controls. `replay_agree.py` compares only
+the new replay rows, game by game: games segment at strict decreases of the encoder's round
+feature (column 78 of the state vector) and pair up by index, because an iteration plays the
+same seeds in the same order. A pair diverges at the first row where the state or the
+top-visit candidate differs; the other 31 games keep their own independent score.
+
+- **int8 self-play is deterministic run to run.** A re-run of the baseline int8 arm with the
+  same seed reproduced all 17 594 new rows bit for bit (32/32 games, zero policy-target
+  differences). The batch composition the quantizer sees does not depend on scheduling, so
+  every difference below is quantization noise, not run-to-run variance.
+- **int8 games diverge from the exact (fp32) search almost immediately — on the baseline
+  driver too.** Baseline int8 vs baseline fp32: 0/32 identical games, 2.7 % of decisions
+  (median first flipped move at row 3 of ~526). Branch int8 vs branch fp32: 0/32, 2.4 %,
+  median row 3. The diverged games still end with the same result in 16/32 and 13/32 cases.
+  This is the game-level face of the documented leaf error (value |diff| mean 0.059, max 1.06).
+- **The branch does not add deviation.** At states that are still equal the branch's policy
+  targets differ on a similar share of rows as the baseline's (105 of 393 vs 131 of 456) but by
+  much less (max |dpol| 0.175 vs 0.516). The cross-pipeline int8 distance (baseline int8 vs
+  branch int8, same seed: median flip at row 20, 3.3 % of decisions) is the same order as each
+  pipeline's own int8-vs-fp32 noise.
+- **Different seeds are the floor:** baseline int8 with `--seed 1` shares 0.2 % of decisions
+  with the default-seed run (median first flip at row 1).
+- For scale, fp32 against fp32 is exact: baseline vs branch differs in one policy target of
+  17 582 (one moved visit), and the branch arm with `--leaf-cache off --leaf-compact off` is
+  bit-identical to the baseline. Compare pipelines in fp32; in int8 the quantizer noise
+  dominates after a handful of decisions.

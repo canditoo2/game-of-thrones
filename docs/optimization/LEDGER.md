@@ -50,11 +50,21 @@ Branch: `optimization/speed-leaf-engine`, based on `b01c99a`.
 | — | 2026-11-20 | combined | same | `seconds` − selfplay − train | 2.64 s | 1.18 s | 2.22x (2.18–2.54) | — | `3da4097` |
 | — | 2026-11-20 | combined | same | process wall, 2 iterations incl. start-up and restore | 94.29 s | 43.22 s | 2.16x (2.03–2.20) | — | `3da4097` |
 | — | 2026-11-20 | combined | same, `--leaf-backend onnx-fp32` on the branch arm only (baseline stays int8) | `seconds` / `seconds_selfplay` | 43.25 s / 18.21 s | 18.29 s / 7.77 s | **2.30x** (2.18–2.52) / 2.21x | — | `3da4097` |
+| — | 2026-11-22 | combined | 006–010 vs `7952ae2`, whole A/B tree pinned to two logical CPUs (`cpu2_pin.py 5`: affinity mask 0x5, two physical cores, the Colab shape; same protocol as the 2.33x rows) | `seconds` (iteration) | 101–148 s | 31–68 s | **2.78x median of 4 paired rounds (1.49–4.83)** | — | `3da4097` |
+| — | 2026-11-22 | combined | same | `seconds_selfplay` | 26.7–50.2 s | 8.9–22.1 s | **3.12x median (1.21–5.61)** | — | same |
+| — | 2026-11-22 | combined | same | `seconds_train` | 63.8–105.0 s | 16.7–41.0 s | **2.63x median (1.74–6.29)** | — | same |
 
 The combined rows were measured against `b01c99a` itself (`git checkout b01c99a -- src/agot`, run,
 `git checkout HEAD -- src/agot`, run, five rounds) because this box's clock drifts by more than the
 effect size between sessions. Read them as the authoritative before/after; the single-arm numbers
 in `iterations/000-baseline.md` were taken in an earlier session and are only comparable inside it.
+
+The 2026-11-22 rows pin the whole tree to two logical CPUs. The box throttles under sustained
+two-core load (the documented clock collapse), so the per-round spread is wide and the paired
+ratio is the result, not the absolute times. The one 1.49x round had a branch self-play of 22.1 s
+against 8.9–12.2 s in every other round; without it the four rounds span 2.63–4.83x (median 2.92x).
+The baseline arm degraded more than the branch as the run went on, which is the expected
+direction: the branch's changes cut per-work cost, which matters more when cores are scarce.
 
 ## Rejected / no effect (worth remembering)
 

@@ -103,7 +103,11 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   <leaves.npz> --replay <agot.replay.npz>` (per-call time, policy KL and value drift of full
   vs compact, fp32 vs int8, against torch). Note that int8 is not round-off: on run7's real
   leaves full int8 moves the value by 0.059 on average and up to 1.06
-  (`docs/optimization/iterations/008-compact-leaf-graph.md`).
+  (`docs/optimization/iterations/008-compact-leaf-graph.md`), and at game level that noise
+  flips a near-tied move within the first few decisions of every self-play game on both the
+  old and the new driver (0/32 identical games vs the fp32 twins; a same-seed rerun is
+  bit-identical, `docs/optimization/FINDINGS.md`), so compare pipelines on their buffers in
+  fp32, never in int8.
 - Leaf evaluation cache (Rust driver, on by default; `agot train --leaf-cache {on,off}`, spec
   key `leaf_cache`): about 73% of the leaves of one `selfplay()` call repeat a network input
   already scored in that call, so the driver keeps each input's raw logits and values
@@ -117,7 +121,9 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
 - Speed record of 2026-11-20 (`docs/optimization/LEDGER.md`, iterations 006-010): one run8-shaped
   iteration is 2.33x faster than commit `7952ae2` on this PC (self-play 2.57x, training pass
   2.22x), and 2.30x with `--leaf-backend onnx-fp32`, which now costs about what int8 does and
-  has none of its value drift. None of it has been measured on Colab yet.
+  has none of its value drift. None of it has been measured on Colab yet; with the whole A/B
+  tree pinned to two logical CPUs (the Colab shape, LEDGER 2026-11-22) the same protocol gives
+  2.78x median over four paired rounds — the advantage does not shrink when cores are scarce.
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 
