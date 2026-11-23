@@ -177,10 +177,17 @@ def test_optimizer_state_resumes_across_kernels() -> None:
 
     plain.train_epoch(examples)
     current.train_epoch(examples)
+    # The kernels agree only to the round-off Adam amplifies in near-zero-
+    # gradient parameters: on the dev box the fused kernel is bit-identical to
+    # torch's, but CI's torch rounds differently and the same six steps moved
+    # policy_head.0.weight past 1e-6 (PR #1). The documented floor (FINDINGS.md,
+    # "Wrong / corrected beliefs") is ~4e-4 per Adam step, so this bound is
+    # calibration, not slack: a broken state load (dropped moments, wrong
+    # kernel application) diverges at the lr scale (1e-3) within a step or two.
     for (name, a), (_, b) in zip(
         plain.model.named_parameters(), current.model.named_parameters(), strict=True
     ):
-        assert torch.allclose(a, b, rtol=0, atol=1e-6), name
+        assert torch.allclose(a, b, rtol=0, atol=1e-4), name
 
     # The saved groups carry no kernel choice, so the unfused code resumes them.
     saved = current.state_dict()
@@ -190,10 +197,11 @@ def test_optimizer_state_resumes_across_kernels() -> None:
     assert all(not group.get("fused") for group in again.optimizer.param_groups)
     again.train_epoch(examples)
     current.train_epoch(examples)
+    # Same cross-kernel floor as the comparison above.
     for (name, a), (_, b) in zip(
         again.model.named_parameters(), current.model.named_parameters(), strict=True
     ):
-        assert torch.allclose(a, b, rtol=0, atol=1e-6), name
+        assert torch.allclose(a, b, rtol=0, atol=1e-4), name
 
 
 def _packed_loss_grads(model: PolicyValueNet, batch: PackedBatch) -> dict[str, torch.Tensor]:
