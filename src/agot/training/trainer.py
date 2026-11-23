@@ -10,7 +10,8 @@ The training objective is the AlphaZero one, generalised to six players:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -54,6 +55,27 @@ class PackedBatch:
     outcome: torch.Tensor
     outcome_mask: torch.Tensor
     rows: int
+
+    @classmethod
+    def from_arrays(
+        cls,
+        state: np.ndarray,
+        actions: np.ndarray,
+        index: np.ndarray,
+        policy: np.ndarray,
+        outcome: np.ndarray,
+        outcome_mask: np.ndarray,
+    ) -> PackedBatch:
+        """Wrap :meth:`ReplayBuffer.packed_batch` arrays without copying."""
+        return cls(
+            state=torch.from_numpy(state),
+            actions=torch.from_numpy(actions),
+            index=torch.from_numpy(index),
+            policy=torch.from_numpy(policy),
+            outcome=torch.from_numpy(outcome),
+            outcome_mask=torch.from_numpy(outcome_mask),
+            rows=len(state),
+        )
 
     def to(self, device: str) -> PackedBatch:
         return PackedBatch(
@@ -112,6 +134,72 @@ def _parameter_groups(model: nn.Module, weight_decay: float) -> list[dict]:
         {"params": decayed, "weight_decay": weight_decay},
         {"params": undecayed, "weight_decay": 0.0},
     ]
+
+
+def _adamw(groups, lr: float) -> torch.optim.AdamW:
+    """``AdamW`` with the fused CPU kernel when this torch has one.
+
+    The fused kernel does the whole update of a parameter in one pass instead
+    of six elementwise kernels, and it avoids the MKL ``sqrt`` path, which is
+    11x slower on the exact zeros a dead unit's second moment holds. On run7 it
+    makes the optimizer step 4x faster with bit-identical weights after an
+    epoch. Torch releases without CPU support raise when asked for it, so the
+    capability is probed rather than assumed from a version number. ``groups``
+    is a factory because a failed constructor may have mutated the dicts.
+    """
+    try:
+        return torch.optim.AdamW(groups(), lr=lr, fused=True)
+    except (RuntimeError, TypeError, ValueError):
+        return torch.optim.AdamW(groups(), lr=lr)
+
+
+@contextmanager
+def flush_denormals() -> Iterator[None]:
+    """Run the enclosed block with flush-to-zero / denormals-are-zero on.
+
+    A dead ReLU unit receives an exactly-zero gradient, so its Adam moments decay
+    geometrically toward zero and settle in the float32 subnormal range for good
+    (``x * 0.9`` rounds back to ``x`` for the smallest subnormals). Every
+    arithmetic op that reads or writes a subnormal takes the CPU's microcode slow
+    path: on run7's state that made the optimizer step 2-3x slower. The update
+    such a moment produces is below float32 resolution of any weight, so
+    flushing it changes the trained weights by round-off at most (measured: bit
+    identical over a 965-step epoch).
+
+    The flags are per thread and process-global, so they are only held for the
+    gradient pass and switched back off afterwards: inference and self-play in
+    the same process keep IEEE subnormals. ``set_flush_denormal`` returns
+    ``False`` on CPUs without the feature, which makes this a no-op there.
+    """
+    enabled = torch.set_flush_denormal(True)
+    try:
+        yield
+    finally:
+        if enabled:
+            torch.set_flush_denormal(False)
+
+
+def scrub_subnormals(optimizer: torch.optim.Optimizer) -> int:
+    """Zero every subnormal entry in ``optimizer``'s state; return how many.
+
+    Flushing stops new subnormals from being written on threads that honour
+    the flags, but a state saved by an older run (or written by an OpenMP
+    thread that did not inherit the flags) still carries them. Adam's moments
+    for a dead unit stay where they are once zeroed (``0 * beta + 0``), so one
+    scrub per epoch keeps the state clean.
+    """
+    scrubbed = 0
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if key == "step" or not torch.is_tensor(value) or not value.is_floating_point():
+                continue
+            tiny = torch.finfo(value.dtype).tiny
+            mask = (value != 0) & (value.abs() < tiny)
+            count = int(mask.sum())
+            if count:
+                value.masked_fill_(mask, 0.0)
+                scrubbed += count
+    return scrubbed
 
 
 def collate(examples: list[Example]) -> Batch:
@@ -227,8 +315,8 @@ class Trainer:
     @property
     def optimizer(self) -> torch.optim.Optimizer:
         if self._optimizer is None:
-            self._optimizer = torch.optim.AdamW(
-                _parameter_groups(self.model, self.config.weight_decay),
+            self._optimizer = _adamw(
+                lambda: _parameter_groups(self.model, self.config.weight_decay),
                 lr=self.config.learning_rate,
             )
         return self._optimizer
@@ -242,29 +330,52 @@ class Trainer:
         of what :meth:`train_epoch` depends on. Adam's per-parameter moments are
         the reason a resumed run does not take a transient hit.
         """
+        optimizer = self.optimizer.state_dict()
+        # The kernel choice is a property of this process, not of the run: save
+        # the groups as the unfused default so any torch (or an older checkout)
+        # resumes the file with the implementation it supports.
+        for group in optimizer["param_groups"]:
+            if "fused" in group:
+                group["fused"] = None
         return {
-            "optimizer": self.optimizer.state_dict(),
+            "optimizer": optimizer,
             "rng": self.rng.bit_generator.state,
         }
 
     def load_state_dict(self, state: dict) -> None:
         if "optimizer" in state:
-            self.optimizer.load_state_dict(state["optimizer"])
+            optimizer = self.optimizer
+            # `load_state_dict` overwrites every group key, `fused` included,
+            # with the saved value; keep the kernel this process selected.
+            kernel = [group.get("fused") for group in optimizer.param_groups]
+            optimizer.load_state_dict(state["optimizer"])
+            for group, fused in zip(optimizer.param_groups, kernel, strict=True):
+                group["fused"] = fused
         if "rng" in state:
             self.rng.bit_generator.state = state["rng"]
     def train_epoch(self, examples: Sequence[Example]) -> TrainStats:
         if not examples:
             return TrainStats()
+        with flush_denormals():
+            scrub_subnormals(self.optimizer)
+            return self._train_epoch(examples)
+
+    def _train_epoch(self, examples: Sequence[Example]) -> TrainStats:
         self.model.train()
         stats = TrainStats()
         order = self.rng.permutation(len(examples))
         batch_size = self.config.batch_size
+        # A ReplayBuffer gathers whole batches by array indexing; any other
+        # sequence of examples goes through `collate_packed` one by one. Both
+        # produce identical tensors (tests/test_trainer_pass.py).
+        gather = examples.packed_batch if isinstance(examples, ReplayBuffer) else None
         for start in range(0, len(order), batch_size):
-            chunk = [
-                examples[int(index)]
-                for index in order[start : start + batch_size]
-            ]
-            batch = collate_packed(chunk).to(self.device)
+            chunk_order = order[start : start + batch_size]
+            if gather is not None:
+                batch = PackedBatch.from_arrays(*gather(chunk_order)).to(self.device)
+            else:
+                chunk = [examples[int(index)] for index in chunk_order]
+                batch = collate_packed(chunk).to(self.device)
             policy_loss, value_loss, total = self._step(batch)
             stats.batches += 1
             stats.policy_loss += policy_loss
@@ -360,23 +471,24 @@ class Trainer:
         total = 0.0
         batches = 0
         try:
-            for epoch in range(epochs):
-                for state, actions, index, outcome in dataset.batches(
-                    size, shuffle=True, seed=seed + epoch
-                ):
-                    state = state.to(self.device)
-                    actions = actions.to(self.device)
-                    index = index.to(self.device)
-                    outcome = outcome.to(self.device)
-                    _, values = self.model.forward_packed(state, actions, index)
-                    loss = ((values - outcome) ** 2).mean()
-                    self.optimizer.zero_grad(set_to_none=True)
-                    loss.backward()
-                    if self.config.grad_clip:
-                        nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
-                    self.optimizer.step()
-                    total += float(loss.detach())
-                    batches += 1
+            with flush_denormals():
+                for epoch in range(epochs):
+                    for state, actions, index, outcome in dataset.batches(
+                        size, shuffle=True, seed=seed + epoch
+                    ):
+                        state = state.to(self.device)
+                        actions = actions.to(self.device)
+                        index = index.to(self.device)
+                        outcome = outcome.to(self.device)
+                        _, values = self.model.forward_packed(state, actions, index)
+                        loss = ((values - outcome) ** 2).mean()
+                        self.optimizer.zero_grad(set_to_none=True)
+                        loss.backward()
+                        if self.config.grad_clip:
+                            nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+                        self.optimizer.step()
+                        total += float(loss.detach())
+                        batches += 1
         finally:
             for group, learning_rate in zip(self.optimizer.param_groups, saved_lr, strict=True):
                 group["lr"] = learning_rate

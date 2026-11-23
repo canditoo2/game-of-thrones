@@ -406,9 +406,15 @@ def test_selfplay_returns_packed_examples():
 
 
 def test_selfplay_batches_the_network_calls():
-    """The point of the batch tier: many leaves per call, not one per decision."""
+    """The point of the batch tier: many leaves per call, not one per decision.
+
+    This measures the callback shape, so it runs without the cross-pass leaf
+    cache: with it, a uniform evaluator's leaves are nearly all cache hits and
+    never reach the callback. The cached path's batching is pinned per pass in
+    `test_selfplay_batches_each_pass_with_the_leaf_cache`.
+    """
     calls: list = []
-    core.selfplay(SPEC, uniform_evaluator(calls))
+    core.selfplay(dict(SPEC, leaf_cache=False), uniform_evaluator(calls))
     assert calls, "the evaluator must be called"
 
     # A call carries at most one leaf per game in the batch, and the tail of a
@@ -418,6 +424,25 @@ def test_selfplay_batches_the_network_calls():
     assert average > SPEC["batch_games"] * 0.8, average
     # Every leaf's candidates are scored in the same call, so a leaf is never
     # charged the padding of its neighbours.
+    assert all(rows >= leaves for leaves, rows in calls)
+
+
+def test_selfplay_batches_each_pass_with_the_leaf_cache():
+    """With the cache on, a pass still gathers one leaf per game in the batch.
+
+    The callback only sees the misses, so batching is judged per pass: every
+    pass either makes one callback or none, and the pass carries ~batch_games
+    leaves in all (hits, merged repeats and misses together).
+    """
+    calls: list = []
+    core.selfplay(SPEC, uniform_evaluator(calls))
+    stats = core.selfplay_stats()
+    assert stats["leaf_cache"] is True
+    assert calls, "the evaluator must be called"
+    assert all(1 <= leaves <= SPEC["batch_games"] for leaves, _ in calls), calls[:5]
+    assert stats["evaluator_calls"] == len(calls)
+    passes = stats["evaluator_calls"] + stats["calls_skipped"]
+    assert stats["leaves"] / passes > SPEC["batch_games"] * 0.8
     assert all(rows >= leaves for leaves, rows in calls)
 
 

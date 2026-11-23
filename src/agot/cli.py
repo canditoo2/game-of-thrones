@@ -586,6 +586,7 @@ def _run_training(args: argparse.Namespace) -> int:
         phase_budgets=rust_engine.resolve_phase_budgets(args.phase_budgets),
         leaf_backend=args.leaf_backend,
         leaf_checkpoint=str(checkpoint),
+        leaf_cache=args.leaf_cache == "on",
     )
     # The caps are per decision and divided by --determinizations like
     # --simulations, so a run that kept the switch off is byte-identical to the
@@ -669,14 +670,27 @@ def _run_training(args: argparse.Namespace) -> int:
             # graph key covers the weights, not just the checkpoint file, so this
             # is also correct for the first iteration of a fresh run, when the
             # checkpoint does not exist yet.
-            _prepare_leaf_graph(model, checkpoint, args.leaf_backend)
+            leaf_graph = _prepare_leaf_graph(
+                model,
+                checkpoint,
+                args.leaf_backend,
+                buffer=buffer if args.leaf_compact == "auto" else None,
+            )
+            plan.leaf_keep = leaf_graph["keep"]
             selfplay_started = time.time()
             records = parallel_self_play(
                 model, plan, base_config=config, executor=executor
             )
             seconds_selfplay = time.time() - selfplay_started
+            # The previous iteration's snapshot was compressed in the background
+            # while this one calibrated and played; it must be on disk before
+            # the buffer changes (`extend` would also wait, but here an error is
+            # reported instead of stopping the run).
+            replay_wait = _finish_replay_snapshot(buffer)
+            extend_started = time.time()
             for record in records:
                 buffer.extend(record.examples)
+            seconds_extend = time.time() - extend_started
             sample = [
                 example.policy
                 for record in records[:4]
@@ -701,9 +715,12 @@ def _run_training(args: argparse.Namespace) -> int:
             # The search and its leaf batches stay on CPU; only the gradient
             # pass moves to the GPU.
             model.to(device)
+            seconds_trainer_restore = None
             if pending_trainer_state is not None:
+                restore_started = time.time()
                 trainer.load_state_dict(pending_trainer_state)
                 pending_trainer_state = None
+                seconds_trainer_restore = round(time.time() - restore_started, 3)
             train_started = time.time()
             history = trainer.train(buffer)
             human_stats = {}
@@ -717,7 +734,9 @@ def _run_training(args: argparse.Namespace) -> int:
             last = history[-1] if history else {}
             model.to("cpu")
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            save_started = time.time()
             model.save(str(checkpoint))
+            seconds_checkpoint = time.time() - save_started
             # No graph preparation here: the next iteration exports once, right
             # before the games, from exactly these weights. Doing it in both
             # places exported the same graph twice per iteration.
@@ -743,6 +762,20 @@ def _run_training(args: argparse.Namespace) -> int:
                 # disconnect, and a silent fallback to torch would otherwise
                 # look like a slow run rather than a missing extra.
                 "leaf_backend": args.leaf_backend,
+                # Units kept per trunk layer by the compact leaf graph (None =
+                # the full graph) and what calibrating and exporting cost; that
+                # cost lands in `seconds`, outside both phase timers.
+                "leaf_compact": leaf_graph["widths"],
+                "seconds_leaf_calibration": leaf_graph["seconds_calibration"],
+                "seconds_leaf_graph": leaf_graph["seconds"],
+                # The rest of the bookkeeping outside both phase timers, so the
+                # remainder of `seconds` stays attributed.
+                "seconds_extend": round(seconds_extend, 3),
+                # Time this iteration blocked on the previous background
+                # snapshot, and what that snapshot cost in its own thread.
+                "seconds_replay_wait": replay_wait["wait"],
+                "seconds_replay_snapshot": replay_wait["snapshot"],
+                "seconds_trainer_restore": seconds_trainer_restore,
                 "examples_new": sum(len(record.examples) for record in records),
                 "games": len(records),
                 "buffer": len(buffer),
@@ -869,14 +902,23 @@ def _run_training(args: argparse.Namespace) -> int:
             run.gate_failures = gate_failures
             run.trainer = trainer.state_dict()
             run.gate_mode = args.gate_mode
+            save_started = time.time()
             run.save(state_file)
+            record["seconds_checkpoint"] = round(
+                seconds_checkpoint + time.time() - save_started, 3
+            )
             if args.buffer_save_every > 0 and (
                 (iteration + 1) % args.buffer_save_every == 0
             ):
+                # Compressed in a background thread that overlaps the next
+                # iteration's calibration and self-play; written to a temporary
+                # and renamed, so an interruption keeps the previous snapshot.
+                save_started = time.time()
                 try:
-                    buffer.save(str(replay_file))
+                    buffer.save_async(str(replay_file))
                 except Exception as error:  # never lose training over a snapshot
                     print(f"replay buffer not saved: {error}", flush=True)
+                record["seconds_replay_save"] = round(time.time() - save_started, 3)
             # The iteration is committed from here on: a resume cannot re-run
             # it, so enqueueing the gate candidate now cannot duplicate a
             # directory while another process is playing it.
@@ -915,12 +957,39 @@ def _run_training(args: argparse.Namespace) -> int:
             if stop_training:
                 break
     finally:
+        # Never end a run (normally or on an exception) with the last snapshot
+        # still being written.
+        _finish_replay_snapshot(buffer)
         if executor is not None:
             executor.shutdown()
     return 0
 
 
-def _prepare_leaf_graph(model, checkpoint: Path, backend: str) -> None:
+def _finish_replay_snapshot(buffer) -> dict:
+    """Wait for a background replay snapshot; report, never raise, its failure.
+
+    Returns the seconds spent waiting here and the snapshot's own duration
+    (``None`` when no snapshot was pending).
+    """
+    if not buffer.save_pending:
+        return {"wait": None, "snapshot": None}
+    started = time.time()
+    try:
+        buffer.wait_save()
+    except Exception as error:  # never lose training over a snapshot
+        print(f"replay buffer not saved: {error}", flush=True)
+        snapshot = None
+    else:
+        snapshot = buffer.last_save_seconds
+    return {
+        "wait": round(time.time() - started, 3),
+        "snapshot": None if snapshot is None else round(snapshot, 3),
+    }
+
+
+def _prepare_leaf_graph(
+    model, checkpoint: Path, backend: str, *, buffer=None
+) -> dict:
     """Export the ONNX graph once, in the parent, before the workers need it.
 
     Without this every self-play worker would rebuild the same graph from the
@@ -928,15 +997,48 @@ def _prepare_leaf_graph(model, checkpoint: Path, backend: str) -> None:
     iteration). Doing it here costs one export per iteration instead of one per
     process, and leaves the workers with a plain cache hit.
 
+    With ``buffer`` (``--leaf-compact auto``) and at least
+    ``onnx_backend.MIN_CALIBRATION_EXAMPLES`` examples in it, the trunk units
+    that fire on the replay buffer are calibrated here and the compact graph is
+    exported instead; the returned keep-sets travel to the workers in the plan
+    so they open this same graph. Too little data, or ``--leaf-backend torch``,
+    keeps the full network.
+
     Only the graph is built here: an ``InferenceSession`` is a per-process
     resource, and the self-play path opens its own. Creating one just to throw
     it away cost ~0.1 s per iteration.
     """
+    info = {"keep": None, "widths": None, "seconds_calibration": None, "seconds": None}
     if backend == "torch":
-        return
-    from agot.nn.onnx_backend import ensure_graph
+        return info
+    from agot.nn import onnx_backend
 
-    ensure_graph(model, backend, checkpoint=str(checkpoint))
+    started = time.time()
+    keep = None
+    rows = _replay_rows(buffer) if buffer is not None else None
+    if rows is not None and len(rows[0]) >= onnx_backend.MIN_CALIBRATION_EXAMPLES:
+        keep = onnx_backend.calibrate_keep(model, *rows)
+        info["seconds_calibration"] = round(time.time() - started, 3)
+    onnx_backend.ensure_graph(model, backend, checkpoint=str(checkpoint), keep=keep)
+    info["keep"] = keep
+    info["widths"] = onnx_backend.keep_widths(keep)
+    info["seconds"] = round(time.time() - started, 3)
+    return info
+
+
+def _replay_rows(buffer):
+    """``(states, candidate rows)`` of a replay buffer, as views, or ``None``.
+
+    Reads the buffer's packed arrays in place (the first ``len(buffer)`` states
+    and the candidate rows they own), so calibration copies nothing. A buffer
+    without that layout yields ``None``, which keeps the full leaf graph.
+    """
+    try:
+        examples = len(buffer)
+        rows = int(buffer._offsets[examples])
+        return buffer._states[:examples], buffer._actions[:rows]
+    except (AttributeError, IndexError, TypeError):
+        return None
 
 
 def _evaluate_model(model, config: GameConfig, args: argparse.Namespace):
@@ -1391,6 +1493,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     train.add_argument(
+        "--leaf-cache",
+        choices=("on", "off"),
+        default="on",
+        help=(
+            "the self-play driver's cross-pass leaf evaluation cache (default: "
+            "on). Exact for a pure row-wise evaluator; 'off' is the A/B switch"
+        ),
+    )
+    train.add_argument(
         "--train-threads",
         type=int,
         default=None,
@@ -1498,6 +1609,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     add_leaf_backend(train)
+    train.add_argument(
+        "--leaf-compact",
+        choices=["auto", "off"],
+        default="auto",
+        help=(
+            "auto (default): once the replay buffer holds enough examples, export "
+            "the self-play leaf graph without the trunk units that never fire on "
+            "it (exact on every measured search leaf, ~2.6x cheaper in fp32); "
+            "off: always the full graph. ONNX leaf backends only; evaluation and "
+            "the gate always use the full graph"
+        ),
+    )
     train.set_defaults(func=cmd_train)
 
     return parser

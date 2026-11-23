@@ -46,6 +46,17 @@ from agot.engine.observation import (
 class PolicyValueNet(nn.Module):
     """A scorer MLP over ``[state, action]`` plus a per-house value head."""
 
+    #: Training-path switch for the candidate rows (the ~1000-row half of every
+    #: batch). A ReLU column that is zero for the whole batch adds nothing to
+    #: the next matmul and gets an exactly-zero weight gradient, so the action
+    #: trunk's later layers and the action half of the scorer's first layer run
+    #: on the live columns only (70-76 % of them are dead per run7 batch). The
+    #: sum is the same up to summation order: per-step gradients agree to
+    #: round-off, and an epoch drifts no further than changing the thread count
+    #: does. Set it to False on an instance for the dense, bit-reproducible path.
+    #: Inference (`_forward_packed_inference`, the ONNX graph) never uses it.
+    live_columns: bool = True
+
     def __init__(
         self,
         state_dim: int = STATE_DIM,
@@ -151,11 +162,16 @@ class PolicyValueNet(nn.Module):
         if not torch.is_grad_enabled():
             return self._forward_packed_inference(state, actions, index)
         h = self.state_trunk(state)  # (B, H)
-        a = self.action_trunk(actions)  # (T, H)
+        # Skip the candidate rows' all-zero ReLU columns (see `live_columns`).
+        sparse = self.live_columns
+        a = _run_live(self.action_trunk, actions) if sparse else self.action_trunk(actions)
         first = self.policy_head[0]
         weight = first.weight
         state_part = nn.functional.linear(h, weight[:, : self.hidden], first.bias)
-        action_part = nn.functional.linear(a, weight[:, self.hidden :])
+        if sparse:
+            action_part = _live_linear(a, weight[:, self.hidden :], None)
+        else:
+            action_part = nn.functional.linear(a, weight[:, self.hidden :])
         logits = self.policy_head[2](
             torch.relu(state_part[index] + action_part)
         ).squeeze(-1)
@@ -402,6 +418,33 @@ def segment_softmax(
         rows, dtype=logits.dtype, device=logits.device
     ).index_add_(0, index, shifted)
     return shifted / total[index]
+
+
+def _live_linear(
+    value: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> torch.Tensor:
+    """``linear(value, weight, bias)`` over the columns of ``value`` that are not all zero.
+
+    Exact for a ReLU output only: a dropped column contributes zero to the
+    product and gets a zero weight gradient either way, and the input gradient
+    it no longer receives is the one ReLU's backward would have zeroed.
+    """
+    live = value.any(dim=0).nonzero().squeeze(1)
+    if live.numel() == value.size(1):
+        return nn.functional.linear(value, weight, bias)
+    return nn.functional.linear(value.index_select(1, live), weight.index_select(1, live), bias)
+
+
+def _run_live(sequence: nn.Sequential, value: torch.Tensor) -> torch.Tensor:
+    """Run a Linear/ReLU stack, feeding each later Linear only the live columns."""
+    after_relu = False
+    for module in sequence:
+        if isinstance(module, nn.Linear) and after_relu:
+            value = _live_linear(value, module.weight, module.bias)
+        else:
+            value = module(value)
+        after_relu = isinstance(module, nn.ReLU)
+    return value
 
 
 def _mlp(input_dim: int, hidden: int, layers: int) -> nn.Sequential:

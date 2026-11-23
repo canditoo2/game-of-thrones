@@ -126,6 +126,32 @@ def test_export_and_load_round_trip(tmp_path) -> None:
     assert reused.path == backend.path
 
 
+@pytest.mark.parametrize("backend_name", ["onnx-fp32", "onnx-int8"])
+def test_the_native_run_path_returns_the_public_runs_bits(tmp_path, backend_name) -> None:
+    """The leaf call skips ORT's Python checks; its output must not change."""
+    model = _model(hidden=16, sharpness=1.0)
+    backend = onnx_backend.LeafBackend.from_model(model, backend_name, cache_dir=tmp_path)
+    assert backend._native_run is not None, "a CPU session exposes its native run"
+    for seed, widths in ((0, WIDTHS), (5, (1, 9, 2)), (7, (3,))):
+        state, actions, index, mask = _batch(seed=seed, widths=widths)
+        fast = backend(state, actions, index, mask)
+        public = backend.session.run(
+            list(onnx_backend.OUTPUT_NAMES),
+            {"state": state, "actions": actions, "index": index},
+        )
+        for got, want in zip(fast, public, strict=True):
+            assert got.dtype == want.dtype and got.shape == want.shape
+            assert got.tobytes() == want.tobytes()
+    # Without a native handle the public run is used.
+    backend._native_run = None
+    again = backend(*_batch())
+    first = onnx_backend.LeafBackend.from_model(model, backend_name, cache_dir=tmp_path)(
+        *_batch()
+    )
+    for got, want in zip(again, first, strict=True):
+        assert got.tobytes() == want.tobytes()
+
+
 def test_int8_output_shape_dtype_and_kernels(tmp_path) -> None:
     """int8 must keep the driver's contract and really hold int8 weights."""
     model = _model(hidden=16)
@@ -318,8 +344,10 @@ def test_auto_resolves_to_a_concrete_engine(monkeypatch) -> None:
     """``auto`` is a CLI alias: it must never reach a spec as-is."""
     monkeypatch.setattr(rust_engine, "onnx_runtime_available", lambda: True)
     assert rust_engine.resolve_leaf_backend("auto") == "onnx-fp32"
-    # A training run pays for quantization and gets the fast engine back.
-    assert rust_engine.resolve_leaf_backend("auto", training=True) == "onnx-int8"
+    # Since run8 a training run resolves to the exact fp32 engine: with the leaf
+    # cache and the compact graph it costs about what int8 does, without int8's
+    # value drift (docs/optimization/FINDINGS.md, "int8 search fidelity").
+    assert rust_engine.resolve_leaf_backend("auto", training=True) == "onnx-fp32"
     monkeypatch.setattr(rust_engine, "onnx_runtime_available", lambda: False)
     assert rust_engine.resolve_leaf_backend("auto") == "torch"
     assert rust_engine.resolve_leaf_backend("auto", training=True) == "torch"
@@ -335,3 +363,352 @@ def test_the_cli_defaults_to_auto_and_keeps_the_concrete_names() -> None:
     assert args.leaf_backend == "auto"
     assert set(cli.LEAF_BACKENDS) == set(rust_engine.LEAF_BACKENDS)
     assert set(cli.LEAF_BACKEND_CHOICES) == {"auto", *cli.LEAF_BACKENDS}
+
+
+# ---------------------------------------------------------------------------
+# Compact graphs: trunk units that never fire on the calibration data are cut
+# ---------------------------------------------------------------------------
+
+#: Units forced dead in every trunk layer of :func:`_dead_model`.
+DEAD = (1, 4, 9, 10, 17)
+
+
+def _dead_model(*, hidden: int = 24, seed: int = 0):
+    """A two-layer-trunk net with known dead and known live units.
+
+    Every unit in ``DEAD`` has a bias of -1e4, so it never fires; every other
+    trunk unit has a bias of +4 and non-negative weights, so it fires on every
+    row the tests use (a second layer only sees non-negative inputs). That
+    makes the expected keep-sets exact instead of statistical.
+    """
+    torch.manual_seed(seed)
+    model = PolicyValueNet(hidden=hidden, trunk_layers=2, value_context=True).eval()
+    with torch.no_grad():
+        model.policy_head[2].weight.mul_(40.0)
+        for layer in onnx_backend.trunk_linears(model):
+            layer.weight.abs_()
+            layer.bias.fill_(4.0)
+            layer.bias[list(DEAD)] = -1e4
+    return model
+
+
+def _calibration_rows(rows: int = 600, seed: int = 11):
+    rng = np.random.default_rng(seed)
+    states = rng.standard_normal((rows, STATE_DIM)).astype(np.float32)
+    actions = rng.standard_normal((rows * 6, ACTION_DIM)).astype(np.float32)
+    return states, actions
+
+
+def test_calibration_finds_exactly_the_dead_units() -> None:
+    model = _dead_model()
+    keep = onnx_backend.calibrate_keep(model, *_calibration_rows())
+    live = tuple(unit for unit in range(model.hidden) if unit not in DEAD)
+    assert len(keep) == 4, "two trunk layers each for the state and action trunks"
+    assert keep == (live,) * 4
+    assert onnx_backend.keep_widths(keep) == [model.hidden - len(DEAD)] * 4
+    # A small chunk must not change the answer (the maxima are accumulated).
+    assert onnx_backend.calibrate_keep(model, *_calibration_rows(), chunk=7) == keep
+
+
+def test_a_unit_that_fires_on_one_calibration_row_is_kept() -> None:
+    """One row is enough: calibration is a max, never a frequency."""
+    model = _dead_model()
+    unit = DEAD[0]
+    first = onnx_backend.trunk_linears(model)[0]  # state_trunk[0]
+    with torch.no_grad():
+        first.weight[unit].zero_()
+        first.weight[unit, 0] = 1.0
+        first.bias[unit] = -10.0  # fires only when state[0] > 10
+    states, actions = _calibration_rows()
+    states[:, 0] = np.clip(states[:, 0], -3.0, 3.0)
+    assert unit not in onnx_backend.calibrate_keep(model, states, actions)[0]
+    states[123, 0] = 10.5
+    assert unit in onnx_backend.calibrate_keep(model, states, actions)[0]
+
+    # The margin keeps units whose best pre-activation is just below zero, and
+    # only those: this one peaks at -0.5 on the calibration rows.
+    states[123, 0] = 9.5
+    assert unit not in onnx_backend.calibrate_keep(model, states, actions, margin=0.4)[0]
+    assert unit in onnx_backend.calibrate_keep(model, states, actions, margin=0.6)[0]
+    with pytest.raises(ValueError, match="non-negative"):
+        onnx_backend.calibrate_keep(model, states, actions, margin=-0.1)
+
+
+def test_a_layer_never_ends_up_empty() -> None:
+    model = _dead_model()
+    with torch.no_grad():
+        onnx_backend.trunk_linears(model)[1].bias.fill_(-1e4)  # state_trunk[2]
+    keep = onnx_backend.calibrate_keep(model, *_calibration_rows())
+    assert len(keep[1]) == 1, "the most active unit stays, so the graph has a layer"
+
+
+def _row_set(rows: np.ndarray) -> set[bytes]:
+    return {row.tobytes() for row in np.ascontiguousarray(rows, dtype=np.float32)}
+
+
+def _repeating_rows(seed: int = 5) -> np.ndarray:
+    """Candidate-like rows: a few distinct ones repeated many times, plus
+    sign-of-zero twins that compare equal as floats but not as bits."""
+    rng = np.random.default_rng(seed)
+    base = rng.standard_normal((40, ACTION_DIM)).astype(np.float32)
+    base[rng.random(base.shape) < 0.9] = 0.0
+    rows = base[rng.integers(0, len(base), size=3000)]
+    twin = rows[17].copy()
+    twin[twin == 0] = -0.0
+    return np.concatenate([rows, twin[None]])
+
+
+def test_distinct_rows_keeps_every_bit_pattern_and_drops_the_repeats() -> None:
+    rows = _repeating_rows()
+    distinct = onnx_backend.distinct_rows(rows)
+    assert _row_set(distinct) == _row_set(rows)
+    # Nearly one copy each: a repeat is kept twice only when the matmul rounded
+    # its key differently at another position in the batch.
+    assert len(_row_set(rows)) <= len(distinct) < 50
+    assert onnx_backend.distinct_rows(rows[:1]).tobytes() == rows[:1].tobytes()
+    assert onnx_backend.distinct_rows(rows[:0]).shape == (0, ACTION_DIM)
+
+
+def test_a_key_collision_never_drops_a_row(monkeypatch) -> None:
+    """Every key equal: the bitwise check must keep every differing row."""
+    rows = _repeating_rows()
+    monkeypatch.setattr(
+        onnx_backend, "_row_keys", lambda rows: np.zeros(len(rows), dtype=np.uint64)
+    )
+    distinct = onnx_backend.distinct_rows(rows, chunk=97)
+    assert _row_set(distinct) == _row_set(rows)
+
+
+@pytest.mark.parametrize("collide", [False, True])
+def test_calibration_over_distinct_rows_is_the_full_calibration(monkeypatch, collide) -> None:
+    model = _dead_model()
+    unit = DEAD[1]
+    first_action = onnx_backend.trunk_linears(model)[2]  # action_trunk[0]
+    with torch.no_grad():
+        first_action.weight[unit].zero_()
+        first_action.weight[unit, 3] = 1.0
+        first_action.bias[unit] = -10.0  # fires only when action[3] > 10
+    states, _ = _calibration_rows()
+    states = np.concatenate([states, states[::3]])  # repeated states too
+    actions = np.clip(_repeating_rows(), -3.0, 3.0)
+    if collide:
+        monkeypatch.setattr(
+            onnx_backend, "_row_keys", lambda rows: np.zeros(len(rows), dtype=np.uint64)
+        )
+    full = onnx_backend.calibrate_keep(model, states, actions, dedupe=False)
+    assert unit not in full[2]
+    assert onnx_backend.calibrate_keep(model, states, actions) == full
+    # One row that differs from a heavily repeated one in a single entry, and
+    # fires the unit: it must survive the grouping.
+    actions[2000] = actions[1]
+    actions[2000, 3] = 10.5
+    full = onnx_backend.calibrate_keep(model, states, actions, dedupe=False)
+    assert unit in full[2]
+    assert onnx_backend.calibrate_keep(model, states, actions) == full
+    assert onnx_backend.calibrate_keep(model, *_calibration_rows()) == onnx_backend.calibrate_keep(
+        model, *_calibration_rows(), dedupe=False
+    )
+
+
+@pytest.mark.parametrize("backend", ["onnx-fp32", "onnx-int8"])
+def test_the_compact_graph_matches_the_full_forward(tmp_path, backend) -> None:
+    """Exact (to fp32 round-off) on inputs from the calibration distribution."""
+    model = _dead_model()
+    keep = onnx_backend.calibrate_keep(model, *_calibration_rows())
+    compact = onnx_backend.LeafBackend.from_model(
+        model, backend, cache_dir=tmp_path, keep=keep
+    )
+    assert compact.keep_widths == [model.hidden - len(DEAD)] * 4
+    assert compact.path.name.endswith(f".{backend}.compact.onnx")
+    full = onnx_backend.LeafBackend.from_model(model, backend, cache_dir=tmp_path)
+    assert full.keep_widths is None and full.path != compact.path
+
+    graph = onnx.load(str(compact.path))
+    narrow = [
+        tensor.name
+        for tensor in graph.graph.initializer
+        if len(tensor.dims) == 2 and model.hidden - len(DEAD) in tensor.dims
+    ]
+    assert narrow, "the exported trunk weights must actually be narrower"
+
+    for seed, widths in enumerate((WIDTHS, (1, 9, 2), (5,))):
+        state, actions, index, mask = _batch(seed=100 + seed, widths=widths)
+        want_logits, want_values = _reference(model, state, actions, index)
+        logits, values = compact(state, actions, index, mask)
+        if backend == "onnx-fp32":
+            np.testing.assert_allclose(logits, want_logits, atol=1e-4)
+            np.testing.assert_allclose(values, want_values, atol=1e-5)
+        else:
+            # int8 is not exact by design; on this hand-built net (every live
+            # unit biased to +4) its rounding is far from a trained net's, so
+            # the int8 numerics are measured on real leaves instead
+            # (iteration 008). Here: the contract and real int8 kernels.
+            assert logits.shape == want_logits.shape and values.shape == want_values.shape
+            assert np.isfinite(logits).all() and (np.abs(values) <= 1.0).all()
+    if backend == "onnx-int8":
+        kinds = {node.op_type for node in graph.graph.node}
+        assert kinds & {"MatMulInteger", "QLinearMatMul", "MatMulIntegerToFloat"}
+
+
+def test_keeping_every_unit_is_the_full_arithmetic(tmp_path) -> None:
+    """The compact code path with nothing dropped reproduces the full graph."""
+    model = _model(hidden=16)
+    everything = tuple(
+        tuple(range(layer.out_features)) for layer in onnx_backend.trunk_linears(model)
+    )
+    compact = onnx_backend.LeafBackend.from_model(
+        model, "onnx-fp32", cache_dir=tmp_path, keep=everything
+    )
+    full = onnx_backend.LeafBackend.from_model(model, "onnx-fp32", cache_dir=tmp_path)
+    state, actions, index, mask = _batch()
+    want_logits, want_values = full(state, actions, index, mask)
+    logits, values = compact(state, actions, index, mask)
+    np.testing.assert_allclose(logits, want_logits, atol=1e-5)
+    np.testing.assert_allclose(values, want_values, atol=1e-6)
+
+
+def test_no_keep_sets_is_the_full_graph(tmp_path) -> None:
+    model = _model(hidden=16, sharpness=1.0)
+    cached = onnx_backend.ensure_graph(model, "onnx-fp32", cache_dir=tmp_path)
+    assert cached.key["keep"] is None
+    assert cached.path.name.endswith(".onnx-fp32.onnx")
+    assert onnx_backend.PackedGraph(model).keep is None
+    assert onnx_backend.ensure_graph(
+        model, "onnx-fp32", cache_dir=tmp_path, keep=None
+    ).rebuilt is False
+
+
+def test_the_key_refuses_a_graph_for_other_keep_sets(tmp_path) -> None:
+    """Keep-sets are part of the key: another set, or no set, never reuses a graph."""
+    import json
+
+    model = _dead_model()
+    keep = onnx_backend.calibrate_keep(model, *_calibration_rows())
+    first = onnx_backend.ensure_graph(model, "onnx-fp32", cache_dir=tmp_path, keep=keep)
+    assert first.rebuilt
+    # The same keep-sets in another order or with repeats are the same request.
+    shuffled = tuple(tuple(reversed(units)) + units[:1] for units in keep)
+    assert not onnx_backend.ensure_graph(
+        model, "onnx-fp32", cache_dir=tmp_path, keep=shuffled, rebuild=False
+    ).rebuilt
+
+    other = (keep[0] + (DEAD[0],),) + keep[1:]
+    with pytest.raises(onnx_backend.StaleGraphError, match="keep"):
+        onnx_backend.ensure_graph(
+            model, "onnx-fp32", cache_dir=tmp_path, keep=other, rebuild=False
+        )
+    rebuilt = onnx_backend.ensure_graph(model, "onnx-fp32", cache_dir=tmp_path, keep=other)
+    assert rebuilt.rebuilt and rebuilt.path == first.path
+
+    # A sidecar written before compaction existed (packed-v1, no keep field)
+    # must not pass for a compact graph, nor for a current full graph.
+    payload = dict(rebuilt.key)
+    payload.pop("keep")
+    payload["graph"] = "packed-v1"
+    rebuilt.sidecar.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(onnx_backend.StaleGraphError):
+        onnx_backend.ensure_graph(
+            model, "onnx-fp32", cache_dir=tmp_path, keep=other, rebuild=False
+        )
+    assert not onnx_backend.graph_is_fresh(
+        onnx_backend.graph_key(model, "onnx-fp32"), payload
+    )
+
+    with pytest.raises(ValueError, match="out of range"):
+        onnx_backend.ensure_graph(
+            model, "onnx-fp32", cache_dir=tmp_path, keep=((0, 999),) + keep[1:]
+        )
+    with pytest.raises(ValueError, match="keep-sets"):
+        onnx_backend.normalize_keep(model, keep[:2])
+
+
+def test_the_keep_sets_reach_the_leaf_evaluator(monkeypatch) -> None:
+    """Workers get the parent's keep-sets through the plan and the driver."""
+    from agot.training import parallel
+
+    keep = ((0, 1), (2,), (3,), (4, 5))
+    plan = SelfPlayPlan(games=2, leaf_backend="onnx-int8", leaf_keep=keep)
+    assert parallel._options(plan)["leaf_keep"] == keep
+    assert parallel._options(SelfPlayPlan())["leaf_keep"] is None
+    assert "leaf_keep" not in rust_engine.spec_for(plan), "the driver spec is unchanged"
+
+    captured: dict = {}
+
+    class FakeExtension:
+        def selfplay(self, spec, evaluator, decider=None, extra=None):
+            captured["spec"] = spec
+            return _empty_result()
+
+    class DummyEvaluator:
+        model = object()
+
+    def fake_leaf_evaluator(model, backend="torch", **kwargs):
+        captured["kwargs"] = kwargs
+        return "leaf"
+
+    monkeypatch.setattr(rust_engine, "core", lambda: FakeExtension())
+    monkeypatch.setattr(rust_engine, "leaf_evaluator", fake_leaf_evaluator)
+    rust_engine.try_batched_self_play(
+        DummyEvaluator(),
+        [GameConfig(seed=1, max_rounds=1)],
+        simulations=1,
+        leaf_backend="onnx-int8",
+        leaf_keep=keep,
+    )
+    assert captured["kwargs"]["keep"] == keep
+    assert "leaf_keep" not in captured["spec"]
+
+
+def test_the_torch_leaf_evaluator_ignores_keep_sets() -> None:
+    model = _dead_model()
+    keep = onnx_backend.calibrate_keep(model, *_calibration_rows())
+    evaluate = rust_engine.leaf_evaluator(model, "torch", keep=keep)
+    state, actions, index, mask = _batch()
+    logits, _ = evaluate(state, actions, index, mask)
+    np.testing.assert_array_equal(logits, _reference(model, state, actions, index)[0])
+
+
+def test_training_prepares_a_compact_graph_only_with_enough_data(
+    tmp_path, monkeypatch
+) -> None:
+    from agot.training.replay import Example, ReplayBuffer
+
+    model = _dead_model()
+    states, actions = _calibration_rows(rows=40)
+    buffer = ReplayBuffer(capacity=100)
+    for row in range(len(states)):
+        buffer.add(
+            Example(
+                state=states[row],
+                actions=actions[row * 6 : row * 6 + 6],
+                policy=np.full(6, 1 / 6, dtype=np.float32),
+                player=0,
+                outcome=np.zeros(N_HOUSES, dtype=np.float32),
+            )
+        )
+    checkpoint = tmp_path / "agot.pt"
+
+    args = cli.build_parser().parse_args(["train", "--checkpoint", "x.pt"])
+    assert args.leaf_compact == "auto"
+    torch_info = cli._prepare_leaf_graph(model, checkpoint, "torch", buffer=buffer)
+    assert torch_info["keep"] is None and torch_info["seconds"] is None
+
+    # Too little data (the default minimum is far above 40 examples): full graph.
+    small = cli._prepare_leaf_graph(model, checkpoint, "onnx-fp32", buffer=buffer)
+    assert small["keep"] is None and small["widths"] is None
+    assert (tmp_path / "agot.onnx-fp32.onnx").is_file()
+
+    monkeypatch.setattr(onnx_backend, "MIN_CALIBRATION_EXAMPLES", 40)
+    info = cli._prepare_leaf_graph(model, checkpoint, "onnx-fp32", buffer=buffer)
+    assert info["widths"] == [model.hidden - len(DEAD)] * 4
+    assert info["keep"] == onnx_backend.calibrate_keep(model, states, actions)
+    assert info["seconds_calibration"] is not None
+    assert (tmp_path / "agot.onnx-fp32.compact.onnx").is_file()
+    # A worker that receives the keep-sets opens that graph without exporting.
+    worker = onnx_backend.LeafBackend.from_model(
+        model, "onnx-fp32", checkpoint=checkpoint, keep=info["keep"]
+    )
+    assert worker.rebuilt is False
+
+    off = cli._prepare_leaf_graph(model, checkpoint, "onnx-fp32", buffer=None)
+    assert off["keep"] is None

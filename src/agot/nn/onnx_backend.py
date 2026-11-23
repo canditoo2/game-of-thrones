@@ -44,6 +44,25 @@ config, the backend and the graph revision. A cached graph is reused only when
 never scored with: :func:`ensure_graph` rebuilds it (the default), or raises
 :class:`StaleGraphError` when the caller passes ``rebuild=False``.
 
+Compact graphs
+--------------
+On a trained net most trunk units never fire: on run7's replay buffer the max
+pre-activation is <= 0 for 202 of 256 units of ``state_trunk[0]`` and 165-173
+of the other three trunk layers. A ReLU unit that never fires contributes an
+exact zero downstream, so :func:`calibrate_keep` measures, once per training
+iteration, which trunk units fire on the replay buffer, and the exported graph
+(``PackedGraph(model, keep)``) carries only those rows and columns. Training's
+leaves get ~2.6x cheaper in float32, and the scores do not change on any leaf
+where the dropped units stay silent, which was every one of 40k real search
+leaves measured (docs/optimization/iterations/008-compact-leaf-graph.md).
+
+Only the trunks are compacted: ``policy_head`` and ``value_head`` stay at full
+width, because hidden units of the heads that never fire on the replay buffer
+do fire on real leaves. The keep-sets join the cache key and the cached file
+name (``<stem>.<backend>.compact.onnx``), so a graph built for other keep-sets,
+or the full graph, is never reused for a compact request, and vice versa.
+``keep=None`` exports exactly the full graph.
+
 Requires the optional extra::
 
     pip install -e ".[onnx]"
@@ -66,7 +85,7 @@ import torch
 from torch import nn
 
 #: Bump when the exported graph changes, so every cache entry is rebuilt.
-GRAPH_REVISION = "packed-v1"
+GRAPH_REVISION = "packed-v2"
 #: Opset of the exported graph. 17 carries everything the packed forward needs
 #: (Range, Gather, MatMul) and is the newest opset ORT's quantizer handles well.
 EXPORT_OPSET = 17
@@ -87,7 +106,21 @@ KEY_FIELDS = (
     "weights",
     "checkpoint_sha256",
     "checkpoint_size",
+    "keep",
 )
+#: Fewest replay examples training calibrates on before it uses a compact
+#: graph. Measured on run7 (iteration 008): the most recent 33k examples (one
+#: production iteration, 64 games) still missed trunk units that fire on real
+#: search leaves (value drift up to 0.03-0.45); 45k and more missed none. A
+#: production buffer (``--buffer 80000``) holds 60-80k examples from its second
+#: iteration on, so this only keeps a fresh run's first iterations, and small
+#: buffers, on the full graph.
+MIN_CALIBRATION_EXAMPLES = 50_000
+#: Rows per calibration matmul. Larger batches measured no faster.
+CALIBRATION_CHUNK = 8192
+#: Seed of the projection that groups candidate rows before calibration. The
+#: grouping is verified bit for bit, so the seed only affects speed.
+ROW_KEY_SEED = 0x5EED_CA1B
 
 
 class StaleGraphError(RuntimeError):
@@ -119,6 +152,181 @@ def _onnx():
     return onnx
 
 
+def trunk_linears(model) -> list[nn.Linear]:
+    """The trunks' Linear layers in keep-set order: state trunk, then action trunk.
+
+    Every one of them is followed by a ReLU (``agot.nn.model._mlp``), which is
+    what makes dropping a unit that never fires exact.
+    """
+    layers = []
+    for trunk in (model.state_trunk, model.action_trunk):
+        modules = list(trunk)
+        for position, module in enumerate(modules):
+            if isinstance(module, nn.Linear):
+                follower = modules[position + 1] if position + 1 < len(modules) else None
+                if not isinstance(follower, nn.ReLU):
+                    raise ValueError("a trunk Linear is not followed by a ReLU")
+                layers.append(module)
+    return layers
+
+
+def normalize_keep(model, keep) -> tuple[tuple[int, ...], ...] | None:
+    """Validate keep-sets against ``model``; ``None`` means the full graph.
+
+    ``keep`` holds one sequence of unit indices per entry of
+    :func:`trunk_linears`. The result is sorted, de-duplicated tuples, so two
+    equal keep-sets always produce the same cache key.
+    """
+    if keep is None:
+        return None
+    layers = trunk_linears(model)
+    keep = tuple(tuple(sorted({int(unit) for unit in units})) for units in keep)
+    if len(keep) != len(layers):
+        raise ValueError(
+            f"expected {len(layers)} keep-sets (one per trunk layer), got {len(keep)}"
+        )
+    for units, layer in zip(keep, layers, strict=True):
+        if not units:
+            raise ValueError("a keep-set must keep at least one unit")
+        if units[0] < 0 or units[-1] >= layer.out_features:
+            raise ValueError(
+                f"keep-set index out of range for a layer of width {layer.out_features}"
+            )
+    return keep
+
+
+def keep_widths(keep) -> list[int] | None:
+    """How many units each trunk layer keeps (``None`` for the full graph)."""
+    return None if keep is None else [len(units) for units in keep]
+
+
+def _row_keys(rows: np.ndarray) -> np.ndarray:
+    """A 64-bit grouping key per row: two random projections, bit-cast.
+
+    Different rows may collide, and equal rows nearly always but not always
+    share a key (the matmul may round one row differently depending on where it
+    sits in the batch), so callers must verify (see :func:`distinct_rows`);
+    this is a speed device only.
+    """
+    generator = torch.Generator().manual_seed(ROW_KEY_SEED)
+    projection = torch.randn(rows.shape[1], 2, generator=generator, dtype=torch.float32)
+    with torch.inference_mode():
+        keys = torch.from_numpy(rows) @ projection
+    return np.ascontiguousarray(keys.numpy()).view(np.uint64).reshape(len(rows))
+
+
+def distinct_rows(rows: np.ndarray, *, chunk: int = 1 << 16) -> np.ndarray:
+    """``rows`` with bitwise-identical repeats (nearly all) removed, in row order.
+
+    Rows are grouped by :func:`_row_keys`; every row is then compared, bit for
+    bit, with its group's first row, and any row that differs is kept as well.
+    So every input row is either returned or bitwise equal to a returned row:
+    a key collision can only add rows, never drop one, and a forward pass over
+    the result reaches exactly the row values the full array holds. (A repeat
+    whose key came out different is merely scored twice.) A replay
+    buffer repeats candidate rows heavily (run7: 54k distinct of 1.29M), which
+    is what makes this pay.
+    """
+    rows = np.ascontiguousarray(rows, dtype=np.float32)
+    if len(rows) < 2:
+        return rows
+    _, first, inverse = np.unique(_row_keys(rows), return_index=True, return_inverse=True)
+    representative = torch.from_numpy(first[inverse.reshape(len(rows))])
+    bits = torch.from_numpy(rows.view(np.int32))
+    extra = []
+    with torch.inference_mode():
+        for start in range(0, len(rows), chunk):
+            stop = min(len(rows), start + chunk)
+            differs = torch.ne(
+                bits[start:stop], bits.index_select(0, representative[start:stop])
+            ).any(dim=1)
+            if bool(differs.any()):
+                extra.append(torch.nonzero(differs).flatten().numpy() + start)
+    selected = np.concatenate([first, *extra]) if extra else first
+    return rows[np.sort(selected)]
+
+
+def calibrate_keep(
+    model,
+    states: np.ndarray,
+    actions: np.ndarray,
+    *,
+    margin: float = 0.0,
+    chunk: int = CALIBRATION_CHUNK,
+    dedupe: bool = True,
+) -> tuple[tuple[int, ...], ...]:
+    """Keep-sets of the trunk ReLU units that fire on the calibration rows.
+
+    ``states`` is ``(N, state_dim)`` and ``actions`` ``(T, action_dim)``, the
+    replay buffer's packed layout; the trunks see states and candidates
+    independently, so the segment index is not needed. A unit is kept iff its
+    maximum pre-activation over all rows is ``> -margin`` (``margin >= 0``), so
+    a unit that fires on any calibration row is never dropped. Each layer keeps
+    at least its most active unit, so a graph never has an empty layer
+    (keeping an extra unit is always exact).
+
+    Only the trunk forward runs, with pre-transposed weights and large batches,
+    and (``dedupe``, the default) only over the distinct rows: a unit's maximum
+    over repeated rows is the maximum over one copy (:func:`distinct_rows`).
+    run7 after one iteration (79k examples / 1.29M candidate rows, 54k
+    distinct): 1.46 s without dedupe, ~0.45 s with it, on two threads.
+    A margin is a poor safety lever on trained nets (iteration 008: the dead
+    action-trunk units sit just below zero, so a margin of 0.05 already keeps
+    138 instead of 83 units of ``action_trunk[0]``); coverage, i.e. enough
+    examples, is what makes the keep-sets hold on search leaves.
+    """
+    if margin < 0:
+        raise ValueError("the calibration margin must be non-negative")
+    layers = trunk_linears(model)
+    count = len(layers) // 2
+    maxima: list[torch.Tensor] = []
+    with torch.inference_mode():
+        for trunk, rows in ((layers[:count], states), (layers[count:], actions)):
+            weights = [
+                (
+                    layer.weight.detach().to("cpu", torch.float32).t().contiguous(),
+                    layer.bias.detach().to("cpu", torch.float32),
+                )
+                for layer in trunk
+            ]
+            peaks = [torch.full((weight.shape[1],), -torch.inf) for weight, _ in weights]
+            rows = np.asarray(rows, dtype=np.float32)
+            if dedupe:
+                rows = distinct_rows(rows)
+            step = max(1, int(chunk))
+            for start in range(0, len(rows), step):
+                x = torch.from_numpy(np.ascontiguousarray(rows[start : start + step]))
+                for position, (weight, bias) in enumerate(weights):
+                    x = torch.addmm(bias, x, weight)
+                    peaks[position] = torch.maximum(peaks[position], x.amax(dim=0))
+                    x = x.clamp_min_(0.0)
+            maxima.extend(peaks)
+    keep = []
+    for peak in maxima:
+        units = torch.nonzero(peak > -float(margin)).flatten().tolist()
+        if not units:
+            units = [int(torch.argmax(peak))]
+        keep.append(tuple(int(unit) for unit in units))
+    return tuple(keep)
+
+
+def _sliced_linear(layer: nn.Linear, rows=None, columns=None) -> nn.Linear:
+    """A copy of ``layer`` restricted to output ``rows`` and input ``columns``."""
+    weight = layer.weight.detach()
+    bias = layer.bias.detach() if layer.bias is not None else None
+    if rows is not None:
+        weight = weight[rows]
+        bias = None if bias is None else bias[rows]
+    if columns is not None:
+        weight = weight[:, columns]
+    out = nn.Linear(weight.shape[1], weight.shape[0], bias=bias is not None)
+    with torch.no_grad():
+        out.weight.copy_(weight)
+        if bias is not None:
+            out.bias.copy_(bias)
+    return out.to(weight.device)
+
+
 class PackedGraph(nn.Module):
     """``PolicyValueNet.forward_packed`` expressed in exportable ops.
 
@@ -127,31 +335,83 @@ class PackedGraph(nn.Module):
     ``index_add_``, which the exporter cannot represent.
     ``tests/test_onnx_backend.py`` pins the two against each other, so they
     cannot drift apart silently.
+
+    With ``keep`` (see :func:`calibrate_keep`) the trunks carry only the kept
+    units: each trunk layer loses the dropped rows (and the columns of the
+    units its predecessor dropped), the state and action halves of
+    ``policy_head[0]`` and the inputs of ``value_merge`` lose the columns of
+    the last trunk layers' dropped units, and both heads keep their full
+    width. That is the full arithmetic whenever every dropped unit would have
+    output zero, which is what calibration measures.
     """
 
-    def __init__(self, model) -> None:
+    def __init__(self, model, keep=None) -> None:
         super().__init__()
         self.model = model
+        self.keep = normalize_keep(model, keep)
+        if self.keep is None:
+            return
+        hidden = int(model.hidden)
+        layers = trunk_linears(model)
+        count = len(layers) // 2
+        index = [torch.tensor(units, dtype=torch.long) for units in self.keep]
+
+        def trunk(linears, keeps):
+            modules, previous = [], None
+            for layer, rows in zip(linears, keeps, strict=True):
+                modules += [_sliced_linear(layer, rows, previous), nn.ReLU()]
+                previous = rows
+            return nn.Sequential(*modules)
+
+        self.state_trunk = trunk(layers[:count], index[:count])
+        self.action_trunk = trunk(layers[count:], index[count:])
+        last_state, last_action = index[count - 1], index[-1]
+        first = model.policy_head[0]
+        # The two halves of policy_head[0], as the full graph splits them.
+        state_half = nn.Linear(hidden, hidden)
+        action_half = nn.Linear(hidden, hidden, bias=False)
+        with torch.no_grad():
+            state_half.weight.copy_(first.weight.detach()[:, :hidden])
+            state_half.bias.copy_(first.bias.detach())
+            action_half.weight.copy_(first.weight.detach()[:, hidden:])
+        self.policy_state = _sliced_linear(state_half, None, last_state).to(
+            first.weight.device
+        )
+        self.policy_action = _sliced_linear(action_half, None, last_action).to(
+            first.weight.device
+        )
+        if model.value_context:
+            self.value_merge = _sliced_linear(
+                model.value_merge, None, torch.cat([last_state, hidden + last_action])
+            )
 
     def forward(self, state, actions, index):
         model = self.model
-        hidden = model.hidden
-        h = model.state_trunk(state)  # (B, H)
-        a = model.action_trunk(actions)  # (T, H)
-        first = model.policy_head[0]
-        weight = first.weight  # (H, 2H)
-        state_part = nn.functional.linear(h, weight[:, :hidden], first.bias)
-        action_part = nn.functional.linear(a, weight[:, hidden:])
+        if self.keep is None:
+            hidden = model.hidden
+            h = model.state_trunk(state)  # (B, H)
+            a = model.action_trunk(actions)  # (T, H)
+            first = model.policy_head[0]
+            weight = first.weight  # (H, 2H)
+            state_part = nn.functional.linear(h, weight[:, :hidden], first.bias)
+            action_part = nn.functional.linear(a, weight[:, hidden:])
+            value_merge = model.value_merge if model.value_context else None
+        else:
+            h = self.state_trunk(state)  # (B, kept state units)
+            a = self.action_trunk(actions)  # (T, kept action units)
+            state_part = self.policy_state(h)  # (B, H)
+            action_part = self.policy_action(a)  # (T, H)
+            value_merge = self.value_merge if model.value_context else None
         logits = model.policy_head[2](
             torch.relu(state_part[index] + action_part)
         ).squeeze(-1)
-        if model.value_context:
+        if value_merge is not None:
             rows = h.size(0)
             grid = torch.arange(rows, device=index.device)
             one_hot = (index.unsqueeze(1) == grid.unsqueeze(0)).to(a.dtype)
-            pooled = one_hot.t().matmul(a)  # (B, H)
+            pooled = one_hot.t().matmul(a)  # (B, width of a)
             counts = one_hot.sum(dim=0).clamp_min(1.0).unsqueeze(1)  # (B, 1)
-            h = model.value_merge(torch.cat([h, pooled / counts], dim=-1))
+            h = value_merge(torch.cat([h, pooled / counts], dim=-1))
         return logits, model.value_head(h)
 
 
@@ -209,8 +469,14 @@ def cache_paths(
     *,
     checkpoint=None,
     cache_dir=None,
+    keep=None,
 ) -> tuple[Path, Path]:
-    """``(graph, sidecar)`` paths for one model/config/backend combination."""
+    """``(graph, sidecar)`` paths for one model/config/backend combination.
+
+    A compact graph (``keep`` given) has its own file, so the full graph that
+    evaluation and the gate open beside the same checkpoint never evicts the
+    compact one self-play uses, and vice versa.
+    """
     if backend not in ONNX_BACKENDS:
         raise ValueError(
             f"unknown ONNX backend {backend!r}; choose from {ONNX_BACKENDS}"
@@ -222,7 +488,8 @@ def cache_paths(
         source = Path(checkpoint)
         directory = Path(cache_dir) if cache_dir is not None else source.parent
         stem = source.stem
-    graph = directory / f"{stem}.{backend}.onnx"
+    kind = backend if keep is None else f"{backend}.compact"
+    graph = directory / f"{stem}.{kind}.onnx"
     return graph, graph.with_name(graph.name + ".json")
 
 
@@ -232,9 +499,15 @@ def graph_key(
     *,
     checkpoint=None,
     opset: int = EXPORT_OPSET,
+    keep=None,
 ) -> dict:
-    """Everything a cached graph must match to be reused."""
+    """Everything a cached graph must match to be reused.
+
+    ``keep`` is part of the key as plain lists (``None`` for the full graph),
+    because that is how it reads back from the JSON sidecar.
+    """
     sha256, size = checkpoint_digest(checkpoint)
+    keep = normalize_keep(model, keep)
     return {
         "graph": GRAPH_REVISION,
         "backend": backend,
@@ -243,6 +516,7 @@ def graph_key(
         "weights": weights_digest(model),
         "checkpoint_sha256": sha256,
         "checkpoint_size": size,
+        "keep": None if keep is None else [list(units) for units in keep],
     }
 
 
@@ -301,8 +575,10 @@ def _temporary(path: Path) -> Path:
     return path.with_name(f"{path.name}.tmp-{os.getpid()}")
 
 
-def export_onnx(model, path, *, opset: int = EXPORT_OPSET) -> Path:
+def export_onnx(model, path, *, opset: int = EXPORT_OPSET, keep=None) -> Path:
     """Write the float32 ONNX graph of ``model``'s packed forward.
+
+    ``keep`` exports the compact graph (see :class:`PackedGraph`).
 
     Uses the legacy exporter on purpose (see the module docstring) and never
     leaves a half-written file: the graph is traced into a temporary beside the
@@ -319,7 +595,7 @@ def export_onnx(model, path, *, opset: int = EXPORT_OPSET) -> Path:
     )
     index = torch.repeat_interleave(torch.arange(leaves, device=device), width)
 
-    graph = PackedGraph(model).to(device).eval()
+    graph = PackedGraph(model, keep).to(device).eval()
     was_training = model.training
     temporary = _temporary(path)
     try:
@@ -403,8 +679,14 @@ def ensure_graph(
     cache_dir=None,
     rebuild: bool = True,
     opset: int = EXPORT_OPSET,
+    keep=None,
 ) -> CachedGraph:
     """Return a graph for ``model``/``backend``, building it if needed.
+
+    ``keep`` asks for the compact graph of those keep-sets (see
+    :func:`calibrate_keep`); ``None`` is the full graph. The keep-sets are part
+    of the key, so self-play workers that receive the parent's keep-sets get a
+    cache hit on the graph the parent built, and anything else is rebuilt.
 
     ``checkpoint`` decides *where* the graph lives (beside it) and its file hash
     joins the key. A miss builds the graph even with ``rebuild=False`` — a
@@ -416,9 +698,10 @@ def ensure_graph(
         raise ValueError(
             f"unknown ONNX backend {backend!r}; choose from {ONNX_BACKENDS}"
         )
-    key = graph_key(model, backend, checkpoint=checkpoint, opset=opset)
+    keep = normalize_keep(model, keep)
+    key = graph_key(model, backend, checkpoint=checkpoint, opset=opset, keep=keep)
     path, sidecar = cache_paths(
-        model, backend, checkpoint=checkpoint, cache_dir=cache_dir
+        model, backend, checkpoint=checkpoint, cache_dir=cache_dir, keep=keep
     )
     cached = _read_sidecar(sidecar)
     if path.is_file() and graph_is_fresh(key, cached):
@@ -431,13 +714,13 @@ def ensure_graph(
 
     try:
         if backend == "onnx-fp32":
-            export_onnx(model, path, opset=opset)
+            export_onnx(model, path, opset=opset, keep=keep)
         else:
             # quantize_dynamic reads a model file, so the float32 graph goes to
             # a temporary that never joins the cache.
             base = path.with_name(f"{path.stem}.fp32.tmp-{os.getpid()}.onnx")
             try:
-                export_onnx(model, base, opset=opset)
+                export_onnx(model, base, opset=opset, keep=keep)
                 quantize_onnx(base, path)
             finally:
                 base.unlink(missing_ok=True)
@@ -450,6 +733,7 @@ def ensure_graph(
                     "checkpoint": None if checkpoint is None else str(checkpoint),
                     "torch": torch.__version__,
                     "onnxruntime": _ort().__version__,
+                    "keep_widths": keep_widths(keep),
                 },
             },
         )
@@ -516,6 +800,8 @@ class LeafBackend:
         self.session = session
         self.cached = cached
         self.threads = int(threads)
+        self._output_names = list(OUTPUT_NAMES)
+        self._native_run = self._find_native_run(session)
 
     @classmethod
     def from_model(
@@ -528,12 +814,14 @@ class LeafBackend:
         rebuild: bool = True,
         threads: int = 0,
         providers=None,
+        keep=None,
     ) -> LeafBackend:
         """Build (or reuse) the graph for ``model`` and open a session on it.
 
         ``checkpoint`` defaults to the file ``model`` was loaded from, when it
         knows one, so ``leaf_evaluator(model, "onnx-int8")`` caches beside the
-        checkpoint without the caller threading a path through.
+        checkpoint without the caller threading a path through. ``keep`` opens
+        the compact graph of those keep-sets (``None``: the full graph).
         """
         if checkpoint is None:
             checkpoint = getattr(model, "checkpoint", None)
@@ -543,6 +831,7 @@ class LeafBackend:
             checkpoint=checkpoint,
             cache_dir=cache_dir,
             rebuild=rebuild,
+            keep=keep,
         )
         session = create_session(cached.path, threads=threads, providers=providers)
         return cls(session, cached, threads=threads)
@@ -560,6 +849,12 @@ class LeafBackend:
         return self.cached.key["model_config"]
 
     @property
+    def keep_widths(self) -> list[int] | None:
+        """Units kept per trunk layer, or ``None`` for the full graph."""
+        keep = self.cached.key.get("keep")
+        return None if keep is None else [len(units) for units in keep]
+
+    @property
     def rebuilt(self) -> bool:
         """True when this call had to export (or re-export) the graph."""
         return self.cached.rebuilt
@@ -569,15 +864,32 @@ class LeafBackend:
         return self
 
     def __call__(self, state, actions, index, mask=None):
-        logits, values = self.session.run(
-            list(OUTPUT_NAMES),
-            {
-                "state": np.ascontiguousarray(state, dtype=np.float32),
-                "actions": np.ascontiguousarray(actions, dtype=np.float32),
-                "index": np.ascontiguousarray(index, dtype=np.int64),
-            },
-        )
+        feed = {
+            "state": np.ascontiguousarray(state, dtype=np.float32),
+            "actions": np.ascontiguousarray(actions, dtype=np.float32),
+            "index": np.ascontiguousarray(index, dtype=np.int64),
+        }
+        # The self-play driver calls this tens of thousands of times per chunk
+        # with ~3 leaves each, so the Python wrapper's per-call checks (feed
+        # names, OrtValue ownership, WebGPU capture) are a visible share. The
+        # feed is always these three numpy arrays on a CPU session, which is
+        # exactly what those checks accept, so call the native run directly
+        # when the session exposes it; the result is the same C call.
+        native = self._native_run
+        if native is not None:
+            logits, values = native(self._output_names, feed, None)
+        else:
+            logits, values = self.session.run(self._output_names, feed)
         return logits, values
+
+    @staticmethod
+    def _find_native_run(session):
+        """The session's native ``run``, or ``None`` to use the public one."""
+        inner = getattr(session, "_sess", None)
+        run = getattr(inner, "run", None)
+        get_providers = getattr(session, "get_providers", None)
+        providers = list(get_providers()) if callable(get_providers) else []
+        return run if callable(run) and providers == ["CPUExecutionProvider"] else None
 
 
 # ---------------------------------------------------------------------------
@@ -688,33 +1000,38 @@ def benchmark(
             call(*samples[0])
         timings = _measure(calls, samples, repeat)
 
-        kls, value_errors = [], []
-        for state, actions, index_rows, _ in samples:
-            with torch.inference_mode():
-                reference_logits, reference_values = model.forward_packed(
-                    torch.from_numpy(state),
-                    torch.from_numpy(actions),
-                    torch.from_numpy(index_rows),
-                )
-            logits, values = calls["onnx-int8"](state, actions, index_rows)
-            kls.append(_policy_kl(reference_logits.numpy(), logits, width))
-            value_errors.append(float(np.abs(values - reference_values.numpy()).max()))
+
+        references = [
+            _torch_reference(model, state, actions, index_rows)
+            for state, actions, index_rows, _ in samples
+        ]
+        drift = {
+            name: _drift(
+                references,
+                [call(state, actions, rows) for state, actions, rows, _ in samples],
+                [rows for _, _, rows, _ in samples],
+            )
+            for name, call in calls.items()
+            if name != "torch"
+        }
     finally:
         torch.set_num_threads(previous)
 
-    kl = np.concatenate(kls)
+    int8 = drift["onnx-int8"]
     results: dict = {
         "shape": {"leaves": leaves, "width": width, "hidden": int(model.hidden)},
         "threads": int(threads),
         "checkpoint": None if checkpoint is None else str(checkpoint),
         "us": {name: entry["min"] for name, entry in timings.items()},
         "median_us": {name: entry["median"] for name, entry in timings.items()},
+        # Kept for older readers: the int8 numbers, as before.
         "kl": {
-            "mean": float(kl.mean()),
-            "p95": float(np.percentile(kl, 95)),
-            "max": float(kl.max()),
-            "value_max_abs": float(max(value_errors)),
+            "mean": int8["kl_mean"],
+            "p95": int8["kl_p95"],
+            "max": int8["kl_max"],
+            "value_max_abs": int8["value_max"],
         },
+        "drift": drift,
     }
     results["speedup"] = {
         name: results["us"]["torch"] / us
@@ -722,6 +1039,64 @@ def benchmark(
         if name != "torch"
     }
     return results
+
+
+def _torch_reference(model, state, actions, index) -> tuple[np.ndarray, np.ndarray]:
+    with torch.inference_mode():
+        logits, values = model.forward_packed(
+            torch.from_numpy(state), torch.from_numpy(actions), torch.from_numpy(index)
+        )
+    return logits.numpy(), values.numpy()
+
+
+def _segment_kl(reference: np.ndarray, candidate: np.ndarray, index: np.ndarray) -> np.ndarray:
+    """KL(reference || candidate) per leaf, over the packed segments of ``index``."""
+    leaves = int(index.max()) + 1 if index.size else 0
+
+    def log_softmax(logits):
+        logits = logits.astype(np.float64)
+        peak = np.full(leaves, -np.inf)
+        np.maximum.at(peak, index, logits)
+        shifted = logits - peak[index]
+        total = np.zeros(leaves)
+        np.add.at(total, index, np.exp(shifted))
+        return shifted - np.log(total)[index]
+
+    p, q = log_softmax(reference), log_softmax(candidate)
+    out = np.zeros(leaves)
+    np.add.at(out, index, np.exp(p) * (p - q))
+    return out
+
+
+def _drift(references, outputs, indices) -> dict:
+    """Policy KL and value |difference| of ``outputs`` against ``references``.
+
+    The value difference is per leaf, the max over the houses; both are
+    summarised over every leaf of every call.
+    """
+    kls, values = [], []
+    for (want_logits, want_values), (logits, got_values), index in zip(
+        references, outputs, indices, strict=True
+    ):
+        kls.append(_segment_kl(want_logits, logits, index))
+        values.append(np.abs(np.asarray(got_values) - want_values).max(axis=1))
+    kl = np.concatenate(kls)
+    value = np.concatenate(values)
+    return {
+        "kl_mean": float(kl.mean()),
+        "kl_p95": float(np.percentile(kl, 95)),
+        "kl_max": float(kl.max()),
+        "value_mean": float(value.mean()),
+        "value_max": float(value.max()),
+    }
+
+
+def _format_drift(name: str, entry: dict) -> str:
+    return (
+        f"{name:<14}KL mean {entry['kl_mean']:.2e} p95 {entry['kl_p95']:.2e} "
+        f"max {entry['kl_max']:.2e} nats; value |diff| mean {entry['value_mean']:.2e} "
+        f"max {entry['value_max']:.2e}"
+    )
 
 
 def format_benchmark(results: dict) -> str:
@@ -739,19 +1114,198 @@ def format_benchmark(results: dict) -> str:
             f"{name:<12}{microseconds:>10.1f}"
             f"{results['median_us'][name]:>10.1f}{speedup:>9.2f}x"
         )
-    kl = results["kl"]
-    lines.append(
-        f"int8 policy KL vs torch: mean {kl['mean']:.2e} p95 {kl['p95']:.2e} "
-        f"max {kl['max']:.2e} nats; value max |err| {kl['value_max_abs']:.2e}"
-    )
+    lines.append("drift vs torch (synthetic inputs):")
+    for name, entry in results["drift"].items():
+        lines.append("  " + _format_drift(name, entry))
     return "\n".join(lines)
 
 
-if __name__ == "__main__":  # pragma: no cover - manual measurement
-    import sys
+def load_leaf_calls(path, *, limit: int | None = None) -> list[tuple]:
+    """Real leaf batches captured from self-play, one tuple per driver call.
 
-    print(
-        format_benchmark(
-            benchmark(checkpoint=sys.argv[1] if len(sys.argv) > 1 else None)
+    The file holds the concatenated calls (``states``, ``actions`` and a global
+    ``index``) plus ``call_leaves``/``call_rows``, the size of each call, which
+    is the layout ``checkpoints/perf-2x/capture_leaves.py`` writes. ``limit``
+    keeps an evenly spaced subset of the calls.
+    """
+    data = np.load(path)
+    states, actions, index = data["states"], data["actions"], data["index"]
+    leaves, rows = data["call_leaves"], data["call_rows"]
+    state_at = np.concatenate([[0], np.cumsum(leaves)])
+    row_at = np.concatenate([[0], np.cumsum(rows)])
+    picks = range(len(leaves))
+    if limit is not None and limit < len(leaves):
+        picks = range(0, len(leaves), max(1, len(leaves) // limit))
+    calls = []
+    for call in picks:
+        lo, hi = row_at[call], row_at[call + 1]
+        calls.append(
+            (
+                np.ascontiguousarray(states[state_at[call] : state_at[call + 1]]),
+                np.ascontiguousarray(actions[lo:hi]),
+                np.ascontiguousarray(index[lo:hi] - state_at[call], dtype=np.int64),
+            )
         )
+    return calls
+
+
+def measure_leaves(
+    checkpoint,
+    leaves_path,
+    replay_path,
+    *,
+    calls: int | None = 1500,
+    repeat: int = 5,
+    threads: int = 1,
+    calibration_threads: int = 2,
+) -> dict:
+    """Full vs compact, fp32 vs int8, on real leaf calls of ``checkpoint``.
+
+    Calibrates the compact keep-sets on the replay buffer at ``replay_path``
+    (its ``states``/``actions`` arrays, the buffer's own npz), builds the four
+    graphs in a temporary directory, then times every engine over the same
+    calls, rotating engines inside each repetition (the minimum and median of
+    the per-call means over ``repeat`` passes), and reports each engine's
+    policy KL and value |difference| against the torch forward, plus the
+    compact-vs-full drift at equal precision.
+
+        python -m agot.nn.onnx_backend <ckpt> --leaves leaves.npz --replay agot.replay.npz
+    """
+    from agot.nn.model import PolicyValueNet  # noqa: PLC0415 - avoid a cycle
+
+    model = PolicyValueNet.load(str(checkpoint)).eval()
+    with np.load(replay_path) as replay:
+        # Decompress before the clock starts: training calibrates on the
+        # buffer already in memory.
+        replay_states, replay_actions = replay["states"], replay["actions"]
+    previous = torch.get_num_threads()
+    torch.set_num_threads(max(1, calibration_threads))
+    try:
+        started = time.perf_counter()
+        keep = calibrate_keep(model, replay_states, replay_actions)
+        seconds_calibration = time.perf_counter() - started
+    finally:
+        torch.set_num_threads(previous)
+    examples, rows = int(len(replay_states)), int(len(replay_actions))
+    del replay_states, replay_actions
+
+    leaf_calls = load_leaf_calls(leaves_path, limit=calls)
+    directory = Path(tempfile.mkdtemp(prefix="agot-onnx-leaves-"))
+    previous = torch.get_num_threads()
+    torch.set_num_threads(max(1, threads))
+    try:
+        engines = {}
+        export_seconds = {}
+        for label, kept in (("full", None), ("compact", keep)):
+            for backend in ONNX_BACKENDS:
+                started = time.perf_counter()
+                engines[f"{label}-{backend[5:]}"] = LeafBackend.from_model(
+                    model, backend, cache_dir=directory, threads=threads, keep=kept
+                )
+                export_seconds[f"{label}-{backend[5:]}"] = time.perf_counter() - started
+        references = [_torch_reference(model, *call) for call in leaf_calls]
+        outputs = {name: [engine(*call) for call in leaf_calls] for name, engine in engines.items()}
+        timings = {name: [] for name in engines}
+        for _ in range(max(1, repeat)):
+            for name, engine in engines.items():
+                started = time.perf_counter()
+                for call in leaf_calls:
+                    engine(*call)
+                timings[name].append((time.perf_counter() - started) / len(leaf_calls) * 1e6)
+    finally:
+        torch.set_num_threads(previous)
+
+    indices = [call[2] for call in leaf_calls]
+    drift = {name: _drift(references, outputs[name], indices) for name in engines}
+    compaction = {
+        precision: _drift(outputs[f"full-{precision}"], outputs[f"compact-{precision}"], indices)
+        for precision in ("fp32", "int8")
+    }
+    return {
+        "checkpoint": str(checkpoint),
+        "calls": len(leaf_calls),
+        "leaves": int(sum(len(call[0]) for call in leaf_calls)),
+        "rows": int(sum(len(call[1]) for call in leaf_calls)),
+        "threads": int(threads),
+        "calibration": {
+            "examples": examples,
+            "rows": rows,
+            "threads": int(calibration_threads),
+            "seconds": seconds_calibration,
+            "widths": keep_widths(keep),
+        },
+        "export_seconds": export_seconds,
+        "us": {
+            name: {"min": float(np.min(values)), "median": float(np.median(values))}
+            for name, values in timings.items()
+        },
+        "drift": drift,
+        "compaction": compaction,
+    }
+
+
+def format_leaf_measurement(results: dict) -> str:
+    calibration = results["calibration"]
+    lines = [
+        f"{results['checkpoint']}: {results['calls']} real calls, {results['leaves']} "
+        f"leaves, {results['rows']} candidate rows, {results['threads']} thread(s)",
+        f"calibration: {calibration['examples']} examples / {calibration['rows']} rows "
+        f"in {calibration['seconds']:.2f}s on {calibration['threads']} thread(s); "
+        f"kept units per trunk layer {calibration['widths']}",
+        f"{'engine':<14}{'us/call min':>12}{'median':>10}{'export s':>10}",
+    ]
+    for name, entry in results["us"].items():
+        lines.append(
+            f"{name:<14}{entry['min']:>12.1f}{entry['median']:>10.1f}"
+            f"{results['export_seconds'][name]:>10.2f}"
+        )
+    lines.append("drift vs torch:")
+    for name, entry in results["drift"].items():
+        lines.append("  " + _format_drift(name, entry))
+    lines.append("compaction alone (compact vs full, same precision):")
+    for precision, entry in results["compaction"].items():
+        lines.append("  " + _format_drift(precision, entry))
+    return "\n".join(lines)
+
+
+def _main(argv=None) -> None:  # pragma: no cover - manual measurement
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m agot.nn.onnx_backend",
+        description=(
+            "Leaf-engine cost and drift. Without --leaves: torch / fp32 / int8 on a "
+            "synthetic production batch. With --leaves and --replay: full vs compact "
+            "graphs, fp32 vs int8, on real captured leaf calls."
+        ),
     )
+    parser.add_argument("checkpoint", nargs="?")
+    parser.add_argument("--leaves", help="captured leaf calls (capture_leaves.py layout)")
+    parser.add_argument("--replay", help="replay buffer npz to calibrate the compact graph")
+    parser.add_argument("--calls", type=int, default=1500)
+    parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--calibration-threads", type=int, default=2)
+    args = parser.parse_args(argv)
+    if args.leaves:
+        if not (args.checkpoint and args.replay):
+            parser.error("--leaves needs a checkpoint and --replay")
+        print(
+            format_leaf_measurement(
+                measure_leaves(
+                    args.checkpoint,
+                    args.leaves,
+                    args.replay,
+                    calls=args.calls,
+                    repeat=args.repeat,
+                    threads=args.threads,
+                    calibration_threads=args.calibration_threads,
+                )
+            )
+        )
+    else:
+        print(format_benchmark(benchmark(checkpoint=args.checkpoint, threads=args.threads)))
+
+
+if __name__ == "__main__":  # pragma: no cover - manual measurement
+    _main()

@@ -8,10 +8,10 @@ Durable facts only, each with the command that proves it. Measured 2026-11-11 on
 - **The fused runtime is the leaf engine.** `onnx-fp32` is 2.15–2.24x the torch path at 1–2
   leaves, 1.5x at 4–8, 1.17x at 16. `checkpoints/perf-ab/ab_leaf.py`.
 - **`onnx-int8` is another 1.4x on top of fp32** (2.5–3.4x versus torch at every batch size).
-  It is the default for `agot train` since iteration 005 (2.35x end-to-end self-play at batch 8,
-  2.44x at batch 4), and stays opt-in elsewhere: its ~4e-4 nat policy KL changes recorded games,
-  while `onnx-fp32` is a round-off away from torch and is the evaluate/gauntlet default.
-  Same command, `--leaf-backend onnx-int8`.
+  It was the `agot train` default from iteration 005 until run8 (2.35x end-to-end self-play at
+  batch 8, 2.44x at batch 4); run8 switched training to `onnx-fp32`, which with the leaf cache
+  and the compact graph costs about the same and never moves a leaf value, so `auto` now
+  resolves to fp32 everywhere. int8 stays one explicit flag away, `--leaf-backend onnx-int8`.
 - **Quantizing the graph costs 0.40 s per iteration** (export 0.09 s + quantize 0.40 s +
   session 0.06 s, measured). Negligible at production scale, and roughly cancelled by the
   self-play win at meso scale — which is why the meso benchmark cannot show int8's 2x.
@@ -39,6 +39,21 @@ Durable facts only, each with the command that proves it. Measured 2026-11-11 on
 - **The engine is not the bottleneck for training**: self-play is ~93 % network. A 1.36x
   engine win shows up on `agot demo`, the gauntlet and the rules tests, not on training.
 
+- **Adam moments of dead ReLU units live in the float32 subnormal range forever** and made
+  the optimizer step 2-6x slower. A dead unit's gradient is exactly zero, the EMA
+  `m*beta` of a subnormal rounds back to itself, and run7's `agot.state.pt` was 73 %
+  subnormal (761 900 of 1 046 542 entries). Activations and gradients have none (50 run7
+  batches, every Linear). Fixed by FTZ during the gradient pass plus a per-epoch scrub
+  (iteration 006); the scrub is the portable half, because GNU OpenMP (Linux/Colab wheels)
+  does not propagate the FP flags to an existing pool, Intel OpenMP (Windows) does.
+- **MKL's vector `sqrt` is slow on exact zeros, not only on subnormals, and FTZ/DAZ do not
+  help it**: 131 072 floats, 1 thread: normal 20 µs, zeros 170 µs, subnormal 860 µs. The
+  unfused AdamW calls it every step on second moments that are mostly zero; the fused CPU
+  kernel does not (optimizer step 4x, bit-identical; iteration 006).
+- **70-76 % of the action trunk's ReLU columns are zero for a whole run7 batch** (state
+  trunk 75-79 %, value hidden 99 %, policy hidden 41 %). Feeding the next matmul only the
+  live columns makes the training backward 1.36-1.40x faster (iteration 006).
+
 ## Wrong / corrected beliefs
 
 - **"The planning phase is the heavy legal-action path, so that is where the engine loses
@@ -57,10 +72,133 @@ Durable facts only, each with the command that proves it. Measured 2026-11-11 on
   int8 is 3.4x at 2 leaves and 2.5x at 16. The real cost of int8 is numeric (KL 4e-4 on a
   trained net), not a small-batch cliff.
 
+- **"Training on run7 is reproducible bit for bit only on the same code."** It is not even
+  that: changing the torch thread count (1 vs 2) moves the weights by up to 0.11 after 300
+  AdamW steps and the epoch loss in the 5th digit, because Adam turns round-off in near-zero
+  gradients into lr-sized steps. That is the floor any summation-order change is judged
+  against (iteration 006, `bench_epoch.py` with `BENCH_THREADS`).
+- **`Optimizer.load_state_dict` restores `fused`/`foreach` from the file** and keeps the
+  caller's moment tensors when dtype/device already match (two optimizers loaded from one
+  dict share their state). Both bit an A/B harness here; `Trainer.load_state_dict` re-applies
+  the kernel choice.
+- **numpy's float32 `sum` is not reproducible by `np.add.reduceat` or `cumsum`** (pairwise,
+  SIMD-blocked). Bit-identical vectorised collation has to keep the per-example `.sum()`.
+
 ## Unmeasurable on this box
 
+- **A ~10 % effect in a whole-epoch subprocess A/B**: rounds swing 0.87-1.38x from clock drift
+  alone. Same-process, batch-interleaved arms (two trainer copies, A,B / B,A each batch) are
+  stable to ~2 % and A-vs-A is bit-identical (iteration 006).
 - Anything that needs more than ~2 minutes of sustained CPU: the clock collapses and the last
   measurement of a run is not comparable to the first. All numbers here come from interleaved
   runs or a reference-GEMM-normalised harness.
 - Wall-clock comparisons against the documented §6.1 table (recorded on a different machine
   state). The numbers in `iterations/000-baseline.md` were re-measured today.
+
+## Self-play and the iteration around it (2026-11-20, iterations 007–010)
+
+- **~73 % of the leaves of one production `selfplay()` call repeat an input already scored in
+  that call**, and the repeats are recent (an LRU of 2 000 reaches the same hit rate). Every
+  decision restarts its tree, and the 97-float state carries no board, so many positions encode
+  to the same network input. `checkpoints/perf-2x/dup_study.py 16`; counters in
+  `_core.selfplay_stats()`.
+- **Trained nets here have 65–80 % dead trunk units** (run7: 202/173/173/165 of 256 never fire
+  on the whole replay buffer; run5 and run6 look the same) **and a nearly dead value head**
+  (251 of 256 hidden units). Dropping the dead trunk units from the leaf graph is exact (fp32
+  self-play games identical to the full graph) and makes a leaf call 2.6x cheaper in fp32 and
+  1.6x in int8. `python -m agot.nn.onnx_backend <ckpt> --leaves <leaves.npz> --replay
+  <agot.replay.npz>`. Whether the dead units cost playing strength has not been tested.
+- **Head hidden layers must not be pruned this way**: replay-dead head units fire on real leaves.
+- **Calibration needs coverage of games, not rows**: 33k contiguous examples miss units that
+  fire on leaves, 45k+ do not; random 10k subsets are nearly clean. A margin is a bad substitute.
+- **int8 is not round-off on real leaves.** Full int8 against torch on run7's leaves: value
+  |diff| mean 0.059, max 1.06; policy KL mean 1.05e-3, p95 4.0e-3, max 1.35e-2 (1 581 calls).
+  The same leaf scored in two different batches differs by up to 1.24 in a value
+  (`cache_eq_rust.py onnx-int8 16 drift`). ORT fp32 is row-invariant for 99.8 % of repeated
+  leaves, the rest differ by ≤ 3e-7. Iteration 005 only ever measured the policy KL on a
+  synthetic net.
+- **With the cache and the compact graph, fp32 leaves cost about what int8 leaves do**: whole
+  iteration 2.30x against 2.33x over the old int8 baseline (`ab_iters.py`, 5 rounds).
+- **A scripted greedy decision on the Rust driver cost ~630 µs**, of which ~312 µs was the JSON
+  round trip of `Game.snapshot()` and ~60 µs Python 3.14's cyclic GC collecting the
+  `RustGame`/`StateView` cycle. `scripted_only.py` under cProfile; `gc_probe.py`.
+- **With phase budgets a fixed per-batch pass loop leaves passes ~40 % full** (6.6 of 16
+  leaves). Scheduling each game's decisions independently fills them to ~72 % and is exact.
+- **Replay candidate rows are ~95 % repeats** (run7: 54k distinct of 1.0–1.3M); calibration
+  over distinct, bit-verified rows gives bit-identical per-unit peaks at a third of the cost.
+- **The time outside both phase timers is attributed in the log** (`seconds_leaf_calibration`,
+  `seconds_leaf_graph`, `seconds_extend`, `seconds_checkpoint`, `seconds_replay_save`,
+  `seconds_replay_wait`, `seconds_replay_snapshot`, `seconds_trainer_restore`).
+- **`ab_multi.py` (one iteration per process) hides work moved after the log record**; use
+  `ab_iters.py --iters 2` and read the second iteration for anything that overlaps phases.
+- **Training is not bit-reproducible on this box under load**: with identical examples the
+  losses differ in the 5th–6th digit about once in eight runs, on unchanged code too.
+
+## Not measured
+
+- Nothing in iterations 006–010 was run on the 2-vCPU Colab runtime itself. The nearest this
+  box gets is pinning the whole A/B tree to two logical CPUs (`cpu2_pin.py`, mask 0x5, two
+  physical cores, 2026-11-22): 2.78x median per iteration over four paired rounds (1.49–4.83x;
+  2.63–4.83x without the one round whose branch self-play was anomalous). The baseline arm
+  degraded more than the branch as the box throttled, so the ratio does not shrink in the
+  Colab shape. Colab's own vCPUs, disk and contention are still unmeasured: the subnormal
+  penalty, the thread flags and the snapshot/worker contention still need a real run to confirm.
+
+## Effectiveness checks for iterations 006–010 (2026-11-20)
+
+All against commit `7952ae2`, run7 resumed, run8 launch flags, 32 games per iteration.
+
+- **Self-play data, fp32 leaves on both sides**: the replay buffer after one iteration has
+  bit-identical `states`, `actions`, `offsets`, `players` and `outcomes` (every position, move
+  and result of 17 582 new decisions). `policies` differs in one example (one visit moved
+  between two candidates, same top action; KL 1.9e-3 on that example, 1.1e-7 averaged). With
+  `--leaf-cache off --leaf-compact off` the whole buffer is bit-identical.
+  `ab_multi.py` with `@--leaf-backend,onnx-fp32` on both arms, then compare `agot.replay.npz`.
+- **Trainer, live columns off** (`PolicyValueNet.live_columns = False`): one epoch on run7's
+  buffer gives the baseline's losses to the last printed digit (policy 1.576066554, value
+  0.121023210) and the same held-out numbers, so the subnormal handling, the batch gather, the
+  fused AdamW and the replay restore are exact. `train_only.py`, `heldout_loss.py`.
+- **Trainer, live columns on** (the default): on two held-out sets (17 940 and 17 582 fresh
+  examples) the policy cross-entropy is within 1e-4 of the baseline at 1, 2 and 4 threads, and
+  the value MSE (0.534–0.547 and 0.593–0.620) sits inside or next to the range the baseline
+  itself spans across thread counts (0.552–0.559 and 0.599–0.612).
+- **Head-to-head after three iterations of each pipeline** (gate protocol: three seats each,
+  swapped, 128 simulations, 96 games, fp32 leaves): the branch-trained net with int8 leaves
+  won 54–42 against the baseline-trained net (0.562 ± 0.051), the branch-trained net with fp32
+  leaves lost 42–54 (0.438 ± 0.051). Pooled 96–96. Neither differs from 0.5 by more than
+  1.2 standard errors; three iterations on a 500-iteration net can only expose a large
+  regression, and it did not. It also does not show that fp32 training leaves are stronger.
+  `head_to_head.py`.
+- One epoch of training raised the held-out value MSE in every arm (0.526 → 0.53–0.56 on one
+  set, 0.585 → 0.59–0.62 on the other) while the training value loss is 0.12–0.17: the value
+  head memorises game outcomes. Not caused by this work, and not addressed by it.
+
+## int8 search fidelity at game level (2026-11-22)
+
+Same harness as the section above (run7 resumed, run8 flags, 32 games, one iteration per
+arm), int8 arms against their fp32 twins plus two controls. `replay_agree.py` compares only
+the new replay rows, game by game: games segment at strict decreases of the encoder's round
+feature (column 78 of the state vector) and pair up by index, because an iteration plays the
+same seeds in the same order. A pair diverges at the first row where the state or the
+top-visit candidate differs; the other 31 games keep their own independent score.
+
+- **int8 self-play is deterministic run to run.** A re-run of the baseline int8 arm with the
+  same seed reproduced all 17 594 new rows bit for bit (32/32 games, zero policy-target
+  differences). The batch composition the quantizer sees does not depend on scheduling, so
+  every difference below is quantization noise, not run-to-run variance.
+- **int8 games diverge from the exact (fp32) search almost immediately — on the baseline
+  driver too.** Baseline int8 vs baseline fp32: 0/32 identical games, 2.7 % of decisions
+  (median first flipped move at row 3 of ~526). Branch int8 vs branch fp32: 0/32, 2.4 %,
+  median row 3. The diverged games still end with the same result in 16/32 and 13/32 cases.
+  This is the game-level face of the documented leaf error (value |diff| mean 0.059, max 1.06).
+- **The branch does not add deviation.** At states that are still equal the branch's policy
+  targets differ on a similar share of rows as the baseline's (105 of 393 vs 131 of 456) but by
+  much less (max |dpol| 0.175 vs 0.516). The cross-pipeline int8 distance (baseline int8 vs
+  branch int8, same seed: median flip at row 20, 3.3 % of decisions) is the same order as each
+  pipeline's own int8-vs-fp32 noise.
+- **Different seeds are the floor:** baseline int8 with `--seed 1` shares 0.2 % of decisions
+  with the default-seed run (median first flip at row 1).
+- For scale, fp32 against fp32 is exact: baseline vs branch differs in one policy target of
+  17 582 (one moved visit), and the branch arm with `--leaf-cache off --leaf-compact off` is
+  bit-identical to the baseline. Compare pipelines in fp32; in int8 the quantizer noise
+  dominates after a handful of decisions.

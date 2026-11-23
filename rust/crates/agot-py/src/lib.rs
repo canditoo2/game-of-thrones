@@ -31,6 +31,7 @@ use agot_core::setup::GameConfig;
 use agot_core::snapshot::{state_from_snapshot, Snapshot};
 
 mod selfplay;
+mod snapshot_py;
 
 /// Which engine implementation is loaded. Logged by training runs so a run's
 /// timings can be attributed to the right backend.
@@ -700,11 +701,14 @@ impl PyGame {
     /// which is what the engine tests need in order to read a position without
     /// caring which implementation produced it.
     fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(snapshot_py::snapshot(py, &self.game.state, &self.game.data)?.unbind())
+    }
+
+    /// The snapshot through the generic `serde_json` fingerprint: the
+    /// reference `snapshot()` must equal, kept for the equality tests.
+    fn _snapshot_reference(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let value = agot_core::fingerprint::state_fingerprint(&self.game.state, &self.game.data);
-        let text = serde_json::to_string(&value)
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        let json = py.import("json")?;
-        Ok(json.call_method1("loads", (text,))?.unbind())
+        to_python(py, &value)
     }
 
     /// Whether the desktop-sequenced Westeros phase is waiting for Continue.
@@ -1154,6 +1158,7 @@ fn agot_core_ext(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(observation_dims, module)?)?;
     module.add_function(wrap_pyfunction!(selfplay::selfplay, module)?)?;
     module.add_function(wrap_pyfunction!(selfplay::game_outcome, module)?)?;
+    module.add_function(wrap_pyfunction!(selfplay::selfplay_stats, module)?)?;
     module.add_class::<PyAction>()?;
     module.add_class::<PyGame>()?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;

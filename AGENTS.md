@@ -5,14 +5,16 @@ rules engine, search and encoder (`rust/`) behind a thin Python facade, an optio
 scorer network (`nn/`) and the self-play training loop (`training/`). Everything is driven by
 the `agot` CLI.
 
-**Current direction (2026-11-11):** the next Colab run is **`run6`** (checkpoints under
-`/content/drive/MyDrive/agot/run6`). The notebook launches `--simulations 128
---determinizations 1 --phase-budgets default --leaf-backend onnx-int8 --games 64
---batch-games 16 --buffer 80000 --gate-games 120 --gate-mode deferred`. The single PIMC
-world is exact (the two determinizations encode bit-identically), the phase caps cut scored
-rows by ~40%, and ONNX int8 cuts the leaf forward 2.6x. This PC remains the build-and-verify
-machine and must not start heavy runs unless asked. `run5` reached 105 iterations and is the
-warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also valid.
+**Current direction (2026-11-22):** the next Colab run is **`run8`** (checkpoints under
+`/content/drive/MyDrive/agot/run8`), warm-started from run7's finished weights (run7: a
+fresh 500-iteration run, int8 leaves). The notebook launches `--simulations 128
+--determinizations 1 --phase-budgets default --leaf-backend onnx-fp32 --games 64
+--batch-games 16 --buffer 80000 --gate-games 120 --gate-mode deferred`: training moved to
+fp32 leaves because with the leaf cache and the compact graph they cost about what int8
+does and never move a leaf value. The single PIMC world is exact (the two determinizations
+encode bit-identically) and the phase caps cut scored rows by ~40%. This PC remains the
+build-and-verify machine and must not start heavy runs unless asked. run1/run2 are void,
+run3 is a pre-change baseline, run7 is the strongest existing checkpoint.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
@@ -69,14 +71,15 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   native). The reference driver remains only for hand-written evaluators and mixed configs.
 - Leaf inference: `--leaf-backend {auto,torch,onnx-int8,onnx-fp32}` (train/gate/evaluate/gauntlet,
   default `auto`) picks the engine that scores search leaves (`agot/nn/onnx_backend.py`).
-  `auto` resolves to `onnx-int8` for `agot train` and to `onnx-fp32` for evaluate/gauntlet when
+  `auto` resolves to `onnx-fp32` everywhere (train included, since run8) when
   `pip install -e ".[onnx]"` (onnxruntime + onnx) is present, and to `torch` otherwise, so
   `torch` stays the only engine CI needs and a pure-PyTorch install keeps working; it is
   resolved before the spec is built, so a checkpoint or a queued gate always records a concrete
-  engine. Training gets int8 because that is the engine run6 already selects and the only one
-  that halves self-play (2.35–2.44x end to end, mean policy KL ~4e-4 nats, inside the budget
-  `tests/test_onnx_backend.py` enforces); evaluation keeps fp32, which is a round-off away from
-  torch (7e-8 nats) and still 1.5–2.2x faster. The ONNX backends cache
+  engine. Training keeps fp32 because with the leaf cache and the compact graph it costs about
+  what int8 does (2.30x vs 2.33x per iteration against the pre-cache baseline) and is a
+  round-off away from torch (7e-8 nats); int8 (2.35–2.44x end to end alone, mean policy KL
+  ~4e-4 nats, value |diff| mean 0.059 max 1.06 on real leaves) stays one explicit flag away.
+  The ONNX backends cache
   `<checkpoint stem>.<backend>.onnx` plus a JSON key beside the checkpoint and refuse a graph
   whose key (checkpoint hash, weight digest, model config, backend, `GRAPH_REVISION`) no
   longer matches. Measured at 24 leaves x 15 candidates and one thread: torch 1316 us,
@@ -86,6 +89,44 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   The choice travels in the self-play spec (`leaf_backend`) and in the
   deferred `GateSpec`, so a queued gate is judged with the engine its training run used;
   `agot gate --leaf-backend` overrides it. Repro: `python -m agot.nn.onnx_backend <ckpt>`.
+- Compact leaf graph (`agot train --leaf-compact {auto,off}`, default `auto`, ONNX backends
+  only): most trunk ReLU units of a trained net never fire (run7: 202/173/173/165 of 256 dead
+  on the replay buffer, none of them firing on 40k real search leaves). Once per iteration,
+  in the parent, `onnx_backend.calibrate_keep` measures which trunk units fire on the replay
+  buffer (over its distinct rows only, bit-verified: ~0.5 s at 79k examples, two threads)
+  and `_prepare_leaf_graph` exports
+  `<stem>.<backend>.compact.onnx` without the others; the keep-sets ride the plan
+  (`SelfPlayPlan.leaf_keep`) so the workers open that same graph. Below
+  `MIN_CALIBRATION_EXAMPLES` (50k: 33k contiguous examples still missed units that fire on
+  leaves) the run keeps the full graph. Compact fp32 is exact against the full graph on real
+  leaves (policy KL 0, value |diff| <= 2.6e-6) and 2.6x cheaper per call; compact int8 is
+  1.6x cheaper than full int8. Gate, evaluate, gauntlet and play always use the full graph.
+  The log records `leaf_compact` (kept widths, `null` = full) and the calibration/export
+  seconds. Measure real leaves with `python -m agot.nn.onnx_backend <ckpt> --leaves
+  <leaves.npz> --replay <agot.replay.npz>` (per-call time, policy KL and value drift of full
+  vs compact, fp32 vs int8, against torch). Note that int8 is not round-off: on run7's real
+  leaves full int8 moves the value by 0.059 on average and up to 1.06
+  (`docs/optimization/iterations/008-compact-leaf-graph.md`), and at game level that noise
+  flips a near-tied move within the first few decisions of every self-play game on both the
+  old and the new driver (0/32 identical games vs the fp32 twins; a same-seed rerun is
+  bit-identical, `docs/optimization/FINDINGS.md`), so compare pipelines on their buffers in
+  fp32, never in int8.
+- Leaf evaluation cache (Rust driver, on by default; `agot train --leaf-cache {on,off}`, spec
+  key `leaf_cache`): about 73% of the leaves of one `selfplay()` call repeat a network input
+  already scored in that call, so the driver keeps each input's raw logits and values
+  (`agot-core/src/leaf_cache.rs`, keyed by a 256-bit digest of the encoded state and candidate
+  rows, one cache per evaluator, bounded at 2^16 entries) and only sends misses to Python.
+  Records are bit-identical with the cache on and off for any evaluator that is a pure
+  row-wise function (pinned by `tests/test_leaf_cache.py`; onnx-fp32 is one in practice). int8
+  is not, with or without the cache: its dynamic quantization range depends on the batch, so
+  the same leaf in two batches differs by up to 1.24 in a value. Gate and evaluation matches
+  get the cache too. Counters and per-section timers: `_core.selfplay_stats()`.
+- Speed record of 2026-11-20 (`docs/optimization/LEDGER.md`, iterations 006-010): one run8-shaped
+  iteration is 2.33x faster than commit `7952ae2` on this PC (self-play 2.57x, training pass
+  2.22x), and 2.30x with `--leaf-backend onnx-fp32`, which now costs about what int8 does and
+  has none of its value drift. None of it has been measured on Colab yet; with the whole A/B
+  tree pinned to two logical CPUs (the Colab shape, LEDGER 2026-11-22) the same protocol gives
+  2.78x median over four paired rounds — the advantage does not shrink when cores are scarce.
 - `checkpoints/` and `Rulebook/` are gitignored (run artifacts; the rulebook scans are
   copyrighted and must not be committed).
 
@@ -104,6 +145,15 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   of `index_add_`, which does not export); `tests/test_onnx_backend.py` pins the two against
   each other. Changing `forward_packed` means changing `PackedGraph` too and bumping
   `GRAPH_REVISION`, or a stale cached graph would quietly score the old arithmetic.
+  `PackedGraph(model, keep)` is the compact variant: only the trunks shrink (rows of each trunk
+  layer, the matching columns of the next layer, of both halves of `policy_head[0]` and of
+  `value_merge`); `policy_head` and `value_head` must stay full width, because their
+  replay-dead units do fire on real leaves (value change up to 1.08). The keep-sets are part
+  of the cache key and the file name, so a graph for other keep-sets, or the full graph, is
+  rebuilt rather than reused; `keep=None` is exactly the full graph. Dropping a unit is exact
+  only while it would have output zero, so calibrate on enough data (coverage, not a margin:
+  the dead action-trunk units sit just below zero, and a margin of 0.05 already keeps 138
+  instead of 83 units of `action_trunk[0]`).
 - `Game.step` applies one player decision and auto-advances every phase that needs no input;
   legal actions are non-empty only when a player must decide. `RustGame` caches its snapshot
   view per step (`StateView._version`); any new mutation path must invalidate it.
@@ -162,7 +212,9 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   `--resume`), `agot.log.jsonl` (one line per iteration), `agot-best.pt` (gate-approved best)
   and `agot.replay.npz` (compressed replay snapshot, ~15-60 MB at 100k examples, written every
   `--buffer-save-every` iterations and restored on resume, which removes the empty-buffer loss
-  spike). The log carries `seconds_selfplay`, `seconds_train`, `target_entropy` and
+  spike). The snapshot is compressed in a background thread (`ReplayBuffer.save_async`) that
+  every buffer mutation waits for, and written to a temporary that is renamed into place, so
+  an interrupted write keeps the previous one. The log carries `seconds_selfplay`, `seconds_train`, `target_entropy` and
   `buffer_restored`; with raw-visit targets the policy-loss floor is the mean target entropy
   (~2.2-2.6 nats), so the old "<2.0" smoke reading no longer applies.
 - The GUI writes human-vs-bot matches under `checkpoints/play-logs/`: a JSONL decision/result

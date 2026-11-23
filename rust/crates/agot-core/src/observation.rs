@@ -256,6 +256,24 @@ pub fn encode_state_into(state: &State, data: &DataSet, actor: Option<HouseId>, 
     // house's army sizes, fleet size and castle count together.
     let mut totals = [HouseTotals::default(); N_HOUSES];
     let mut mustering_areas = 0u32;
+    // Fortifications as a bit set over region indices (`MAX_REGIONS` = 64),
+    // so the board loop tests membership without scanning the list.
+    let mut fortified = 0u64;
+    let mut fortified_overflow = false;
+    for id in &state.fortifications {
+        if id.index() < 64 {
+            fortified |= 1u64 << id.index();
+        } else {
+            fortified_overflow = true;
+        }
+    }
+    let is_fortified = |id: RegionId| {
+        if id.index() < 64 && !fortified_overflow {
+            fortified & (1u64 << id.index()) != 0
+        } else {
+            state.fortifications.contains(&id)
+        }
+    };
     for id in state.region_ids() {
         let region = state.region(id);
         if region.mustering_points > 0 {
@@ -267,7 +285,7 @@ pub fn encode_state_into(state: &State, data: &DataSet, actor: Option<HouseId>, 
         if state.house(controller).is_none() {
             continue;
         }
-        if state.fortifications.contains(&id) {
+        if is_fortified(id) {
             totals[controller.index()].castles += 1;
         }
         for unit in UNIT_ORDER {
@@ -372,10 +390,14 @@ fn track_feature(state: &State, house: HouseId, track: Track) -> f32 {
 #[derive(Clone, Debug)]
 pub struct RegionCache {
     entries: Vec<Option<CachedBlock>>,
+    /// Bumped by [`RegionCache::clear`]; an entry from an older generation
+    /// is treated as absent, so clearing writes nothing.
+    generation: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct CachedBlock {
+    generation: u64,
     actor: Option<HouseId>,
     orders_revealed: bool,
     block: [f32; REGION_BLOCK],
@@ -385,12 +407,13 @@ impl RegionCache {
     pub fn new() -> RegionCache {
         RegionCache {
             entries: vec![None; MAX_REGIONS],
+            generation: 0,
         }
     }
 
     /// Drops every memoised block, so the cache can serve another state.
     pub fn clear(&mut self) {
-        self.entries.iter_mut().for_each(|entry| *entry = None);
+        self.generation += 1;
     }
 
     /// The block for `id`, computing and memoising it on first use.
@@ -407,7 +430,10 @@ impl RegionCache {
             self.entries.resize(index + 1, None);
         }
         if let Some(entry) = self.entries[index] {
-            if entry.actor == actor && entry.orders_revealed == orders_revealed {
+            if entry.generation == self.generation
+                && entry.actor == actor
+                && entry.orders_revealed == orders_revealed
+            {
                 return entry.block;
             }
         }
@@ -421,6 +447,7 @@ impl RegionCache {
             &mut block,
         );
         self.entries[index] = Some(CachedBlock {
+            generation: self.generation,
             actor,
             orders_revealed,
             block,
@@ -1256,6 +1283,43 @@ mod tests {
                 expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn a_cleared_region_cache_serves_the_new_state() {
+        let data = data();
+        let first = planning_state(&data);
+        let mut second = first.clone();
+        let winterfell = data.map.lookup("winterfell").expect("winterfell");
+        second.region_mut(winterfell).units[UnitType::Knight.index()] += 2;
+        let action = Action::place_order(HouseId(0), winterfell, OrderKey(0));
+
+        let mut shared = RegionCache::new();
+        let mut out = vec![0.0f32; ACTION_DIM];
+        encode_action_into(
+            &first,
+            &data,
+            &action,
+            Some(HouseId(0)),
+            &mut out,
+            &mut shared,
+        );
+        let stale = out.clone();
+        shared.clear();
+        encode_action_into(
+            &second,
+            &data,
+            &action,
+            Some(HouseId(0)),
+            &mut out,
+            &mut shared,
+        );
+        let fresh = encode_action(&second, &data, &action, Some(HouseId(0)));
+        assert_ne!(stale, fresh, "the two states must encode differently");
+        assert_eq!(
+            out.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            fresh.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
     }
 
     /// A Patchface task: the chooser names a card from the *opponent's* hand.
