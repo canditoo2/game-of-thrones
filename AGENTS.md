@@ -5,14 +5,16 @@ rules engine, search and encoder (`rust/`) behind a thin Python facade, an optio
 scorer network (`nn/`) and the self-play training loop (`training/`). Everything is driven by
 the `agot` CLI.
 
-**Current direction (2026-11-11):** the next Colab run is **`run6`** (checkpoints under
-`/content/drive/MyDrive/agot/run6`). The notebook launches `--simulations 128
---determinizations 1 --phase-budgets default --leaf-backend onnx-int8 --games 64
---batch-games 16 --buffer 80000 --gate-games 120 --gate-mode deferred`. The single PIMC
-world is exact (the two determinizations encode bit-identically), the phase caps cut scored
-rows by ~40%, and ONNX int8 cuts the leaf forward 2.6x. This PC remains the build-and-verify
-machine and must not start heavy runs unless asked. `run5` reached 105 iterations and is the
-warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also valid.
+**Current direction (2026-11-22):** the next Colab run is **`run8`** (checkpoints under
+`/content/drive/MyDrive/agot/run8`), warm-started from run7's finished weights (run7: a
+fresh 500-iteration run, int8 leaves). The notebook launches `--simulations 128
+--determinizations 1 --phase-budgets default --leaf-backend onnx-fp32 --games 64
+--batch-games 16 --buffer 80000 --gate-games 120 --gate-mode deferred`: training moved to
+fp32 leaves because with the leaf cache and the compact graph they cost about what int8
+does and never move a leaf value. The single PIMC world is exact (the two determinizations
+encode bit-identically) and the phase caps cut scored rows by ~40%. This PC remains the
+build-and-verify machine and must not start heavy runs unless asked. run1/run2 are void,
+run3 is a pre-change baseline, run7 is the strongest existing checkpoint.
 
 ## Commands (Windows/PowerShell — invoke the venv explicitly)
 
@@ -69,14 +71,15 @@ warm-start candidate (`--resume` from its `agot.pt`); a fresh start is also vali
   native). The reference driver remains only for hand-written evaluators and mixed configs.
 - Leaf inference: `--leaf-backend {auto,torch,onnx-int8,onnx-fp32}` (train/gate/evaluate/gauntlet,
   default `auto`) picks the engine that scores search leaves (`agot/nn/onnx_backend.py`).
-  `auto` resolves to `onnx-int8` for `agot train` and to `onnx-fp32` for evaluate/gauntlet when
+  `auto` resolves to `onnx-fp32` everywhere (train included, since run8) when
   `pip install -e ".[onnx]"` (onnxruntime + onnx) is present, and to `torch` otherwise, so
   `torch` stays the only engine CI needs and a pure-PyTorch install keeps working; it is
   resolved before the spec is built, so a checkpoint or a queued gate always records a concrete
-  engine. Training gets int8 because that is the engine run6 already selects and the only one
-  that halves self-play (2.35–2.44x end to end, mean policy KL ~4e-4 nats, inside the budget
-  `tests/test_onnx_backend.py` enforces); evaluation keeps fp32, which is a round-off away from
-  torch (7e-8 nats) and still 1.5–2.2x faster. The ONNX backends cache
+  engine. Training keeps fp32 because with the leaf cache and the compact graph it costs about
+  what int8 does (2.30x vs 2.33x per iteration against the pre-cache baseline) and is a
+  round-off away from torch (7e-8 nats); int8 (2.35–2.44x end to end alone, mean policy KL
+  ~4e-4 nats, value |diff| mean 0.059 max 1.06 on real leaves) stays one explicit flag away.
+  The ONNX backends cache
   `<checkpoint stem>.<backend>.onnx` plus a JSON key beside the checkpoint and refuse a graph
   whose key (checkpoint hash, weight digest, model config, backend, `GRAPH_REVISION`) no
   longer matches. Measured at 24 leaves x 15 candidates and one thread: torch 1316 us,

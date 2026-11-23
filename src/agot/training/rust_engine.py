@@ -86,15 +86,15 @@ def resolve_phase_budgets(name: str | None) -> dict[str, int] | None:
 LEAF_BACKENDS = ("torch", "onnx-int8", "onnx-fp32")
 
 #: What ``--leaf-backend auto`` means when the optional extra is installed.
-#: Training gets the int8 graph, which is what the run at the top of AGENTS.md
-#: (`run6`) already selects and the only engine that halves self-play: 2.35x the
-#: torch path end to end at batch 8, at a measured 4e-4 nats mean policy KL on a
-#: trained net, inside the budget `tests/test_onnx_backend.py` enforces.
-#: Evaluation, gauntlet and play get the float32 graph instead: it is a
-#: round-off away from torch (7e-8 nats), so numbers stay comparable with past
-#: results, and it is still 1.5-2.2x the torch path on the 1-2 leaf batches
-#: those commands use.
-AUTO_TRAIN_LEAF_BACKEND = "onnx-int8"
+#: Since run8 every command resolves to the float32 graph: with the leaf cache
+#: and the compact graph it costs about what the int8 graph does (2.30x vs
+#: 2.33x per iteration against the pre-cache baseline) and, unlike int8, it
+#: never moves a leaf value (int8 on real leaves: value |diff| mean 0.059, max
+#: 1.06). It is a round-off away from torch (7e-8 nats), so numbers stay
+#: comparable with past results, and still 1.5-2.2x the torch path on the
+#: 1-2 leaf batches evaluate/gauntlet/play use. ``onnx-int8`` stays one
+#: explicit ``--leaf-backend`` flag away.
+AUTO_TRAIN_LEAF_BACKEND = "onnx-fp32"
 AUTO_LEAF_BACKEND = "onnx-fp32"
 
 
@@ -111,11 +111,11 @@ def onnx_runtime_available() -> bool:
 def resolve_leaf_backend(backend: str | None, *, training: bool = False) -> str | None:
     """Turn ``auto`` into a concrete engine, leaving every other value alone.
 
-    ``training`` picks the int8 graph: a training run is the one place where the
-    leaf batch is big and long-lived enough to pay for quantization, and the
-    learning signal already tolerates that noise (run6 trains on it). ``None``
-    stays ``None``: for ``agot gate`` it means "use whatever the run being
-    judged used", which is not a decision this helper can make.
+    Since run8 ``training`` also resolves to the float32 graph: with the leaf
+    cache and the compact graph it costs about what the int8 graph does, and
+    it never moves a leaf value. ``None`` stays ``None``: for ``agot gate`` it
+    means "use whatever the run being judged used", which is not a decision
+    this helper can make.
     """
     if backend != "auto":
         return backend

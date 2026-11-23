@@ -344,8 +344,10 @@ def test_auto_resolves_to_a_concrete_engine(monkeypatch) -> None:
     """``auto`` is a CLI alias: it must never reach a spec as-is."""
     monkeypatch.setattr(rust_engine, "onnx_runtime_available", lambda: True)
     assert rust_engine.resolve_leaf_backend("auto") == "onnx-fp32"
-    # A training run pays for quantization and gets the fast engine back.
-    assert rust_engine.resolve_leaf_backend("auto", training=True) == "onnx-int8"
+    # Since run8 a training run resolves to the exact fp32 engine: with the leaf
+    # cache and the compact graph it costs about what int8 does, without int8's
+    # value drift (docs/optimization/FINDINGS.md, "int8 search fidelity").
+    assert rust_engine.resolve_leaf_backend("auto", training=True) == "onnx-fp32"
     monkeypatch.setattr(rust_engine, "onnx_runtime_available", lambda: False)
     assert rust_engine.resolve_leaf_backend("auto") == "torch"
     assert rust_engine.resolve_leaf_backend("auto", training=True) == "torch"
